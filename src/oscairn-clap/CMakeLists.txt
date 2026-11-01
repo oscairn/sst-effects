@@ -21,3 +21,14 @@ add_executable(oscairn-effects-tests tests/OscairnEffectsTests.cpp)
 target_link_libraries(oscairn-effects-tests PRIVATE oscairn-effects-core)
 target_include_directories(oscairn-effects-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/catch2)
 
+# The stock-vs-fork gate (scripts/stock-gate.sh): the same render program against this branch's
+# headers and, when OSCAIRN_STOCK_BASE_INCLUDE names an upstream include/ directory, against those.
+add_executable(oscairn-stock-render tests/StockRender.cpp)
+target_link_libraries(oscairn-stock-render PRIVATE oscairn-effects-core)
+if (OSCAIRN_STOCK_BASE_INCLUDE)
+  add_executable(oscairn-stock-render-base tests/StockRender.cpp)
+  target_include_directories(oscairn-stock-render-base BEFORE PRIVATE ${OSCAIRN_STOCK_BASE_INCLUDE})
+  target_include_directories(oscairn-stock-render-base PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(oscairn-stock-render-base PRIVATE clap simde sst-basic-blocks sst-filters sst-waveshapers fmt)
+  target_compile_definitions(oscairn-stock-render-base PRIVATE _USE_MATH_DEFINES=1)
+endif()
