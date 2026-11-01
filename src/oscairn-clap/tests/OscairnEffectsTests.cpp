@@ -26,29 +26,50 @@
 #include <vector>
 
 // ---- allocation counting: process() must not allocate ----
+// Every replaceable form is defined, so no allocation pairs a library's operator new with ours.
 static thread_local bool countAllocations = false;
 static thread_local long allocations = 0;
-void *operator new(std::size_t n)
+static void *allocate(std::size_t n, std::size_t align = 0) noexcept
 {
     if (countAllocations)
         ++allocations;
-    if (void *p = std::malloc(n ? n : 1))
+    if (!align)
+        return std::malloc(n ? n : 1);
+    align = std::max(align, sizeof(void *));
+    return std::aligned_alloc(align, (n + align - 1) / align * align + (n ? 0 : align));
+}
+static void *allocateOrAbort(std::size_t n, std::size_t align = 0)
+{
+    if (void *p = allocate(n, align))
         return p;
     std::abort();
 }
-void *operator new(std::size_t n, std::align_val_t a)
+void *operator new(std::size_t n) { return allocateOrAbort(n); }
+void *operator new[](std::size_t n) { return allocateOrAbort(n); }
+void *operator new(std::size_t n, std::align_val_t a) { return allocateOrAbort(n, (std::size_t)a); }
+void *operator new[](std::size_t n, std::align_val_t a) { return allocateOrAbort(n, (std::size_t)a); }
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept { return allocate(n); }
+void *operator new[](std::size_t n, const std::nothrow_t &) noexcept { return allocate(n); }
+void *operator new(std::size_t n, std::align_val_t a, const std::nothrow_t &) noexcept
 {
-    if (countAllocations)
-        ++allocations;
-    const auto al = std::max<std::size_t>((std::size_t)a, sizeof(void *));
-    if (void *p = std::aligned_alloc(al, (n + al - 1) / al * al))
-        return p;
-    std::abort();
+    return allocate(n, (std::size_t)a);
+}
+void *operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t &) noexcept
+{
+    return allocate(n, (std::size_t)a);
 }
 void operator delete(void *p) noexcept { std::free(p); }
+void operator delete[](void *p) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
 void operator delete(void *p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::align_val_t) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void *p, const std::nothrow_t &) noexcept { std::free(p); }
+void operator delete[](void *p, const std::nothrow_t &) noexcept { std::free(p); }
+void operator delete(void *p, std::align_val_t, const std::nothrow_t &) noexcept { std::free(p); }
+void operator delete[](void *p, std::align_val_t, const std::nothrow_t &) noexcept { std::free(p); }
 
 namespace
 {
@@ -594,13 +615,15 @@ TEST_CASE("Main-thread work runs safely beside processing")
     std::vector<float> inL, inR;
     signal(4800, inL, inR);
     std::atomic<bool> done{false};
-    std::atomic<int> errors{0};
+    std::atomic<int> errors{0}, handled{0};
     // No Catch macros on this thread: Catch2's assertions are not thread-safe.
     std::thread audio([&] {
         std::vector<float> bl(64), br(64), ol(64), orr(64);
         Events ev;
         ev.e.reserve(1);
-        for (int k = 0; k < 600; ++k)
+        // At least 600 blocks, and until the main thread has handled several callbacks
+        // (bounded, so a broken callback path fails instead of hanging).
+        for (int k = 0; k < 600 || (handled < 8 && k < 2000000); ++k)
         {
             ev.e.clear();
             if (k % 15 == 0)
@@ -621,7 +644,7 @@ TEST_CASE("Main-thread work runs safely beside processing")
         }
         done = true;
     });
-    int handled = 0, seen = 0;
+    int seen = 0;
     while (!done)
     {
         if (pl.host.callbacks.load() != seen)
