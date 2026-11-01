@@ -1,0 +1,69 @@
+# Oscairn effects (src/oscairn-clap, doc/oscairn-plan.md): build the plugins, run upstream's
+# tests and ours, and the stock-vs-fork gate, on Linux x86_64, Linux ARM64 and macOS, and the
+# tests under ASan/UBSan and TSan.
+name: Oscairn
+on:
+  push:
+    branches:
+      - oscairn
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plugin:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            flags: ""
+            gate: true
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            flags: ""
+            gate: true
+          - name: macOS arm64
+            os: macos-15
+            flags: ""
+            gate: true
+          - name: Linux ARM64 ASan UBSan
+            os: ubuntu-24.04-arm
+            flags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
+            gate: false
+          - name: Linux ARM64 TSan
+            os: ubuntu-24.04-arm
+            flags: "-fsanitize=thread"
+            gate: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the stock gate needs the upstream history (merge-base with origin/main)
+      - name: Install Ninja
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then sudo apt-get update && sudo apt-get install -y ninja-build; else brew install ninja; fi
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSST_EFFECTS_BUILD_OSCAIRN=ON \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}" -DCMAKE_MODULE_LINKER_FLAGS="${{ matrix.flags }}"
+      - name: Build
+        run: cmake --build build --target oscairn-effects oscairn-effects-tests sst-effects-test
+      - name: Upstream tests
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: ./build/sst-effects-test
+      - name: Oscairn tests
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: ./build/src/oscairn-clap/oscairn-effects-tests
+      - name: Stock-vs-fork gate
+        if: matrix.gate
+        run: ./src/oscairn-clap/scripts/stock-gate.sh build-stock-gate
