@@ -21,6 +21,10 @@ add_executable(oscairn-effects-tests tests/OscairnEffectsTests.cpp)
 target_link_libraries(oscairn-effects-tests PRIVATE oscairn-effects-core)
 target_include_directories(oscairn-effects-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/catch2)
 
+# Runs a WAV file through a plugin, for measurements against reference renders (plan, section 11).
+add_executable(oscairn-effects-render tools/OscairnEffectsRender.cpp)
+target_link_libraries(oscairn-effects-render PRIVATE oscairn-effects-core)
+
 # The stock-vs-fork gate (scripts/stock-gate.sh): the same render program against this branch's
 # headers and, when OSCAIRN_STOCK_BASE_INCLUDE names an upstream include/ directory, against those.
 add_executable(oscairn-stock-render tests/StockRender.cpp)
