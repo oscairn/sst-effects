@@ -492,13 +492,30 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     make the plugin's editor show platform numbers.
 11. **Envelope followers in the plugins** (section 4) rather than a host node.
 12. **Tempo fallback** of 120 BPM when the host gives no tempo.
+13. **Fitted EQs at other sample rates.** The reference's five-band EQ is a set of bilinear
+    sections designed at 44.1 kHz, so its response near 22 kHz is shaped by that rate. The plugin
+    keeps the 44.1 kHz response at other rates: same centre and mid-gain edge frequencies in Hz
+    for peaking bands, same half-gain frequency for shelves. This holds to 0.05 dB below 4 kHz
+    for bands up to 11.2 kHz, but not for very wide bands placed near 20 kHz (about 1.1 dB below
+    4 kHz in the extreme test setting). The alternatives are a per-change coefficient fit to the
+    44.1 kHz response, or oversampling to 44.1 kHz multiples; both cost more. Section 15, M1.
+14. **Converter value laws.** The Data List prints rounded labels for the EQ frequency and Q
+    tables (125 Hz is 125.9 Hz, 500 Hz is 501.2 Hz). The converter should use the laws measured
+    in section 15 (frequency index i is 10^((i + 48) / 40) Hz, Q index j is 0.5 × 2^(j / 12),
+    gain is (value − 180) / 10 dB), not the printed labels.
+15. **Clock-seeded and uninitialized stock effects.** FloatyDelay, and Phaser's modulator (random
+    waves), seed their generators from the clock, and Phaser and RotarySpeaker read memory they
+    never initialize with some parameters. Oscairn needs repeatable renders; when those effects
+    become modes, the wrapper will reseed them from a fixed seed in a new file (stock DSP
+    unchanged), and the uninitialized reads go upstream as bug reports. Section 15, M0.
 
 ## 14. Risks and not verified
 
-- Whether every sst-effects bus effect is deterministic given a deterministic RNG (unverified
-  until the M0 tests run it).
-- Reverb 2's per-instance memory with its maximum delay sizes; a 64-context engine could need a
-  lot of memory if many contexts are prepared (measured in M0).
+- Determinism of the stock effects: settled in M0 (decision 15).
+- Memory: one prepared Reverb 2 context is 14.5 MB (`sizeof` on the arm64 macOS build; Reverb 1
+  2.2 MB, Five-band EQ 576 bytes), so 64 prepared Reverb 2 contexts would be about 930 MB.
+  Idle contexts allocate nothing. Reverb modes written later should size their buffers to the
+  rate and the longest setting.
 - Whether the Surge XT effects listed as borrowed port cleanly onto the `FXConfig` contract
   (unverified; each is a port of a `SurgeStorage` class).
 - The usage counts' "active" rule does not check whether a part's elements are routed to the
@@ -507,4 +524,103 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
 
 ## 15. Implementation log
 
-(Filled in as milestones land.)
+### Milestone 0: groundwork (done 2026-11-01)
+
+Built:
+
+- `src/oscairn-clap/`: the CLAP module `oscairn-effects.clap` (`OscairnEffects.cpp`, entry in
+  `OscairnEffectsEntry.cpp`), the effects' configuration (`OscairnConfig.h`: block size 16, 32
+  parameter slots, a per-effect xorshift generator with a fixed seed instead of `rand()`), and the
+  first category plugin, Oscairn FX Reverb, with the stock Reverb 1 and Reverb 2 as modes. Mode
+  changes are built on the main thread and swapped in at a block boundary; up to 64 effect
+  contexts share an engine; state is text; latency 16 samples; denormals are flushed while
+  processing; `CLAP_PROCESS_SLEEP` once the tail has ended.
+- `libs/oscairn-clap/`: `effect-contexts.h` vendored unchanged from Oscairn `4e84501`.
+- `cmake/oscairn-deps.cmake` and two hooks in `CMakeLists.txt` (the only upstream file touched):
+  the option, pinned dependencies (sst-basic-blocks `38cf04a`, sst-filters `87a171b`,
+  sst-waveshapers `dd12f31`, sst-plugininfra `8e4271c`, eurorack `888298b`, simde 0.7.2, CLAP
+  1.2.7) built position independent, and `add_subdirectory`.
+- Tests (`tests/OscairnEffectsTests.cpp`), each checked to fail with its change undone (a
+  mutation per test; the threaded test's mutation, a non-atomic mode field, is caught only under
+  TSan): the host's load checks; stock modes bit-exact with the templates; block-size
+  independence (1, 37, 512 and mixed blocks, with parameter events); state round trip and bad
+  state; contexts independent of each other and equal to separate instances, capacity 64,
+  parent removal; mode changes built on the main thread; no allocation in `process`; tail and
+  sleep; Reverb 2's T30 at 44.1, 48 and 96 kHz (1.8545, 1.8544, 1.8546 s; proposed tolerance
+  5%); main-thread work beside a processing thread. The denormal flush has no test.
+- The stock-vs-fork gate (`scripts/stock-gate.sh`, `tests/StockRender.cpp`): 10 stock bus effects
+  × 9 parameter sets, rendered with this branch's headers and with the base commit's, must be
+  bit-identical. Checked to fail when a stock header is changed audibly.
+- CI (`.github/workflows/oscairn.yml`): Linux x86_64, Linux ARM64 and macOS arm64 run upstream's
+  tests, ours and the gate; Linux ARM64 runs both suites under ASan/UBSan and TSan.
+
+Departures and findings:
+
+- **Stock effects are not repeatable as shipped** (decision 15). The gate first failed against
+  itself: FloatyDelay and Phaser's modulator seed from the clock, and with some parameters Phaser
+  and RotarySpeaker read uninitialized memory (seen by filling allocations with two different
+  bytes). The render program reseeds those generators and fills every allocation with one byte.
+- The tail extension reports "infinite" while the tail is active and 0 after; per-mode lengths
+  come when modes report them (`shortcut:` comment in the code).
+- The first CI runs failed on the gate (a relative build path; SSE4.1 intrinsics on x86_64,
+  fixed with `-march=native` for the render programs as upstream's test target does), on an
+  allocation-form mismatch under Linux ASan (the tests now define every form), and on a timing
+  assumption in the threaded test. Fixed in `fecc822`, `20cd378` and `8664880`; CI run
+  41360666098 on `8664880` passed all five jobs, with the gate passing in the three that run it.
+- Local checks before each push: macOS arm64 build, upstream tests, ours, ASan/UBSan, TSan and
+  the gate; Linux ARM64 (Docker, Ubuntu 24.04, GCC 13.3) build, ours and the gate, and
+  ASan/UBSan for the allocation fix. Linux x86_64 was checked only in CI.
+- Upstream test merge: `upstream/main` is still `987b39d`, the base, so there was nothing to
+  merge and no conflict.
+
+### Milestone 1: measurement tooling and the five-band EQ (in progress)
+
+Measurement code is in the measurement repository's `fx/` (MIT, synthetic self-tests only):
+stereo reading, the transfer function from dry and wet renders of a harmonic source (each
+harmonic's amplitude ratio, so renders need not be aligned), standard EQ section responses, and
+`compare_transfer.py`, which compares our effect's transfer function with the reference's
+against the same dry render. `tools/OscairnEffectsRender.cpp` runs a WAV file through a plugin.
+
+Probes: one AN-X-engine part, a saw (no drift, filters off) at note 24 (harmonics every 32.7 Hz)
+or note 12, through Insertion A, other effects off, and dry and flat-EQ references. Three batches
+on the shared recorder at 44.1 kHz, no dropouts found: fx1 (66 renders: peaking bands at five
+frequencies × three gains × three Qs, shelves, output level, bands 2 and 4), fx2 (30: shelves at
++3, +6, +12 and −6 dB from note 12, a level check), fx3 (51: peaking Q near Nyquist, eight
+frequencies 4–20 kHz × six Qs). Repeatability, dry against dry or flat: 0.002 dB in fx1, 0.001
+dB in fx3, 0.12 dB in fx2 (around 9–17 kHz; the note-12 source varies between renders, so fx2
+is used below 2 kHz only).
+
+Laws fitted to the renders (no free parameters left; reference behaviour, 44.1 kHz):
+
+| Section | Law | Worst deviation, model against renders |
+| --- | --- | --- |
+| Flat setting | Transparent | 0.002 dB (fx1) |
+| Output level | Gain (value − 180) / 10 dB | 11.9999 dB measured for +12 |
+| Peaking bands 2–4 | Bilinear peaking section at the set frequency and gain; effective Q = Q × 10^(−\|gain\| / 40) × r, r = min(1, 1.25517 − 4.8172e-5 × f/Hz − 0.1 × log10 Q); bands 2, 3 and 4 identical | 0.007 dB over 96 renders (fx1, fx3), 20 Hz–19 kHz. r fitted on 43 points, residual 0.00015, and independent of gain |
+| Shelves | Bilinear shelf, slope 0.5, the set frequency as the corner on the flat side: the prewarped frequency scaled by 10^(\|gain\|/40), up for the low shelf, down for the high shelf | 0.022 dB over 12 renders (fx1); fx2's +3, +6 and −6 dB shelves agree to 0.033 dB below 2 kHz |
+| Parameter values | Frequency index i: 10^((i + 48) / 40) Hz; Q index j: 0.5 × 2^(j/12) | Follows from the fits above (decision 14) |
+| Level | No level dependence seen for a 12 dB louder input, within fx2's 0.12 dB repeatability (0.175 dB worst) | Not resolved below about 0.2 dB |
+
+The circuit-style EQ type measured as linear standard sections; no circuit behaviour was found at
+these levels.
+
+Built: `effects/FiveBandEq.h` (written; follows the sst-effects effect contract) as mode
+"Five-band EQ" of a new plugin, Oscairn FX EQ (`org.oscairn.effects.eq`). Parameters are in Hz,
+Q and dB in the platform's parameter order.
+
+Gates (tolerances proposed):
+
+- Against the reference renders, the plugin run on each probe's flat render with converted
+  values: worst 0.0225 dB over fx1's 61 renders and 0.0017 dB over fx3's 48, 20 Hz–19 kHz
+  (proposed tolerance 0.05 dB). fx2: 0.033 dB below 2 kHz, up to 0.63 dB above (source noise,
+  see above). Checked against the renders the laws were fitted to; no separate hold-out batch
+  yet.
+- In the plugin tests: transparent when flat to 1e-9; the fitted design to 0.01 dB at 44.1 kHz
+  (three settings, 20 Hz–20 kHz); at 48 and 96 kHz, within 0.05 dB of the 44.1 kHz design up to
+  4 kHz for settings with bands up to 11.2 kHz (worst 0.0093 dB at 48 kHz, 0.0447 dB at 96 kHz;
+  up to 0.355 dB from 4 to 16 kHz, printed). The setting with a wide band at 20 kHz is printed,
+  not gated: 1.14 dB (48 kHz) and 1.17 dB (96 kHz) below 4 kHz (decision 13). Each of these tests
+  fails with its law changed (output gain, Q law constant, shelf slope, rate matching).
+
+Not done in M1 yet: the Part 3-band and 2-band EQs and the 5-band Master EQ (to be measured the
+same way), a hold-out batch, and listening.
