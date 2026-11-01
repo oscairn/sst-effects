@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -664,4 +665,152 @@ TEST_CASE("Main-thread work runs safely beside processing")
     pl.p->on_main_thread(pl.p);
     REQUIRE(errors == 0);
     REQUIRE(handled > 0);
+}
+
+// ---- Five-band EQ (plan, section 15, M1) ----
+namespace
+{
+constexpr const char *eqId = "org.oscairn.effects.eq";
+
+// The fitted design, written out independently of effects/FiveBandEq.h: |H| in dB of each
+// section at frequency f, for a sample rate.
+double sectionDb(std::complex<double> b0, double b1, double b2, double a0, double a1, double a2,
+                 double f, double rate)
+{
+    const auto z = std::polar(1.0, -2 * M_PI * f / rate);
+    return 20 * std::log10(std::abs((b0 + b1 * z + b2 * z * z) / (a0 + a1 * z + a2 * z * z)));
+}
+double peakDb(double f, double fc, double g, double q, double rate)
+{
+    const double A = std::pow(10, g / 40), w = 2 * M_PI * fc / rate;
+    const double r = std::min(1.0, std::max(0.05, 1.25517 - 4.8172e-5 * fc - 0.1 * std::log10(q)));
+    const double al = std::sin(w) / (2 * q * std::pow(10, -std::abs(g) / 40) * r);
+    return sectionDb(1 + al * A, -2 * std::cos(w), 1 - al * A, 1 + al / A, -2 * std::cos(w),
+                     1 - al / A, f, rate);
+}
+double shelfDb(double f, double fc, double g, bool high, double rate)
+{
+    const double A = std::pow(10, std::abs(g) / 40), G = std::pow(10, g / 40);
+    const double w = 2 * std::atan(std::tan(M_PI * fc / rate) * (high ? 1 / A : A));
+    const double q = 1 / std::sqrt((G + 1 / G) * (1 / 0.5 - 1) + 2);
+    const double c = std::cos(w), s = std::sqrt(G) * std::sin(w) / q;
+    if (high)
+        return sectionDb(G * ((G + 1) + (G - 1) * c + s), -2 * G * ((G - 1) + (G + 1) * c),
+                         G * ((G + 1) + (G - 1) * c - s), (G + 1) - (G - 1) * c + s,
+                         2 * ((G - 1) - (G + 1) * c), (G + 1) - (G - 1) * c - s, f, rate);
+    return sectionDb(G * ((G + 1) - (G - 1) * c + s), 2 * G * ((G - 1) - (G + 1) * c),
+                     G * ((G + 1) - (G - 1) * c - s), (G + 1) + (G - 1) * c + s,
+                     -2 * ((G - 1) + (G + 1) * c), (G + 1) + (G - 1) * c - s, f, rate);
+}
+
+struct EqSetting
+{
+    double lf, lg, q2, f2, g2, q3, f3, g3, q4, f4, g4, hf, hg, out;
+    double modelDb(double f, double rate) const
+    {
+        return shelfDb(f, lf, lg, false, rate) + peakDb(f, f2, g2, q2, rate) +
+               peakDb(f, f3, g3, q3, rate) + peakDb(f, f4, g4, q4, rate) +
+               shelfDb(f, hf, hg, true, rate) + out;
+    }
+};
+
+const std::vector<EqSetting> eqSettings{
+    {100, 0, 2, 400, 12, 2, 1000, 0, 2, 4000, 0, 8000, 0, 0},       // one boost
+    {63.1, -12, 0.5, 125.9, -6, 8, 2512, 9, 16, 11220, -12, 3981, 6, -3}, // all bands
+    {251, 6, 1, 5623, 18, 4, 14125, -18, 0.71, 19953, 12, 1000, -12, 6},  // high, narrow
+};
+
+// The plugin's magnitude response at f, from its impulse response.
+std::vector<double> eqResponseDb(const EqSetting &s, double rate, const std::vector<double> &freqs)
+{
+    Plugin pl(eqId);
+    const char *names[] = {"Low Shelf Frequency", "Low Shelf Gain", "Band 2 Q", "Band 2 Frequency",
+                           "Band 2 Gain", "Band 3 Q", "Band 3 Frequency", "Band 3 Gain",
+                           "Band 4 Q", "Band 4 Frequency", "Band 4 Gain", "High Shelf Frequency",
+                           "High Shelf Gain", "Output Level"};
+    const double *v = &s.lf;
+    for (int i = 0; i < 14; ++i)
+        pl.set(paramIdByName(pl.p, "Five-band EQ", names[i]), v[i]);
+    pl.activate(rate);
+    const size_t n = (size_t)rate;
+    std::vector<float> inL(n, 0), inR(n, 0), r;
+    inL[0] = inR[0] = 1;
+    auto out = pl.render(inL, inR, r, {512}, {}, false);
+    std::vector<double> db;
+    for (double f : freqs)
+    {
+        std::complex<double> acc = 0;
+        for (size_t i = L; i < n; ++i)
+            acc += (double)out[i] * std::polar(1.0, -2 * M_PI * f * (double)(i - L) / rate);
+        db.push_back(20 * std::log10(std::abs(acc)));
+    }
+    return db;
+}
+
+std::vector<double> logFreqs(double lo, double hi, int count)
+{
+    std::vector<double> f;
+    for (int i = 0; i < count; ++i)
+        f.push_back(lo * std::pow(hi / lo, i / (count - 1.0)));
+    return f;
+}
+} // namespace
+
+TEST_CASE("Five-band EQ is transparent when flat")
+{
+    // To 1e-9 (-180 dBFS): the sections' arithmetic may be contracted into fused multiply-adds,
+    // which leaves residues near 1e-14 rather than bit-exact output.
+    std::vector<float> inL, inR, r;
+    signal(48000, inL, inR);
+    Plugin pl(eqId);
+    pl.activate();
+    auto out = pl.render(inL, inR, r, {37});
+    size_t bad = 0, first = 0;
+    for (size_t i = 0; i + L < inL.size(); ++i)
+        if (!(std::abs(out[i + L] - inL[i]) <= 1e-9f && std::abs(r[i + L] - inR[i]) <= 1e-9f) && !bad++)
+            first = i;
+    INFO("first difference at " << first << ": " << out[first + L] << " vs " << inL[first] << ", "
+                                << r[first + L] << " vs " << inR[first]);
+    REQUIRE(bad == 0);
+}
+
+TEST_CASE("Five-band EQ follows its fitted design at 44.1 kHz")
+{
+    // The design was fitted to reference renders at 44.1 kHz (plan, section 15); this checks the
+    // plugin implements it, to 0.01 dB from 20 Hz to 20 kHz.
+    const auto freqs = logFreqs(20, 20000, 61);
+    for (const auto &s : eqSettings)
+    {
+        auto got = eqResponseDb(s, 44100, freqs);
+        double worst = 0;
+        for (size_t k = 0; k < freqs.size(); ++k)
+            worst = std::max(worst, std::abs(got[k] - s.modelDb(freqs[k], 44100)));
+        INFO("worst " << worst << " dB");
+        REQUIRE(worst < 0.01);
+    }
+}
+
+TEST_CASE("Five-band EQ keeps its 44.1 kHz response at 48 and 96 kHz")
+{
+    // Proposed tolerance: 0.05 dB up to 4 kHz against the 44.1 kHz design (which matches the
+    // reference renders to 0.023 dB), for settings with every band at or below 11.2 kHz. Above
+    // 4 kHz, and for bands near 44.1 kHz's Nyquist frequency (setting 2), each rate's bilinear
+    // warping differs; those deviations are printed, not gated (plan, decision 13).
+    const auto low = logFreqs(20, 4000, 41), high = logFreqs(4000, 16000, 21);
+    for (double rate : {48000.0, 96000.0})
+        for (size_t i = 0; i < eqSettings.size(); ++i)
+        {
+            const auto &s = eqSettings[i];
+            auto gl = eqResponseDb(s, rate, low), gh = eqResponseDb(s, rate, high);
+            double wl = 0, wh = 0;
+            for (size_t k = 0; k < low.size(); ++k)
+                wl = std::max(wl, std::abs(gl[k] - s.modelDb(low[k], 44100)));
+            for (size_t k = 0; k < high.size(); ++k)
+                wh = std::max(wh, std::abs(gh[k] - s.modelDb(high[k], 44100)));
+            std::printf("Five-band EQ setting %zu at %.0f Hz: %.4f dB to 4 kHz, %.3f dB 4-16 kHz "
+                        "from the 44.1 kHz design\n",
+                        i, rate, wl, wh);
+            if (i < 2)
+                REQUIRE(wl < 0.05);
+        }
 }

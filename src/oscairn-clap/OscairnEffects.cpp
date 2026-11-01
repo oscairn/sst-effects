@@ -18,6 +18,7 @@
 #include "sst/basic-blocks/simd/setup.h"
 #include "sst/effects/Reverb1.h"
 #include "sst/effects/Reverb2.h"
+#include "effects/FiveBandEq.h"
 
 #include <algorithm>
 #include <array>
@@ -126,6 +127,9 @@ struct Category
 const char *const reverbFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_REVERB,
                                       CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
+const char *const eqFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_EQUALIZER,
+                                  CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+
 const std::vector<Category> &categories()
 {
     static const std::vector<Category> all = [] {
@@ -141,6 +145,16 @@ const std::vector<Category> &categories()
         reverb.modes.push_back(mode<sst::effects::reverb2::Reverb2<Cfg>>(2, "Reverb 2"));
         reverb.finish();
         c.push_back(std::move(reverb));
+
+        Category eq{{CLAP_VERSION_INIT, "org.oscairn.effects.eq", "Oscairn FX EQ", "Oscairn",
+                     "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                     "Equalizers, one mode per design", eqFeatures},
+                    {},
+                    1,
+                    {}};
+        eq.modes.push_back(mode<oscairn_fx::eq::FiveBandEq<Cfg>>(1, "Five-band EQ"));
+        eq.finish();
+        c.push_back(std::move(eq));
         return c;
     }();
     return all;
