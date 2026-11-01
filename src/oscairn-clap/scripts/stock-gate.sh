@@ -15,9 +15,19 @@ git -C "$root" archive "$base" include | tar -x -C "$build/base-include"
 # shellcheck disable=SC2086
 cmake -S "$root" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSST_EFFECTS_BUILD_OSCAIRN=ON \
   -DOSCAIRN_STOCK_BASE_INCLUDE="$build/base-include/include" ${STOCK_GATE_CMAKE_ARGS:-} > /dev/null
-cmake --build "$build" --target oscairn-stock-render oscairn-stock-render-base > /dev/null
-"$build/src/oscairn-clap/oscairn-stock-render" > "$build/stock-fork.txt"
-"$build/src/oscairn-clap/oscairn-stock-render-base" > "$build/stock-base.txt"
+if ! cmake --build "$build" --target oscairn-stock-render oscairn-stock-render-base > "$build/stock-build.log" 2>&1; then
+  tail -60 "$build/stock-build.log" >&2
+  echo "stock gate: build failed" >&2
+  exit 1
+fi
+for which in fork base; do
+  exe="$build/src/oscairn-clap/oscairn-stock-render"
+  [[ "$which" == base ]] && exe="$exe-base"
+  if ! "$exe" > "$build/stock-$which.txt"; then
+    echo "stock gate: the $which render program failed" >&2
+    exit 1
+  fi
+done
 lines=$(wc -l < "$build/stock-fork.txt" | tr -d ' ')
 if [[ "$lines" -ne 90 ]]; then
   echo "stock gate: expected 90 renders, got $lines" >&2

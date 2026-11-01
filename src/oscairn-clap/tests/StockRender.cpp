@@ -36,27 +36,53 @@ static uint32_t rng = 1;
 static int fill = 0;
 
 // Every allocation is filled with one byte, so members an effect leaves uninitialized hold the
-// same value in every run; a different byte (argument 1) shows which effects read them.
-void *operator new(std::size_t n)
+// same value in every run; a different byte (argument 1) shows which effects read them. Every
+// replaceable form is defined, so no allocation pairs a library's operator new with ours.
+static void *allocate(std::size_t n, std::size_t align = 0) noexcept
 {
-    void *p = std::malloc(n ? n : 1);
-    if (!p)
-        std::abort();
-    return std::memset(p, fill, n);
+    void *p;
+    if (!align)
+        p = std::malloc(n ? n : 1);
+    else
+    {
+        align = std::max(align, sizeof(void *));
+        p = std::aligned_alloc(align, (n + align - 1) / align * align + (n ? 0 : align));
+    }
+    return p ? std::memset(p, fill, n) : nullptr;
 }
-void *operator new(std::size_t n, std::align_val_t a)
+static void *allocateOrAbort(std::size_t n, std::size_t align = 0)
 {
-    const auto al = std::max<std::size_t>((std::size_t)a, sizeof(void *));
-    const auto size = (n + al - 1) / al * al;
-    void *p = std::aligned_alloc(al, size ? size : al);
-    if (!p)
-        std::abort();
-    return std::memset(p, fill, n);
+    if (void *p = allocate(n, align))
+        return p;
+    std::abort();
+}
+void *operator new(std::size_t n) { return allocateOrAbort(n); }
+void *operator new[](std::size_t n) { return allocateOrAbort(n); }
+void *operator new(std::size_t n, std::align_val_t a) { return allocateOrAbort(n, (std::size_t)a); }
+void *operator new[](std::size_t n, std::align_val_t a) { return allocateOrAbort(n, (std::size_t)a); }
+void *operator new(std::size_t n, const std::nothrow_t &) noexcept { return allocate(n); }
+void *operator new[](std::size_t n, const std::nothrow_t &) noexcept { return allocate(n); }
+void *operator new(std::size_t n, std::align_val_t a, const std::nothrow_t &) noexcept
+{
+    return allocate(n, (std::size_t)a);
+}
+void *operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t &) noexcept
+{
+    return allocate(n, (std::size_t)a);
 }
 void operator delete(void *p) noexcept { std::free(p); }
+void operator delete[](void *p) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
 void operator delete(void *p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::align_val_t) noexcept { std::free(p); }
 void operator delete(void *p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void *p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void *p, const std::nothrow_t &) noexcept { std::free(p); }
+void operator delete[](void *p, const std::nothrow_t &) noexcept { std::free(p); }
+void operator delete(void *p, std::align_val_t, const std::nothrow_t &) noexcept { std::free(p); }
+void operator delete[](void *p, std::align_val_t, const std::nothrow_t &) noexcept { std::free(p); }
+
 static float rand01()
 {
     rng = rng * 1664525u + 1013904223u;
