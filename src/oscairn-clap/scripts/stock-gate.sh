@@ -6,6 +6,8 @@
 set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 build=${1:-$root/build-stock-gate}
+mkdir -p "$build"
+build=$(cd "$build" && pwd) # CMake reads a relative include path against the source directory
 base=${STOCK_GATE_BASE:-$(git -C "$root" merge-base HEAD origin/main)}
 echo "stock gate: base $(git -C "$root" rev-parse --short "$base"), head $(git -C "$root" rev-parse --short HEAD)"
 echo "stock gate: files changed under include/ since the base: $(git -C "$root" diff --name-only "$base" -- include | wc -l | tr -d ' ')"

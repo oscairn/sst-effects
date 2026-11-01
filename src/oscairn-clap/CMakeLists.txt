@@ -32,3 +32,11 @@ if (OSCAIRN_STOCK_BASE_INCLUDE)
   target_link_libraries(oscairn-stock-render-base PRIVATE clap simde sst-basic-blocks sst-filters sst-waveshapers fmt)
   target_compile_definitions(oscairn-stock-render-base PRIVATE _USE_MATH_DEFINES=1)
 endif()
+# Some stock effects use SSE4.1 intrinsics; upstream's test target builds with -march=native on
+# Linux for the same reason. Both render programs get the same flags.
+if (UNIX AND NOT APPLE)
+  target_compile_options(oscairn-stock-render PRIVATE -march=native)
+  if (TARGET oscairn-stock-render-base)
+    target_compile_options(oscairn-stock-render-base PRIVATE -march=native)
+  endif()
+endif()
