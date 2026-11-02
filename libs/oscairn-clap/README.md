@@ -5,5 +5,6 @@ Copied unchanged from Oscairn (`core/clap-ext/include/oscairn-clap/`), where the
 
 | Header | Oscairn commit |
 | --- | --- |
-| `include/oscairn-clap/effect-contexts.h` | `4e84501` |
-| `include/oscairn-clap/memory.h` | `17c43f6` |
+| `include/oscairn-clap/effect-contexts.h` | `d7ac261` |
+| `include/oscairn-clap/memory.h` | `d7ac261` |
+| `include/oscairn-clap/ui.h` | `d7ac261` |
