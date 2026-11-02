@@ -492,15 +492,19 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     make the plugin's editor show platform numbers.
 11. **Envelope followers in the plugins** (section 4) rather than a host node.
 12. **Tempo fallback** of 120 BPM when the host gives no tempo.
-13. **Fitted EQs at other sample rates.** The reference's five-band EQ is a set of bilinear
-    sections designed at 44.1 kHz, so its response near 22 kHz is shaped by that rate. The plugin
-    keeps the 44.1 kHz response at other rates: same centre and mid-gain edge frequencies in Hz
-    for peaking bands, same half-gain frequency for shelves. This holds to 0.05 dB below 4 kHz
-    for bands up to 11.2 kHz, but not for very wide bands placed near 20 kHz (about 1.1 dB below
-    4 kHz in the extreme test setting). First-order passes (two-band EQ) have one parameter, so
-    their 44.1 kHz warping is not kept at 96 kHz (0.12 dB at 4 kHz for a 1 kHz low-pass). The
-    alternatives are a per-change coefficient fit to the 44.1 kHz response, or oversampling to
-    44.1 kHz multiples; both cost more. Section 15, M1.
+13. **Decided (Jacob, 2026-11-02): higher sample rates sound as the reference does at 44.1 kHz.**
+    Fitted effects must match their 44.1 kHz response at 48, 88.2, 96 and 192 kHz within the
+    tolerance, gated, with any residual in the known-differences register (section 16). Status:
+    not met yet. The shipped EQs keep each peak's centre and mid-gain edges and each shelf's
+    half-gain frequency in Hz, which holds to 0.05 dB below 4 kHz for moderate settings but not
+    for wide or near-Nyquist sections (register entry 10). A per-section fit to the 44.1 kHz
+    response (complex, from the 44.1 kHz poles and zeros mapped by frequency) was tried: it
+    brings most sections at 48 and 88.2 kHz to within 0.05 dB (0.004 dB for a single band), but
+    it leaves 0.06–0.13 dB at 20 kHz for wide sections, and at 192 kHz the direct-form fit is
+    badly conditioned (errors of several dB), and the five-band EQ's band network needs fitting
+    as a whole. Next: fit in a better-conditioned parametrisation (pole and zero frequency and
+    radius), fit the band network as one sixth-order response, and gate every fitted mode at all
+    four rates.
 14. **Converter value laws.** The Data List prints rounded labels for the EQ frequency and Q
     tables (125 Hz is 125.9 Hz, 500 Hz is 501.2 Hz). The converter should use the laws measured
     in section 15 (frequency index i is 10^((i + 48) / 40) Hz, Q index j is 0.5 × 2^(j / 12),
@@ -891,11 +895,11 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 7 | Three-band low shelf at index 182 | 0.32 dB | Unknown | Unresolved | fx11a `lo_i182` | `shelf` |
 | 8 | Three-band high-shelf scale measured at 17 indices only | Formula within 0.66% of those; corner rule (gain-independent) found on hold-out fx12 | A full table needs a sweep of 125 indices | Formula shipped; a further hold-out due | fx6, fx11a, fx12 | `threeBandHighShelfHalfGainHz`, `threeBandHighShelfCornerHz` |
 | 9 | Three-band Q index law | Within 1.2% of the three measured Q values (indices 0, 15, 31) | Only three points measured | Geometric law in the converter | fx4, fx6 | converter (gate scripts for now) |
-| 10 | Fitted EQs at 48 and 96 kHz near Nyquist | Five-band EQ with a wide band at 20 kHz: 1.14 / 1.17 dB below 4 kHz at 48 / 96 kHz; wide peaks at 96 kHz: up to 0.20 dB (Master EQ), 0.12 dB (three-band mid at 7 kHz); first-order passes at 96 kHz: 0.12 dB at 4 kHz | The reference is a 44.1 kHz bilinear design; peaks keep their centre and edge frequencies, shelves their half-gain frequency, which cannot match wide skirts at other rates | Deliberate, decision 13; printed by the tests | Plugin tests (`… keep … at 48 and 96 kHz`) | `peakingQAt`, `shelf`, `masterHighShelf` |
+| 10 | Fitted EQs at 48, 88.2, 96 and 192 kHz | Gated below 4 kHz at 48 and 96 kHz for moderate settings (worst 0.046 dB). Not gated yet: five-band EQ with a wide band at 20 kHz, 1.14 / 1.17 dB below 4 kHz at 48 / 96 kHz; wide peaks at 96 kHz, up to 0.20 dB (Master EQ) and 0.12 dB (three-band mid at 7 kHz); first-order passes at 96 kHz, 0.12 dB at 4 kHz; above 4 kHz up to 2.2 dB; 88.2 and 192 kHz not checked | The reference is a 44.1 kHz bilinear design; the shipped rate rule keeps centre, edge and half-gain frequencies, which cannot match wide skirts at other rates | Unresolved: decision 13 now requires matching at all four rates (work in progress) | Plugin tests (`… keep … at 48 and 96 kHz`) | `peakingQAt`, `shelf`, `masterHighShelf` |
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10 base0, base1); onsets differ by up to 70 ms | Unknown; not the effect under test so far (the recorder's note timing jitters too) | Unresolved; fx15 repeats the base four times with the dry click in each render | fx10, fx15; `fit_rev.py` | none (measurement) |
 | 13 | Hall reverb: displayed time against measured decay | Displayed 0.3 / 1.9 / 3.5 / 5.5 / 18.0 s give a mid-band T60 of 0.69 / 1.72 / 3.0 / 4.2 / 8.8 s (room size 29) | Reference behaviour (the display is not T60 at these settings) | To be matched when the reverb mode is built | fx10; `fit_rev.py` | none yet |
 | 14 | Types not built | 103 of the 104 types (only the five-band EQ type is built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
-| 15 | Compressor type measurements incomplete | Static curve probed too hot; time constants inconclusive (fx7) | Probe design | fx13 redesigns both | fx7, fx13; `fit_comp.py` | none yet |
+| 15 | Compressor type not built; its dynamics not measured | Static curve measured (fx7, fx13): a fixed +65.9 dB gain after the input-level law, output-level law exact, digital silence at the two lowest input levels, compression from about −14 dBFS RMS with a soft knee and effective ratios of about 3.2 / 3.7 / 4.6 for settings 2 / 4 / 20, output levelling near −1.5 dBFS RMS. Time constants still not measured: on this source velocity does not change level, and adding an equal tone did not change the compressed pilot's level | Probe design (and possibly behaviour not yet understood) | Next probes: level steps from the amplitude envelope or a volume change | fx7, fx13; `fit_comp.py`, `fit_comp2.py` | none yet |
 | 16 | Tempo cross delay: tempo behaviour unmeasured | The reference follows its host's tempo; the recorder's host is fixed at 120 BPM | Recorder limitation | Tempo sync taken from the parameter definitions until the recorder can set the host tempo | fx9; `fit_dly.py` | none yet |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
