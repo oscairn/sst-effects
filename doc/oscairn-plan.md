@@ -497,8 +497,10 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     keeps the 44.1 kHz response at other rates: same centre and mid-gain edge frequencies in Hz
     for peaking bands, same half-gain frequency for shelves. This holds to 0.05 dB below 4 kHz
     for bands up to 11.2 kHz, but not for very wide bands placed near 20 kHz (about 1.1 dB below
-    4 kHz in the extreme test setting). The alternatives are a per-change coefficient fit to the
-    44.1 kHz response, or oversampling to 44.1 kHz multiples; both cost more. Section 15, M1.
+    4 kHz in the extreme test setting). First-order passes (two-band EQ) have one parameter, so
+    their 44.1 kHz warping is not kept at 96 kHz (0.12 dB at 4 kHz for a 1 kHz low-pass). The
+    alternatives are a per-change coefficient fit to the 44.1 kHz response, or oversampling to
+    44.1 kHz multiples; both cost more. Section 15, M1.
 14. **Converter value laws.** The Data List prints rounded labels for the EQ frequency and Q
     tables (125 Hz is 125.9 Hz, 500 Hz is 501.2 Hz). The converter should use the laws measured
     in section 15 (frequency index i is 10^((i + 48) / 40) Hz, Q index j is 0.5 × 2^(j / 12),
@@ -516,6 +518,10 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     two modes of one plugin share a figure (Reverb 1 2.2 MB, Reverb 2 1.2 MB at 48 kHz): a
     request for the Oscairn session is to key memory by the effect context's state or to read
     the plugin's estimate (section 15, effect memory).
+17. **A measured frequency scale.** The three-band EQ's frequency scale (and possibly the Master
+    EQ's low indices) does not follow a formula. Measuring every index is allowed (fit
+    measurements), but it is a table built from about 210 renders per band. Confirm that is
+    wanted, or accept the nearest formula with its error stated.
 
 ## 14. Risks and not verified
 
@@ -698,5 +704,69 @@ Gates (tolerances proposed):
   not gated: 1.14 dB (48 kHz) and 1.17 dB (96 kHz) below 4 kHz (decision 13). Each of these tests
   fails with its law changed (output gain, Q law constant, shelf slope, rate matching).
 
-Not done in M1 yet: the Part 3-band and 2-band EQs and the 5-band Master EQ (to be measured the
-same way), a hold-out batch, and listening.
+#### Hold-outs, and the five-band EQ's band network (2026-11-02)
+
+The first hold-out (fx5: 12 random full settings, recorded after the laws above were fixed)
+failed: only one setting matched to 0.05 dB, and three missed by 4.8 to 11 dB, always where
+narrow, strong bands overlap. Freeing any band's values did not help, so the bands do not
+combine in series. They form the boost-and-cut network of a console EQ: with BP_i a unity-peak
+band-pass at band i's frequency and Q (Q × r, the widening law above), the three peaking bands
+give
+
+    (1 + Σ over boosts (G_i − 1) BP_i) / (1 + Σ over cuts (1/G_i − 1) BP_i),
+
+and the shelves stay in series. A band alone is the same peaking section as before (the
+`Q × 10^(−|gain|/40)` law is exactly this form), so every single-band fit still holds. This
+matched fx5 to 0.019 dB; because the structure was chosen after seeing fx5, a fresh hold-out
+followed (fx8: 12 new random settings, seed 502), which the plugin matches to **0.0285 dB**
+(20 Hz–19 kHz, not used in any fit). Gate against all renders: fx1 0.0225 dB, fx3 0.0017 dB,
+fx5 0.0193 dB, fx8 0.0285 dB. The plugin solves the cut network's delay-free loop per sample;
+a test setting with overlapping boosts fails a series implementation.
+
+#### Two-band EQ (Part EQ), measured fx4, fx6, fx8; built
+
+| Section | Law | Against renders |
+| --- | --- | --- |
+| Frequency | Index i: 10^(1.2 + i/80) Hz | High-pass and low-pass at 282, 1,189, 5,012, 17,783 Hz within 0.2 Hz of the fit |
+| Low- and high-pass | First-order bilinear at the set frequency | 0.0374 dB worst (fx4) |
+| Shelves | As the five-band EQ's (slope 0.5, corner on the flat side); the Q parameter has no effect | 0.0062 dB |
+| Peak | Q × 10^(−\|gain\|/40), no widening at high frequencies (6.7, 10.3, 15.8 kHz fit exactly) | 0.0485 dB at and above 891 Hz |
+| Gain | (value − 64) / 2 dB; output level the same | 0.0011 dB for +12 |
+
+Open: peaks below about 300 Hz. Centres fitted from narrow bands scatter around the law (110,
+134, 155, 205, 246 Hz for nominal 100, 126, 158, 200, 251 Hz) and one probe misses by 1.2 dB at a
+harmonic. With harmonics every 32.7 Hz, a narrow band below 300 Hz meets only one or two of them,
+so the probes cannot tell a different frequency law from a fitting artefact. Next: the same
+settings at several notes, so the harmonics of the probes interleave. Hold-out fx8 (10 random
+settings, both bands active): 8 within 0.027 dB, two with a peak below 300 Hz at 0.26 and 0.20
+dB. Built as mode "Two-band EQ" of Oscairn FX EQ, tests as for the five-band EQ.
+
+#### Master EQ (5-band), measured fx5, fx8; not built yet
+
+- Peaks: Q × 10^(−\|gain\|/40), no high-frequency widening (Q 12 at 10 kHz fits 6.02); bands
+  2–4 identical; 1 dB gain steps; the Q parameter has no effect on the shelves.
+- Frequencies: at 1.0, 3.2 and 10.0 kHz the centres are the printed table values exactly (not
+  a formula: 3,200, not 20 × 10^(44/20) = 3,170). At index 14 (printed 100 Hz) even a very wide
+  band centres near 110 Hz, and index 24 (315 Hz) near 311 Hz. Open, with the two-band EQ's
+  low end.
+- Low shelf: the shared shelf law with the printed frequency as corner (0.001 dB).
+- High shelf: Q 0.5, cookbook frequency = printed frequency with its prewarped value divided by
+  √2 (0.026 dB at 2, 8 and 16 kHz); at 500 Hz it misses by 0.14/0.80 dB (+12/−12). The hold-out
+  cannot separate √2 from 10^(\|gain\|/80) (equal at ±12 dB; fx8 favours neither).
+- Bands combine in series, not as a network: fx8 hold-out, series worst 2.09 dB, network 3.47
+  dB. The remaining error sits at 130–330 Hz (the low indices) and in the high shelf.
+
+#### Three-band EQ (Part EQ), measured fx4, fx6; not built yet
+
+- Low and high bands: the shared slope-0.5 shelves (0.002 dB), with corner 2 × T(i); mid band:
+  a peak with Q × 10^(−\|gain\|/40) at T(i) (0.02 dB residual, gain fitted 12.02 for 12; the Q
+  falls above 3 kHz, to 0.69 of nominal at 11 kHz, by a law not yet found). Gain (value − 64)
+  × 0.375 dB.
+- T(i) is one frequency scale for all three bands (the mid centre equals the shelf corner / 2
+  at shared indices, and both match the printed ends: 50.1 Hz at 46, 139.7 Hz at 83, 503.8 Hz at
+  131). It is not log-linear: steps of 17 land near 50, 80, 125, 200, 315, 500 Hz but measure
+  81.8, 126.8, 325 Hz, and the high end bends. It looks tabulated; pinning it down means a sweep
+  over every index (about 210), possibly with interleaved notes. Decision 17.
+
+Not done in M1 yet: the three-band and Master EQ modes, the low-frequency peak question, and
+listening.
