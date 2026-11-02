@@ -1235,3 +1235,47 @@ TEST_CASE("Three-band and Master EQ are transparent when flat")
     }
 }
 
+// ---- Converter frequency scales (decision 17) ----
+#include "converter/FrequencyScales.h"
+#include <chrono>
+
+TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
+{
+    namespace sc = oscairn_fx::scales;
+    double worst3 = 0, worstM = 0;
+    for (int i = 46; i <= 241; ++i)
+    {
+        worst3 = std::max(worst3, std::abs(sc::threeBandFormulaHz(i) / sc::threeBandTableHz(i) - 1));
+        REQUIRE(sc::threeBandTableHz(i + 1) > sc::threeBandTableHz(i));
+    }
+    for (int i = 0; i <= 60; ++i)
+    {
+        worstM = std::max(worstM, std::abs(sc::masterFormulaHz(i) / sc::masterTableHz(i) - 1));
+        if (i < 60)
+            REQUIRE(sc::masterTableHz(i + 1) > sc::masterTableHz(i));
+    }
+    std::printf("three-band formula vs table: worst %.2f%%; Master formula vs table: worst %.2f%%\n",
+                100 * worst3, 100 * worstM);
+    REQUIRE(worst3 < 0.0153); // as fitted: 1.52%
+    REQUIRE(worstM < 0.0517); // 5.16%: the printed scale is not a formula
+    REQUIRE(sc::threeBandTableHz(46) == Approx(50.1).margin(0.01));
+    for (int i = 131; i <= 255; ++i)
+        for (double g : {-12.0, -3.0, 3.0, 12.0})
+        {
+            const double c = sc::threeBandHighShelfCornerHz(i, g);
+            REQUIRE(c >= sc::threeBandHighShelfHalfGainHz(i));
+            REQUIRE(c < 22050);
+        }
+
+    // Cost of a conversion (the converter runs it once per value; the plugins take Hz).
+    auto bench = [](auto fn) {
+        volatile double acc = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < 20000; ++r)
+            for (int i = 46; i <= 241; ++i)
+                acc = acc + fn(i);
+        return std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / (20000.0 * 196);
+    };
+    std::printf("three-band conversion: table %.2f ns, formula %.2f ns\n", bench(sc::threeBandTableHz),
+                bench(sc::threeBandFormulaHz));
+}
