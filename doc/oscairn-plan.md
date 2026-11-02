@@ -980,7 +980,7 @@ outside the repositories (`fit_fx16.py`, `gate_peq.py`, `fit_dly3.py`).
   / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; at time 8, room 0 / 15: 0.22 /
   0.66 s; at time 56, 1.94 / 3.21 s (room and time do not scale separately); high ratio 0.1 /
   0.3 / 0.5 / 1.0 gives 4 kHz T60 2.27 / 1.90 / 2.12 / 3.13 s against about 3.0 s at 125 Hz;
-  diffusion, initial delay, decay, HPF and LPF leave T60 within about 0.15 s (HPF 30 lengthens
+  diffusion, initial delay, decay, HPF and LPF leave T60 within about 0.25 s up to 4 kHz (HPF 30 lengthens
   the low bands by 0.4 s).
 
 Nothing was built from fx16 yet: the delay needs the dry/wet balance law (not probed) and tempo
