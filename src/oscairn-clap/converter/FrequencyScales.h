@@ -88,10 +88,11 @@ inline double threeBandHighShelfHalfGainHz(int i)
     const double f = 54.267 * std::exp2(e) * (1 + (u - e));
     return 44100 / M_PI * std::atan(M_PI * f / 44100);
 }
-// The corner on the flat side the EQ modes take, for a high shelf of gainDb at that index.
-inline double threeBandHighShelfCornerHz(int i, double gainDb)
+// The corner on the flat side the EQ modes take. It does not depend on the gain (as for the low
+// shelf): it is the corner of the 12 dB shelf whose half-gain point is above.
+inline double threeBandHighShelfCornerHz(int i)
 {
-    const double A = std::pow(10.0, std::fabs(gainDb) / 40);
+    const double A = std::pow(10.0, 12.0 / 40);
     return 44100 / M_PI * std::atan(std::tan(M_PI * threeBandHighShelfHalfGainHz(i) / 44100) * A);
 }
 

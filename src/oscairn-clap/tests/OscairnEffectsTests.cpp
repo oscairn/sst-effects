@@ -1260,12 +1260,11 @@ TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
     REQUIRE(worstM < 0.0517); // 5.16%: the printed scale is not a formula
     REQUIRE(sc::threeBandTableHz(46) == Approx(50.1).margin(0.01));
     for (int i = 131; i <= 255; ++i)
-        for (double g : {-12.0, -3.0, 3.0, 12.0})
-        {
-            const double c = sc::threeBandHighShelfCornerHz(i, g);
-            REQUIRE(c >= sc::threeBandHighShelfHalfGainHz(i));
-            REQUIRE(c < 22050);
-        }
+    {
+        const double c = sc::threeBandHighShelfCornerHz(i);
+        REQUIRE(c > sc::threeBandHighShelfHalfGainHz(i));
+        REQUIRE(c < 22050);
+    }
 
     // Cost of a conversion (the converter runs it once per value; the plugins take Hz).
     auto bench = [](auto fn) {
