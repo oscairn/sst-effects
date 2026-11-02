@@ -508,14 +508,23 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     never initialize with some parameters. Oscairn needs repeatable renders; when those effects
     become modes, the wrapper will reseed them from a fixed seed in a new file (stock DSP
     unchanged), and the uninitialized reads go upstream as bug reports. Section 15, M0.
+16. **Memory declaration waits on Oscairn.** RFC 0025's draft `oscairn.memory` extension
+    (`estimate(rate, max_frames)` and `current`, each giving shared, per-context and asset
+    bytes) has no header yet. The plugins compute exactly those figures
+    (`oscairn_fx::memoryEstimate` and `memoryCurrent`); exposing them as the extension waits on
+    Oscairn's header. Until then Oscairn measures memory from outside, keyed by plugin build, so
+    two modes of one plugin share a figure (Reverb 1 2.2 MB, Reverb 2 1.2 MB at 48 kHz): a
+    request for the Oscairn session is to key memory by the effect context's state or to read
+    the plugin's estimate (section 15, effect memory).
 
 ## 14. Risks and not verified
 
 - Determinism of the stock effects: settled in M0 (decision 15).
-- Memory: one prepared Reverb 2 context is 14.5 MB (`sizeof` on the arm64 macOS build; Reverb 1
-  2.2 MB, Five-band EQ 576 bytes), so 64 prepared Reverb 2 contexts would be about 930 MB.
-  Idle contexts allocate nothing. Reverb modes written later should size their buffers to the
-  rate and the longest setting.
+- Memory: settled in section 15 (effect memory). Modes written later size their buffers the
+  same way: for the running rate and the longest reach of their parameters.
+- Tempo sync: buffers are sized for unsynced parameters (the configuration never syncs). When
+  tempo-synced modes arrive, their sizes must include the longest synced time at the slowest
+  tempo the host can give.
 - Whether the Surge XT effects listed as borrowed port cleanly onto the `FXConfig` contract
   (unverified; each is a port of a `SurgeStorage` class).
 - The usage counts' "active" rule does not check whether a part's elements are routed to the
@@ -572,6 +581,73 @@ Departures and findings:
   ASan/UBSan for the allocation fix. Linux x86_64 was checked only in CI.
 - Upstream test merge: `upstream/main` is still `987b39d`, the base, so there was nothing to
   merge and no conflict.
+
+### Effect memory (done 2026-11-01)
+
+Why a prepared Reverb 2 context took 14.5 MB: upstream sizes its arrays for 384 kHz at every
+rate: 12 allpasses (4 input, 8 in the tank) of 131,072 floats (6.3 MB), 4 delay lines of
+131,072 floats (2.1 MB) and a predelay of 1,536,000 floats (6.1 MB). No oversampling. At a given
+rate it reaches much less: room size scales lengths by at most 2, so the longest allpass is
+121 ms and the longest delay 357.6 ms plus 5 ms of modulation, and predelay is at most 2 s.
+
+What changed: a hook in `include/sst/effects/Reverb2.h` (four constants; a configuration
+without the new members gets upstream's sizes) and `SizedConfig<Rate>` in `OscairnConfig.h`.
+Each mode is instantiated for 44.1, 48, 88.2, 96, 176.4 and 192 kHz; a context builds the
+smallest that covers the running rate (above 192 kHz, upstream's sizes), on the main thread at
+activation, state load and mode change, never in `process`. Reverb 2 renders bit-identically
+with any buffers at least that long (the allpasses wrap at their length, the delays are masked
+and the predelay wraps at its size): a test renders defaults and both extremes (room size ±1,
+predelay 2 s and 4 ms, modulation 0 and full) at 44.1, 48, 50, 96 and 192 kHz against upstream's
+sizes, and fails if the delay or predelay buffer is halved. The stock gate still passes (the
+hook is inactive for its configuration).
+
+Reverb 1 keeps upstream's sizes on purpose: its 32,768-sample lines wrap with a fixed mask, and
+its predelay reaches 8 s (its range is 2^0 to 2^3 s), beyond the mask, so a smaller buffer would
+change what it plays. Recorded rather than changed.
+
+Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
+
+| Mode | Rate | Shared (engine), before → after | Context, before | Context, after | Assets | Resident growth, before → after |
+| --- | --- | --- | --- | --- | --- | --- |
+| Reverb 1 | 44.1 kHz | 16 → 16 | 2,230,456 | 2,230,456 | 0 | 2.27 MB → 2.24 MB |
+| Reverb 1 | 48 kHz | 16 → 16 | 2,230,456 | 2,230,456 | 0 | 2.25 MB → 2.24 MB |
+| Reverb 1 | 96 kHz | 16 → 16 | 2,230,456 | 2,230,456 | 0 | 2.30 MB → 2.25 MB |
+| Reverb 2 | 44.1 kHz | 16 → 16 | 14,534,184 | 872,856 | 0 | 12.74 MB → 0.77 MB |
+| Reverb 2 | 48 kHz | 16 → 16 | 14,534,184 | 1,188,856 | 0 | 12.76 MB → 1.19 MB |
+| Reverb 2 | 96 kHz | 16 → 16 | 14,534,184 | 2,375,928 | 0 | 12.75 MB → 2.40 MB |
+| Five-band EQ | any | 16 → 16 | 1,156 | 1,156 | 0 | below a page |
+
+"Context" is the context's own storage plus its effect (`sizeof`, arm64 macOS build), the same
+figure `resources` reports. "Resident growth" is macOS `phys_footprint` growth per context,
+averaged over eight contexts each created and activated in a fresh process after one warm-up
+instance, for `b966ac3` (before) and this change (after). Old Reverb 2 grew by less than its
+size, presumably because some zero pages were never made resident; the new figures track the
+computed bytes.
+
+RFC 0025 (read, not edited). Today Oscairn measures a plugin's memory from outside: a worker's
+share of its process, or what the engine process grew by while the plugin loaded, every second,
+keyed by plugin build (ID and version). For that to be right, a plugin's memory should have
+settled once it is activated and its state loaded, and grow by a predictable amount per context.
+Done here:
+
+- an effect is allocated at activation for the mode the state selects, so loading state before
+  activating allocates once, for the right mode;
+- loading state while active now builds the new mode before the call returns, instead of on a
+  later main-thread callback; until the audio thread swaps it in and the old one is freed, both
+  are held (and reported);
+- idle contexts hold only their own storage (1–2 KB); a prepared context's size is a function of
+  mode and rate only;
+- `oscairn_fx::memoryEstimate(plugin, rate)` (no allocation; after state load, before
+  activation) and `memoryCurrent(plugin)` give shared, per-context and asset bytes, the figures
+  RFC 0025's draft `oscairn.memory` extension asks for. A test checks the estimate equals what
+  activation then holds, for every mode at 44.1, 48, 50, 96, 192 and 384 kHz, and equals
+  `resources`. Exposing them through the extension waits on Oscairn's header (decision 16).
+
+Requests for the Oscairn session (not implemented here): measurement keyed only by plugin build
+gives every mode of a category plugin one figure, the largest seen; reading `memoryEstimate`
+through the planned extension, or keying by the context's state, would fix that. For effect
+contexts the per-context cost is `context_bytes` from `resources` (or the extension), which the
+budget does not read today.
 
 ### Milestone 1: measurement tooling and the five-band EQ (in progress)
 
