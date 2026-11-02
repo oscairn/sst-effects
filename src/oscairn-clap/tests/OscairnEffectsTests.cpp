@@ -680,13 +680,27 @@ double sectionDb(std::complex<double> b0, double b1, double b2, double a0, doubl
     const auto z = std::polar(1.0, -2 * M_PI * f / rate);
     return 20 * std::log10(std::abs((b0 + b1 * z + b2 * z * z) / (a0 + a1 * z + a2 * z * z)));
 }
-double peakDb(double f, double fc, double g, double q, double rate)
+// A band of the five-band network: unity-peak band-pass at fc, Q widened at high frequencies.
+std::complex<double> bandpassH(double f, double fc, double q, double rate)
 {
-    const double A = std::pow(10, g / 40), w = 2 * M_PI * fc / rate;
     const double r = std::min(1.0, std::max(0.05, 1.25517 - 4.8172e-5 * fc - 0.1 * std::log10(q)));
-    const double al = std::sin(w) / (2 * q * std::pow(10, -std::abs(g) / 40) * r);
-    return sectionDb(1 + al * A, -2 * std::cos(w), 1 - al * A, 1 + al / A, -2 * std::cos(w),
-                     1 - al / A, f, rate);
+    const double w = 2 * M_PI * fc / rate, al = std::sin(w) / (2 * q * r);
+    const auto z = std::polar(1.0, -2 * M_PI * f / rate);
+    return al * (1.0 - z * z) / ((1 + al) - 2 * std::cos(w) * z + (1 - al) * z * z);
+}
+// Boosts add in the numerator, cuts in the denominator.
+double networkDb(double f, const double (&fc)[3], const double (&g)[3], const double (&q)[3], double rate)
+{
+    std::complex<double> num = 1, den = 1;
+    for (int b = 0; b < 3; ++b)
+    {
+        const double G = std::pow(10, g[b] / 20);
+        if (g[b] > 0)
+            num += (G - 1) * bandpassH(f, fc[b], q[b], rate);
+        else if (g[b] < 0)
+            den += (1 / G - 1) * bandpassH(f, fc[b], q[b], rate);
+    }
+    return 20 * std::log10(std::abs(num / den));
 }
 double shelfDb(double f, double fc, double g, bool high, double rate)
 {
@@ -708,8 +722,7 @@ struct EqSetting
     double lf, lg, q2, f2, g2, q3, f3, g3, q4, f4, g4, hf, hg, out;
     double modelDb(double f, double rate) const
     {
-        return shelfDb(f, lf, lg, false, rate) + peakDb(f, f2, g2, q2, rate) +
-               peakDb(f, f3, g3, q3, rate) + peakDb(f, f4, g4, q4, rate) +
+        return shelfDb(f, lf, lg, false, rate) + networkDb(f, {f2, f3, f4}, {g2, g3, g4}, {q2, q3, q4}, rate) +
                shelfDb(f, hf, hg, true, rate) + out;
     }
 };
@@ -718,6 +731,7 @@ const std::vector<EqSetting> eqSettings{
     {100, 0, 2, 400, 12, 2, 1000, 0, 2, 4000, 0, 8000, 0, 0},       // one boost
     {63.1, -12, 0.5, 125.9, -6, 8, 2512, 9, 16, 11220, -12, 3981, 6, -3}, // all bands
     {251, 6, 1, 5623, 18, 4, 14125, -18, 0.71, 19953, 12, 1000, -12, 6},  // high, narrow
+    {100, 0, 1, 1000, 12, 1, 1413, 12, 2, 2000, -12, 8000, 0, 0},       // overlapping boosts and a cut
 };
 
 // The plugin's magnitude response at f, from its impulse response.
@@ -810,7 +824,7 @@ TEST_CASE("Five-band EQ keeps its 44.1 kHz response at 48 and 96 kHz")
             std::printf("Five-band EQ setting %zu at %.0f Hz: %.4f dB to 4 kHz, %.3f dB 4-16 kHz "
                         "from the 44.1 kHz design\n",
                         i, rate, wl, wh);
-            if (i < 2)
+            if (i != 2)
                 REQUIRE(wl < 0.05);
         }
 }

@@ -7,9 +7,13 @@
  *
  * Every section is a second-order bilinear filter designed at the running sample rate; the
  * frequency, gain and Q laws were fitted to reference renders (plan, section 15, M1):
- *  - peaking bands: centre at the set frequency, the set gain, and an effective Q of
- *    Q * 10^(-|gain| / 40) * r, so a cut is the exact inverse of the same boost, where
- *    r = min(1, 1.25517 - 4.8172e-5 * f / Hz - 0.1 * log10(Q)) widens high, narrow bands;
+ *  - peaking bands form a boost-and-cut network, as console EQs do: with BP_i a unity-peak
+ *    band-pass at band i's frequency, the bands give (1 + sum over boosts of (G_i - 1) BP_i) /
+ *    (1 + sum over cuts of (1/G_i - 1) BP_i), G_i the band's linear gain. Alone, a band is a
+ *    peaking section with effective Q = Q * 10^(-|gain| / 40) and a cut is the exact inverse of
+ *    the same boost; together, overlapping boosts add rather than multiply. The band-pass Q is
+ *    Q * r, r = min(1, 1.25517 - 4.8172e-5 * f / Hz - 0.1 * log10(Q)), which widens high,
+ *    narrow bands;
  *  - shelves: slope 0.5 (Q from the slope and gain), with the set frequency as the corner on
  *    the flat side: the prewarped frequency is scaled by 10^(|gain| / 40), up for the low shelf
  *    and down for the high shelf, to give the half-gain point.
@@ -68,11 +72,12 @@ inline double peakingQAt(double rate, double hz, double q)
 }
 
 // Coefficients, exposed for the tests.
-inline void peaking(Biquad &f, double rate, double hz, double gainDb, double q)
+// widen: the five-band EQ's widening of high, narrow bands (the two-band EQ has none).
+inline void peaking(Biquad &f, double rate, double hz, double gainDb, double q, bool widen = true)
 {
     const double A = std::pow(10.0, gainDb / 40);
     hz = std::min(hz, 0.49 * designRate);
-    const double r = std::clamp(1.25517 - 4.8172e-5 * hz - 0.1 * std::log10(q), 0.05, 1.0);
+    const double r = widen ? std::clamp(1.25517 - 4.8172e-5 * hz - 0.1 * std::log10(q), 0.05, 1.0) : 1.0;
     const double qe = peakingQAt(rate, hz, q * std::pow(10.0, -std::abs(gainDb) / 40) * r);
     const double w0 = 2 * M_PI * hz / rate;
     const double al = std::sin(w0) / (2 * qe), c = std::cos(w0);
@@ -94,6 +99,29 @@ inline void shelf(Biquad &f, double rate, double hz, double gainDb, bool high)
         f.set(G * ((G + 1) - (G - 1) * c + s2), 2 * G * ((G - 1) - (G + 1) * c),
               G * ((G + 1) - (G - 1) * c - s2), (G + 1) + (G - 1) * c + s2,
               -2 * ((G - 1) + (G + 1) * c), (G + 1) + (G - 1) * c - s2);
+}
+
+// First-order bilinear low- and high-pass sections at hz (prewarped).
+// A unity-peak band-pass (constant 0 dB peak gain) at hz with Q, for the five-band network: the
+// Q is kept as the 44.1 kHz design's at other rates (peakingQAt).
+inline void bandpass(Biquad &f, double rate, double hz, double q)
+{
+    hz = std::min(hz, 0.49 * designRate);
+    const double r = std::clamp(1.25517 - 4.8172e-5 * hz - 0.1 * std::log10(q), 0.05, 1.0);
+    const double qe = peakingQAt(rate, hz, q * r);
+    const double w0 = 2 * M_PI * hz / rate, al = std::sin(w0) / (2 * qe);
+    f.set(al, 0, -al, 1 + al, -2 * std::cos(w0), 1 - al);
+}
+
+inline void lowpass1(Biquad &f, double rate, double hz)
+{
+    const double K = std::tan(M_PI * std::min(hz, 0.49 * rate) / rate);
+    f.set(K, K, 0, 1 + K, K - 1, 0);
+}
+inline void highpass1(Biquad &f, double rate, double hz)
+{
+    const double K = std::tan(M_PI * std::min(hz, 0.49 * rate) / rate);
+    f.set(1, -1, 0, 1 + K, K - 1, 0);
 }
 
 template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTemplateBase<FXConfig>
@@ -128,7 +156,9 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
 
     void initialize()
     {
-        for (auto &b : bands)
+        for (auto &b : shelves)
+            b.reset();
+        for (auto &b : peaks)
             b.reset();
         last.fill(NAN);
         update();
@@ -142,14 +172,8 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
         update();
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
-            float l = L[i], r = R[i];
-            for (auto &b : bands)
-            {
-                l = b.run(0, l);
-                r = b.run(1, r);
-            }
-            L[i] = l * gain;
-            R[i] = r * gain;
+            L[i] = (float)(network(0, shelves[1].run(0, shelves[0].run(0, L[i]))) * gain);
+            R[i] = (float)(network(1, shelves[1].run(1, shelves[0].run(1, R[i]))) * gain);
         }
     }
 
@@ -186,9 +210,45 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
     }
 
   private:
-    std::array<Biquad, 5> bands;
+    std::array<Biquad, 2> shelves;  // low, high
+    std::array<Biquad, 3> peaks;    // band-passes of bands 2-4
+    std::array<double, 3> weight{}; // G - 1 for a boost, 1/G - 1 for a cut, 0 when flat
+    std::array<int, 3> role{};      // +1 boost, -1 cut, 0 flat
     std::array<float, numParamsEnum> last{};
-    float gain{1};
+    double gain{1};
+
+    // The boost sum, then the cut network's delay-free loop solved for its output z:
+    // z = y - sum c_j BP_j(z), each BP_j(z) = b0_j z + its state.
+    inline double network(int ch, double x)
+    {
+        double y = x;
+        for (int b = 0; b < 3; ++b)
+            if (role[b] > 0)
+            {
+                auto &f = peaks[b];
+                const double bp = f.b0 * x + f.z1[ch];
+                f.z1[ch] = -f.a1 * bp + f.z2[ch];
+                f.z2[ch] = f.b2 * x - f.a2 * bp;
+                y += weight[b] * bp;
+            }
+        double acc = y, b0sum = 0;
+        for (int b = 0; b < 3; ++b)
+            if (role[b] < 0)
+            {
+                acc -= weight[b] * peaks[b].z1[ch];
+                b0sum += weight[b] * peaks[b].b0;
+            }
+        const double z = acc / (1 + b0sum);
+        for (int b = 0; b < 3; ++b)
+            if (role[b] < 0)
+            {
+                auto &f = peaks[b];
+                const double bp = f.b0 * z + f.z1[ch];
+                f.z1[ch] = -f.a1 * bp + f.z2[ch];
+                f.z2[ch] = f.b2 * z - f.a2 * bp;
+            }
+        return z;
+    }
 
     void update()
     {
@@ -202,12 +262,20 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
         if (!changed)
             return;
         const double rate = this->sampleRate();
-        shelf(bands[0], rate, last[lowFreq], last[lowGain], false);
-        peaking(bands[1], rate, last[freq2], last[gain2], last[q2]);
-        peaking(bands[2], rate, last[freq3], last[gain3], last[q3]);
-        peaking(bands[3], rate, last[freq4], last[gain4], last[q4]);
-        shelf(bands[4], rate, last[highFreq], last[highGain], true);
-        gain = std::pow(10.f, last[output] / 20);
+        shelf(shelves[0], rate, last[lowFreq], last[lowGain], false);
+        shelf(shelves[1], rate, last[highFreq], last[highGain], true);
+        const int fi[3] = {freq2, freq3, freq4}, gi[3] = {gain2, gain3, gain4}, qi[3] = {q2, q3, q4};
+        for (int b = 0; b < 3; ++b)
+        {
+            const double G = std::pow(10.0, last[gi[b]] / 20);
+            const int was = role[b];
+            role[b] = last[gi[b]] > 0 ? 1 : (last[gi[b]] < 0 ? -1 : 0);
+            weight[b] = role[b] > 0 ? G - 1 : (role[b] < 0 ? 1 / G - 1 : 0);
+            if (role[b] != was)
+                peaks[b].reset(); // its state belonged to the other side of the network
+            bandpass(peaks[b], rate, last[fi[b]], last[qi[b]]);
+        }
+        gain = std::pow(10.0, last[output] / 20);
     }
 };
 } // namespace oscairn_fx::eq
