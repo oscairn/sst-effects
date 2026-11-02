@@ -967,3 +967,112 @@ TEST_CASE("Loading state while active builds the new mode before returning")
     oscairn_fx::memoryCurrent(pl.p, &cur);
     REQUIRE(cur.context == r1.context);
 }
+
+// ---- Two-band EQ (plan, section 15, M1) ----
+namespace
+{
+double onePoleDb(double f, double fc, bool high, double rate)
+{
+    const double K = std::tan(M_PI * fc / rate);
+    return high ? sectionDb(1, -1, 0, 1 + K, K - 1, 0, f, rate) : sectionDb(K, K, 0, 1 + K, K - 1, 0, f, rate);
+}
+double cookbookPeakDb(double f, double fc, double g, double q, double rate)
+{
+    const double A = std::pow(10, g / 40), w = 2 * M_PI * fc / rate;
+    const double al = std::sin(w) / (2 * q * std::pow(10, -std::abs(g) / 40));
+    return sectionDb(1 + al * A, -2 * std::cos(w), 1 - al * A, 1 + al / A, -2 * std::cos(w), 1 - al / A, f, rate);
+}
+struct TwoBandSetting
+{
+    int t1;
+    double f1, g1, q1;
+    int t2;
+    double f2, g2, q2, out;
+    static double bandDb(int t, double fr, double fc, double g, double q, double rate)
+    {
+        switch (t)
+        {
+        case 1: return onePoleDb(fr, fc, false, rate);
+        case 2: return onePoleDb(fr, fc, true, rate);
+        case 3: return shelfDb(fr, fc, g, false, rate);
+        case 4: return shelfDb(fr, fc, g, true, rate);
+        case 5: return cookbookPeakDb(fr, fc, g, q, rate);
+        }
+        return 0;
+    }
+    double modelDb(double fr, double rate) const
+    {
+        return bandDb(t1, fr, f1, g1, q1, rate) + bandDb(t2, fr, f2, g2, q2, rate) + out;
+    }
+};
+const std::vector<TwoBandSetting> twoBandSettings{
+    {1, 1000, 0, 1, 5, 5000, 6, 2, 0},
+    {2, 200, 0, 1, 3, 300, 9, 1, -3},
+    {4, 3000, -6, 1, 5, 1000, -9, 1, 2},
+};
+std::vector<double> twoBandResponseDb(const TwoBandSetting &s, double rate, const std::vector<double> &freqs)
+{
+    Plugin pl(eqId);
+    pl.set(1, 2);
+    const char *names[] = {"Band 1 Type", "Band 1 Frequency", "Band 1 Gain", "Band 1 Q", "Band 2 Type",
+                           "Band 2 Frequency", "Band 2 Gain", "Band 2 Q", "Output Level"};
+    const double v[] = {(double)s.t1, s.f1, s.g1, s.q1, (double)s.t2, s.f2, s.g2, s.q2, s.out};
+    for (int i = 0; i < 9; ++i)
+        pl.set(paramIdByName(pl.p, "Two-band EQ", names[i]), v[i]);
+    pl.activate(rate);
+    const size_t n = (size_t)rate;
+    std::vector<float> inL(n, 0), inR(n, 0), r;
+    inL[0] = inR[0] = 1;
+    auto out = pl.render(inL, inR, r, {512}, {}, false);
+    std::vector<double> db;
+    for (double f : freqs)
+    {
+        std::complex<double> acc = 0;
+        for (size_t i = L; i < n; ++i)
+            acc += (double)out[i] * std::polar(1.0, -2 * M_PI * f * (double)(i - L) / rate);
+        db.push_back(20 * std::log10(std::abs(acc)));
+    }
+    return db;
+}
+} // namespace
+
+TEST_CASE("Two-band EQ follows its fitted design at 44.1 kHz, and keeps it at 48 and 96 kHz")
+{
+    // 0.01 dB at 44.1 kHz, 20 Hz to 20 kHz. Proposed: 0.05 dB up to 4 kHz at 48 kHz, and at
+    // 96 kHz for settings without a first-order pass.
+    const auto all = logFreqs(20, 20000, 61), low = logFreqs(20, 4000, 41);
+    for (const auto &s : twoBandSettings)
+    {
+        auto got = twoBandResponseDb(s, 44100, all);
+        double worst = 0;
+        for (size_t k = 0; k < all.size(); ++k)
+            worst = std::max(worst, std::abs(got[k] - s.modelDb(all[k], 44100)));
+        INFO("44.1 kHz worst " << worst << " dB");
+        REQUIRE(worst < 0.01);
+        for (double rate : {48000.0, 96000.0})
+        {
+            auto g = twoBandResponseDb(s, rate, low);
+            double w = 0;
+            for (size_t k = 0; k < low.size(); ++k)
+                w = std::max(w, std::abs(g[k] - s.modelDb(low[k], 44100)));
+            std::printf("Two-band EQ at %.0f Hz: %.4f dB to 4 kHz from the 44.1 kHz design\n", rate, w);
+            // A first-order pass has one parameter, its corner, so its 44.1 kHz warping cannot be
+            // kept at 96 kHz (0.12 dB at 4 kHz for a 1 kHz low-pass): printed, not gated there.
+            const bool firstOrder = s.t1 == 1 || s.t1 == 2 || s.t2 == 1 || s.t2 == 2;
+            if (rate == 48000 || !firstOrder)
+                REQUIRE(w < 0.05);
+        }
+    }
+}
+
+TEST_CASE("Two-band EQ is transparent when off")
+{
+    std::vector<float> inL, inR, r;
+    signal(48000, inL, inR);
+    Plugin pl(eqId);
+    pl.set(1, 2);
+    pl.activate();
+    auto out = pl.render(inL, inR, r, {37});
+    for (size_t i = 0; i + L < inL.size(); ++i)
+        REQUIRE((out[i + L] == inL[i] && r[i + L] == inR[i]));
+}
