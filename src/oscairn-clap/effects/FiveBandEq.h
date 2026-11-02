@@ -87,8 +87,10 @@ inline void peaking(Biquad &f, double rate, double hz, double gainDb, double q, 
 inline void shelf(Biquad &f, double rate, double hz, double gainDb, bool high)
 {
     const double A = std::pow(10.0, std::abs(gainDb) / 40), G = std::pow(10.0, gainDb / 40);
-    const double W = std::tan(M_PI * std::min(hz, 0.49 * rate) / rate) * (high ? 1 / A : A);
-    const double w0 = 2 * std::atan(W);
+    // The half-gain frequency of the 44.1 kHz design, kept in Hz at other rates.
+    const double W = std::tan(M_PI * std::min(hz, 0.49 * designRate) / designRate) * (high ? 1 / A : A);
+    const double halfGainHz = std::atan(W) * designRate / M_PI;
+    const double w0 = 2 * M_PI * std::min(halfGainHz, 0.49 * rate) / rate;
     const double slope = 0.5, q = 1 / std::sqrt((G + 1 / G) * (1 / slope - 1) + 2);
     const double c = std::cos(w0), s2 = 2 * std::sqrt(G) * std::sin(w0) / (2 * q);
     if (high)
