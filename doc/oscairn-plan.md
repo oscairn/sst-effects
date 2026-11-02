@@ -770,3 +770,58 @@ dB. Built as mode "Two-band EQ" of Oscairn FX EQ, tests as for the five-band EQ.
 
 Not done in M1 yet: the three-band and Master EQ modes, the low-frequency peak question, and
 listening.
+
+### First measurements of the compressor, the cross delay and the hall reverb (2026-11-02)
+
+Measurement only; nothing built for these types yet. Analysis in the measurement repository's
+`fx/dynamics.py` (tone envelope, step time constant, echoes, per-octave decay times).
+
+**Circuit-style compressor (fx7, 69 renders).** The displayed values follow formulas the
+converter can use: level 60 × log10(v/200) dB, attack 0.022 + 50.378 × (v/200)^2.5 ms,
+release 10.88 + 533.34 × (v/200)² ms. The behaviour is not fitted yet:
+
+- Static curve: the probe was too hot. With a sine at −24 dB RMS and input levels −36 to 0 dB,
+  the output sits at −1 to −2 dBFS RMS for every ratio; at −60 dB input it still gives −5.6 to
+  −7.3 dBFS, so the type adds about 50 dB of gain and its threshold and knee lie below the
+  levels probed. The output level parameter moved the output by 15.5 dB for a displayed −18 dB,
+  suggesting saturation near full scale.
+- Time constants: inconclusive. The pilot tone was already compressed by about 23 dB, so the
+  louder tone added only about 4 dB more and the 63% times (21 to 224 ms) do not follow the
+  attack and release settings.
+- Next: input levels 5–60 and a quieter source for the static curve; a pilot below threshold
+  and a burst well above it for the time constants.
+
+**Tempo cross delay (fx9, 29 renders).** The recorder starts each note up to about 70 ms late,
+and the probes were wet only, so absolute echo times across renders are not usable. Within one
+render with dry and wet (balance D=W) the echo is 499.9 ms after the click for a quarter note at
+120 BPM. Measured so far:
+
+- feedback ±32 decays 5.95 dB per repeat (20 log10(32/63) would be 5.88 dB); ±63 decays
+  0.07 dB per repeat;
+- input L and R give a ping-pong (repeats every 1 s on one side, offset 0.5 s on the other);
+  L&R feeds both sides equally;
+- the longest delay is about 1.487 s (a 3 s setting gave 1.487 s, near 65,536 samples at
+  44.1 kHz);
+- the Performance's tempo (90, 150 BPM) did not change the delay: the reference follows its
+  host's tempo, and the recorder's host runs at 120 BPM. Tempo behaviour needs the recorder to
+  set the host tempo, or is taken from the parameter definitions.
+- Next: every probe with the dry click in the render (balance D=W), so times are measured within
+  each render; the high damping, lag and EQ probes again.
+
+**Hall reverb (fx10, 28 renders).** Reverb only, a click source. Decay times per octave are
+repeatable (two identical renders agree within 0.04 s in every band); levels and onsets are not
+(timing jitter as above, and an 11.6 dB level difference between the two identical renders,
+not explained yet).
+
+| Setting (others factory-typical) | T60 at 125 Hz / 1 kHz / 8 kHz, s |
+| --- | --- |
+| Reverb time index 0 / 16 / 32 / 48 / 69 (displayed 0.3 / 1.9 / 3.5 / 5.5 / 18.0 s) | 0.69/0.68/0.67, 1.67/1.73/1.30, 2.94/2.87/1.80, 3.94/4.06/2.31, 9.00/8.36/3.40 |
+| Room size 0 / 15 / 31 | 0.86/0.84/0.71, 1.61/1.75/1.17, 3.03/3.00/1.87 |
+| High ratio 0.1 / 0.5 / 1.0 | 2.92/2.25/1.17, 2.95/2.79/1.58, 2.95/2.97/3.02 |
+| Low ratio 0.1 / 1.4 | 2.96/2.83/1.78, 3.34/2.98/1.81 |
+| Diffusion, initial delay, HPF, LPF, decay | T60 unchanged within 0.1 s |
+
+So room size scales the decay as much as the time parameter does, and the high ratio is a
+frequency-dependent decay (8 kHz T60 is 0.4× the low-band value at 0.1, 1.0× at 1.0). Next:
+the dry click in each render for onsets and levels, a grid over time and room size, the
+early-reflection pattern, and then the reverb design (written, per section 6).
