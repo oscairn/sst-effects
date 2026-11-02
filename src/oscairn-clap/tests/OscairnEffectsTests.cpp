@@ -554,7 +554,7 @@ TEST_CASE("Processing never allocates")
     pl.p->on_main_thread(pl.p);
     pl.render(inL, inR, r, {1, 37, 512}, {{5, 1, 2.0}});
     REQUIRE(allocations == 0);
-    // The EQ modes at 48 kHz rebuild their rate-matched coefficients in process on a change.
+    // The EQ modes at 48 kHz hand a change to the worker thread and swap its result in.
     for (auto [mode, module, name] : {std::tuple{1, "Five-band EQ", "Band 3 Frequency"}, std::tuple{2, "Two-band EQ", "Band 1 Frequency"},
                                       std::tuple{3, "Three-band EQ", "Mid Frequency"}, std::tuple{4, "Master EQ", "Band 3 Frequency"}})
     {
@@ -882,7 +882,8 @@ TEST_CASE("Reverb 2 sized for the running rate renders exactly as upstream's")
 
 TEST_CASE("Per-context memory by mode and sample rate")
 {
-    // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB).
+    // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB), and
+    // the EQs at 44.1 kHz below 4 KB: they hold the rate matcher's 58 KB only at other rates.
     for (const char *id : {reverbId, eqId})
     {
         Plugin probe(id);
@@ -905,6 +906,11 @@ TEST_CASE("Per-context memory by mode and sample rate")
                             (unsigned long long)res.context_bytes, (unsigned long long)res.shared_bytes);
                 if (std::string(name) == "Reverb 2" && rate == 48000)
                     REQUIRE(res.context_bytes < 1500000);
+                if (!std::strcmp(id, eqId))
+                {
+                    INFO(name << " at " << rate);
+                    REQUIRE((rate == 44100) == (res.context_bytes < 4096));
+                }
             }
     }
 }
@@ -1366,7 +1372,7 @@ TEST_CASE("Fitted EQs keep their 44.1 kHz response at 48, 88.2, 96 and 192 kHz")
 TEST_CASE("Rate matching: coefficient cost")
 {
     // Printed, not gated: the time to compute an EQ's coefficients at another rate (on a
-    // parameter change, in process), cold, over the same settings.
+    // parameter change, on the engine's worker thread), cold, over the same settings.
     using namespace oscairn_fx::eq;
     std::mt19937 rng(7);
     auto uni = [&](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
@@ -1405,6 +1411,254 @@ TEST_CASE("Rate matching: coefficient cost")
             worst = std::max(worst, us);
         }
         std::printf("Five-band EQ coefficients at %.0f Hz: mean %.0f us, worst %.0f us (40 random settings)\n", r, total / n, worst);
+    }
+}
+
+// ---- Rate matching off the audio thread (plan, decision 2) ----
+#include <clap/ext/render.h>
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
+#define OSCAIRN_SANITIZED 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#define OSCAIRN_SANITIZED 1
+#endif
+namespace
+{
+// Drives a plugin one host block at a time, timing each process call.
+struct Driver
+{
+    Plugin &pl;
+    uint32_t frames;
+    std::vector<float> l, r, ol, orr;
+    double worstUs{0};
+    explicit Driver(Plugin &p, uint32_t n) : pl(p), frames(n), l(n), r(n), ol(n), orr(n) {}
+    // One block of `in` (a function of the sample index), with an optional parameter event at 0.
+    void block(size_t at, const std::function<float(size_t)> &in, clap_id id = CLAP_INVALID_ID, double v = 0)
+    {
+        for (uint32_t i = 0; i < frames; ++i)
+            l[i] = r[i] = in(at + i);
+        Events ev;
+        ev.e.reserve(1);
+        if (id != CLAP_INVALID_ID)
+            ev.add(0, id, v);
+        float *ins[2] = {l.data(), r.data()}, *outs[2] = {ol.data(), orr.data()};
+        clap_audio_buffer_t ib{ins, nullptr, 2, 0, 0}, ob{outs, nullptr, 2, 0, 0};
+        clap_process_t pr{};
+        pr.frames_count = frames;
+        pr.audio_inputs = &ib;
+        pr.audio_outputs = &ob;
+        pr.audio_inputs_count = 1;
+        pr.audio_outputs_count = 1;
+        pr.in_events = &ev.in;
+        const auto t0 = std::chrono::steady_clock::now();
+        REQUIRE(pl.p->process(pl.p, &pr) != CLAP_PROCESS_ERROR);
+        worstUs = std::max(worstUs, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+    }
+};
+void setOffline(Plugin &pl)
+{
+    auto *rx = ext<clap_plugin_render_t>(pl.p, CLAP_EXT_RENDER);
+    REQUIRE(rx);
+    REQUIRE(rx->set(pl.p, CLAP_RENDER_OFFLINE));
+}
+// The impulse response after the filters are cleared (CLAP reset), so two plugins holding the
+// same coefficients give the same samples whatever they played before.
+std::vector<float> impulseAfterReset(Plugin &pl, double rate)
+{
+    pl.p->reset(pl.p);
+    const size_t n = (size_t)(rate / 4);
+    std::vector<float> inL(n, 0), inR(n, 0), r;
+    inL[0] = inR[0] = 1;
+    return pl.render(inL, inR, r, {64}, {}, false);
+}
+// Renders silence with pauses until the worker's newest result has been swapped in and the
+// crossfade has ended: until the impulse response stops changing (bounded by `limit`).
+std::vector<float> settledImpulse(Plugin &pl, double rate)
+{
+    std::vector<float> prev;
+    for (int k = 0; k < 400; ++k)
+    {
+        std::vector<float> z(256, 0), r;
+        pl.render(z, z, r, {64}, {}, false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        pl.render(z, z, r, {64}, {}, false);
+        auto now = impulseAfterReset(pl, rate);
+        if (now == prev)
+            return now;
+        prev = std::move(now);
+    }
+    return prev;
+}
+} // namespace
+
+TEST_CASE("Rate matching runs off the audio thread")
+{
+    // A parameter sweep at 192 kHz with 64-sample host blocks (0.33 ms): one change per block.
+    // Matching costs 0.1-3 ms per change, so in process the worst block takes several block
+    // lengths. Off the audio thread the worst process call must stay under a quarter of a block
+    // (gated in unsanitized builds; the best of three runs, against preemption by the OS).
+    const double rate = 192000;
+    const uint32_t frames = 64;
+    const double blockUs = 1e6 * frames / rate;
+    auto tone = [rate](size_t i) { return 0.25f * (float)std::sin(2 * M_PI * 440.0 * (double)i / rate); };
+    double bestWorst = 1e300;
+    for (int run = 0; run < 3; ++run)
+    {
+        Plugin pl(eqId);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 3 Gain"), 9);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 3 Q"), 4);
+        pl.activate(rate);
+        const clap_id f = paramIdByName(pl.p, "Five-band EQ", "Band 3 Frequency");
+        Driver d(pl, frames);
+        size_t at = 0;
+        for (int k = 0; k < 20; ++k, at += frames)
+            d.block(at, tone);
+        d.worstUs = 0;
+        for (int k = 0; k <= 300; ++k, at += frames)
+            d.block(at, tone, f, 100 * std::pow(200.0, k / 300.0));
+        std::printf("Five-band EQ sweep at 192 kHz, run %d: worst process call %.1f us (block %.1f us)\n", run, d.worstUs, blockUs);
+        bestWorst = std::min(bestWorst, d.worstUs);
+    } // destroyed right after the sweep, with the worker possibly still matching
+#ifndef OSCAIRN_SANITIZED
+    REQUIRE(bestWorst < blockUs / 4);
+#endif
+
+    SECTION("After a change, the swapped-in coefficients equal those matched in process")
+    {
+        // Offline, the plugin matches in process; in real time, on the worker. Same history,
+        // so the same coefficients, bit for bit.
+        for (double r : {48000.0, 192000.0})
+        {
+            Plugin rt(eqId), off(eqId);
+            setOffline(off);
+            for (Plugin *pl : {&rt, &off})
+            {
+                pl->set(paramIdByName(pl->p, "Five-band EQ", "Band 2 Gain"), -6);
+                pl->activate(r);
+                std::vector<float> z(4096, 0), o;
+                pl->render(z, z, o, {64}, {{100, paramIdByName(pl->p, "Five-band EQ", "Band 2 Frequency"), 5000.0}}, false);
+            }
+            const auto a = settledImpulse(rt, r), b = impulseAfterReset(off, r);
+            INFO("rate " << r);
+            REQUIRE(a == b);
+            // and both hold the new setting: as a plugin activated with it (whose fit starts
+            // cold, so equal within the fits' tolerance)
+            Plugin fresh(eqId);
+            fresh.set(paramIdByName(fresh.p, "Five-band EQ", "Band 2 Gain"), -6);
+            fresh.set(paramIdByName(fresh.p, "Five-band EQ", "Band 2 Frequency"), 5000);
+            fresh.activate(r);
+            const auto freqs = logFreqs(20, 20000, 120);
+            const auto x = impulseDb(a, r, freqs), y = impulseDb(impulseAfterReset(fresh, r), r, freqs);
+            double worst = 0;
+            for (size_t k = 0; k < freqs.size(); ++k)
+                worst = std::max(worst, std::abs(x[k] - y[k]));
+            std::printf("Five-band EQ after a change at %.0f Hz: against a fresh plugin, worst %.5f dB\n", r, worst);
+            REQUIRE(worst < 0.02);
+        }
+    }
+    SECTION("After a sweep, the response equals the in-process one")
+    {
+        // In real time the worker skips designs superseded before it reached them, so its fits
+        // start from other previous fits than in process: equal within the fits' 0.01 dB.
+        for (double r : {48000.0, 192000.0})
+        {
+            Plugin rt(eqId), off(eqId);
+            setOffline(off);
+            for (Plugin *pl : {&rt, &off})
+            {
+                pl->set(paramIdByName(pl->p, "Five-band EQ", "Band 3 Gain"), 12);
+                pl->activate(r);
+                const clap_id f = paramIdByName(pl->p, "Five-band EQ", "Band 3 Frequency");
+                std::vector<Event> sweep;
+                for (int k = 0; k <= 200; ++k)
+                    sweep.push_back({(uint32_t)(64 * k), f, 200 * std::pow(80.0, k / 200.0)});
+                std::vector<float> z(64 * 210, 0), o;
+                pl->render(z, z, o, {64}, sweep, false);
+            }
+            const auto freqs = logFreqs(20, 20000, 120);
+            const auto a = impulseDb(settledImpulse(rt, r), r, freqs), b = impulseDb(impulseAfterReset(off, r), r, freqs);
+            double worst = 0;
+            for (size_t k = 0; k < freqs.size(); ++k)
+                worst = std::max(worst, std::abs(a[k] - b[k]));
+            std::printf("Five-band EQ after a sweep at %.0f Hz: worker against in process, worst %.5f dB\n", r, worst);
+            REQUIRE(worst < 0.01);
+            Plugin fresh(eqId);
+            fresh.set(paramIdByName(fresh.p, "Five-band EQ", "Band 3 Gain"), 12);
+            fresh.set(paramIdByName(fresh.p, "Five-band EQ", "Band 3 Frequency"), 200 * 80.0);
+            fresh.activate(r);
+            const auto c = impulseDb(impulseAfterReset(fresh, r), r, freqs);
+            double worstFresh = 0;
+            for (size_t k = 0; k < freqs.size(); ++k)
+                worstFresh = std::max(worstFresh, std::abs(a[k] - c[k]));
+            std::printf("Five-band EQ after a sweep at %.0f Hz: against a fresh plugin, worst %.5f dB\n", r, worstFresh);
+            REQUIRE(worstFresh < 0.02);
+        }
+    }
+}
+
+TEST_CASE("Rate-matched EQs change their number of sections without clicks")
+{
+    // A band switched on or off changes how many biquads the matched cascade holds (at 44.1 kHz
+    // nothing is matched). The click is the largest output above 8 kHz (a fourth-order high-pass)
+    // in the 50 ms after the change, for a 220 Hz + 1 kHz input that has nothing up there; at
+    // every rate it must stay within 6 dB of the same change at 44.1 kHz, or below -80 dBFS.
+    // Rendered offline (matching in process) so the change lands at the same sample.
+    struct Change
+    {
+        const char *what, *name;
+        double from, to;
+    };
+    const Change changes[] = {{"band 3 on", "Band 3 Gain", 0, 9},
+                              {"band 3 off", "Band 3 Gain", 9, 0},
+                              {"band 4 cut on", "Band 4 Gain", 0, -12},
+                              {"low shelf on", "Low Shelf Gain", 0, 6}};
+    auto click = [](const Change &c, double rate) {
+        Plugin pl(eqId);
+        setOffline(pl);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 3 Frequency"), 1500);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 3 Q"), 2);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 4 Frequency"), 400);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 4 Q"), 1);
+        pl.set(paramIdByName(pl.p, "Five-band EQ", "Band 2 Gain"), 4); // a section beside the change
+        pl.set(paramIdByName(pl.p, "Five-band EQ", c.name), c.from);
+        pl.activate(rate);
+        const size_t n = (size_t)(rate * 0.6), at = (size_t)(rate * 0.5) + 7;
+        std::vector<float> in(n), r;
+        for (size_t i = 0; i < n; ++i)
+            in[i] = 0.25f * (float)(std::sin(2 * M_PI * 220 * i / rate) + std::sin(2 * M_PI * 1000 * i / rate));
+        auto out = pl.render(in, in, r, {64}, {{(uint32_t)at, paramIdByName(pl.p, "Five-band EQ", c.name), c.to}}, false);
+        // fourth-order Butterworth high-pass at 8 kHz, as two bilinear sections
+        double peak = 0, z[2][2]{};
+        const double K = std::tan(M_PI * 8000 / rate);
+        for (size_t i = 0; i < n; ++i)
+        {
+            double x = out[i];
+            for (int s = 0; s < 2; ++s)
+            {
+                const double q = s ? 1.3065630 : 0.5411961, norm = 1 / (1 + K / q + K * K);
+                const double b0 = norm, b1 = -2 * norm, a1 = 2 * (K * K - 1) * norm, a2 = (1 - K / q + K * K) * norm;
+                const double y = b0 * x + z[s][0];
+                z[s][0] = b1 * x - a1 * y + z[s][1];
+                z[s][1] = b0 * x - a2 * y;
+                x = y;
+            }
+            if (i >= at && i < at + (size_t)(0.05 * rate))
+                peak = std::max(peak, std::abs(x));
+        }
+        return 20 * std::log10(peak + 1e-12);
+    };
+    for (const auto &c : changes)
+    {
+        const double ref = click(c, 44100);
+        for (double rate : {48000.0, 96000.0, 192000.0})
+        {
+            const double got = click(c, rate);
+            std::printf("Click, %s: %.1f dBFS at %.0f Hz (44.1 kHz: %.1f dBFS)\n", c.what, got, rate, ref);
+            INFO(c.what << " at " << rate << " Hz: " << got << " dBFS, 44.1 kHz " << ref << " dBFS");
+            CHECK(got < std::max(ref + 6, -80.0));
+        }
     }
 }
 

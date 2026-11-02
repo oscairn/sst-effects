@@ -46,6 +46,10 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
               typename FXConfig::ValueStorage *p)
         : sst::effects::core::EffectTemplateBase<FXConfig>(s, e, p)
     {
+        if constexpr (requires { s->worker; s->offline; })
+            cascade.prepare(this->sampleRate(), s->worker, s->offline);
+        else
+            cascade.prepare(this->sampleRate(), nullptr, nullptr);
     }
 
     void initialize()
@@ -53,7 +57,6 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
         for (auto &b : bands)
             b.reset();
         cascade.reset();
-        cascade.n = 0;
         last.fill(NAN);
         update();
     }
@@ -65,14 +68,7 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
     {
         update();
         if (matched)
-        {
-            for (int i = 0; i < FXConfig::blockSize; ++i)
-            {
-                L[i] = cascade.run(0, L[i]) * gain;
-                R[i] = cascade.run(1, R[i]) * gain;
-            }
-            return;
-        }
+            return cascade.process(L, R, FXConfig::blockSize, gain);
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             float l = L[i], r = R[i];
@@ -86,6 +82,9 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
             R[i] = r * gain;
         }
     }
+
+    static size_t heapBytesAt(double rate) { return decltype(cascade)::heapBytesAt(rate); }
+    size_t heapBytes() const { return cascade.heapBytes(); }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
@@ -161,12 +160,10 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
         matched = this->sampleRate() != designRate;
         if (matched)
         {
-            const Biquad *design[2];
-            int count = 0;
+            const Biquad *design[2]{};
             for (int b = 0; b < 2; ++b)
-                if (active[b])
-                    design[count++] = &bands[b];
-            cascade.set(design, count, this->sampleRate());
+                design[b] = active[b] ? &bands[b] : nullptr;
+            cascade.set(design);
         }
     }
 };

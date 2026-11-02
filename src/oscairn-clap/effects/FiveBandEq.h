@@ -25,10 +25,12 @@
 #include "sst/effects/EffectCore.h"
 #include "sst/basic-blocks/params/ParamMetadata.h"
 #include "RateMatch.h"
+#include "../OffThread.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 
 namespace oscairn_fx::eq
 {
@@ -59,50 +61,247 @@ struct Biquad
 constexpr double designRate = 44100;
 
 // At any other rate an EQ runs its 44.1 kHz sections' rate-matched replacement (RateMatch.h):
-// up to three biquads per section, rebuilt when a parameter changes. States of the sections
-// that remain are kept; new ones start from silence.
-template <int N> struct MatchedCascade
+// up to three biquads per section. Section i of the design keeps slot i, so its biquads keep their
+// states when other sections come and go.
+//
+// Matching costs 0.1-3 ms, longer than a block, so it runs off the audio thread (plan, decision
+// 2): a change posts the new design to the engine's worker (OffThread.h) and the previous
+// coefficients keep playing until the result arrives; it is swapped in at a block boundary with a
+// short crossfade from the previous cascade. Only the newest design is matched, and a result is
+// never applied over a newer one. Without a worker, or when the host renders offline, the match
+// runs in process instead, so offline renders do not depend on timing. The first match (at
+// initialize, on the main thread when the plugin builds the effect) is applied at once.
+//
+// Everything matching needs (58 KB of matcher scratch, the exchange buffers and the second
+// cascade) is allocated by prepare, on the main thread, and only at rates other than 44.1 kHz.
+template <int N> class MatchedCascade final : public Job
 {
-    std::array<Biquad, 3 * N> sec;
-    int n{0};
-    rate::Matcher matcher;
+  public:
+    static constexpr double fadeSeconds = 0.002;
+
+    MatchedCascade() = default;
+    MatchedCascade(const MatchedCascade &) = delete;
+    MatchedCascade &operator=(const MatchedCascade &) = delete;
+    ~MatchedCascade()
+    {
+        if (st && st->worker)
+            st->worker->remove(this);
+    }
+    // At construction. Allocates only when rate is not 44.1 kHz; may throw.
+    void prepare(double rate, Worker *worker, const std::atomic<bool> *offline)
+    {
+        if (rate == designRate)
+            return;
+        st = std::make_unique<State>();
+        st->rate = rate;
+        st->offline = offline;
+        st->fadeLen = std::max(1, (int)std::lround(fadeSeconds * rate));
+        if (worker)
+        {
+            worker->add(this);
+            st->worker = worker;
+        }
+    }
+    // What prepare allocates at a rate.
+    static size_t heapBytesAt(double rate) { return rate == designRate ? 0 : sizeof(State); }
+    size_t heapBytes() const { return st ? sizeof(State) : 0; }
+
+    // Clears the filters' states; the coefficients stay.
     void reset()
     {
-        for (auto &b : sec)
-            b.reset();
+        if (!st)
+            return;
+        st->cur.reset();
+        st->old.reset();
+        st->fade = 0;
     }
-    // The 44.1 kHz sections (identity sections may be left out by the caller).
-    void set(const Biquad *const *design, int count, double rate)
+
+    // The 44.1 kHz design, one entry per slot, nullptr for a section left out (identity).
+    void set(const Biquad *const *design)
     {
-        rate::Section s44[N], out[3 * N];
-        for (int i = 0; i < count; ++i)
+        auto &S = *st;
+        Request req{};
+        for (int i = 0; i < N; ++i)
+            if (design[i])
+            {
+                const Biquad &d = *design[i];
+                auto &x = req.s[req.count];
+                x.b[0] = d.b0, x.b[1] = d.b1, x.b[2] = d.b2, x.a[1] = d.a1, x.a[2] = d.a2;
+                req.slot[req.count++] = i;
+            }
+        if (S.have && sameDesign(req, S.want))
+            return;
+        S.want = req;
+        req.gen = ++S.posted;
+        if (!S.have)
         {
-            const Biquad &d = *design[i];
-            s44[i].b[0] = d.b0;
-            s44[i].b[1] = d.b1;
-            s44[i].b[2] = d.b2;
-            s44[i].a[1] = d.a1;
-            s44[i].a[2] = d.a2;
+            // The first design: matched now and applied without a crossfade.
+            S.have = true;
+            matchExclusive(req);
+            if (const Result *r = S.results.read())
+                apply(*r, false);
+            return;
         }
-        const int m = count > 0 ? matcher.match(s44, count, rate, out) : 0;
-        for (int i = n; i < m; ++i)
-            sec[i].reset();
-        for (int i = 0; i < m; ++i)
+        if (!S.worker || (S.offline && S.offline->load(std::memory_order_relaxed)))
         {
-            auto &b = sec[i];
-            b.b0 = out[i].b[0];
-            b.b1 = out[i].b[1];
-            b.b2 = out[i].b[2];
-            b.a1 = out[i].a[1];
-            b.a2 = out[i].a[2];
+            matchExclusive(req); // applied by process, at this block or after a crossfade
+            return;
         }
-        n = m;
+        S.requests.writeSlot() = req;
+        S.requests.publish();
+        S.worker->wake();
     }
-    inline float run(int ch, float x)
+
+    // Runs a block through the cascade, scaled by gain (as the EQs did before the crossfade).
+    template <typename G> void process(float *__restrict L, float *__restrict R, int n, G gain)
     {
+        auto &S = *st;
+        if (S.fade == 0)
+            if (const Result *r = S.results.fresh() ? S.results.read() : nullptr; r && r->gen > S.applied)
+                apply(*r, true);
         for (int i = 0; i < n; ++i)
-            x = sec[i].run(ch, x);
-        return x;
+        {
+            const float l = S.cur.run(0, L[i]), r = S.cur.run(1, R[i]);
+            if (S.fade == 0)
+            {
+                L[i] = (float)(l * gain);
+                R[i] = (float)(r * gain);
+                continue;
+            }
+            const double w = (double)S.fade / S.fadeLen;
+            const double ol = S.old.run(0, L[i]), orr = S.old.run(1, R[i]);
+            L[i] = (float)((l + w * (ol - l)) * gain);
+            R[i] = (float)((r + w * (orr - r)) * gain);
+            --S.fade;
+        }
+    }
+
+    bool service() noexcept override
+    {
+        auto &S = *st;
+        if (!S.requests.fresh() || S.busy.exchange(true, std::memory_order_acquire))
+            return false;
+        bool did = false;
+        if (const Request *r = S.requests.read())
+        {
+            matchLocked(*r);
+            did = true;
+        }
+        S.busy.store(false, std::memory_order_release);
+        return did;
+    }
+
+  private:
+    struct Cascade
+    {
+        Biquad sec[N][3];
+        int cnt[N]{};
+        inline float run(int ch, float x)
+        {
+            for (int s = 0; s < N; ++s)
+                for (int k = 0; k < cnt[s]; ++k)
+                    x = sec[s][k].run(ch, x);
+            return x;
+        }
+        void reset()
+        {
+            for (auto &s : sec)
+                for (auto &b : s)
+                    b.reset();
+        }
+    };
+    struct Request
+    {
+        rate::Section s[N];
+        int slot[N];
+        int count;
+        uint64_t gen;
+    };
+    struct Result
+    {
+        rate::Section s[N][3];
+        int cnt[N];
+        uint64_t gen;
+    };
+    struct State
+    {
+        rate::Matcher matcher;
+        TripleBuffer<Request> requests; // audio thread -> worker
+        TripleBuffer<Result> results;   // whoever holds busy -> audio thread
+        std::atomic<bool> busy{false};  // held while matching: the matcher and the results' writer
+        Worker *worker{nullptr};
+        const std::atomic<bool> *offline{nullptr};
+        double rate{0};
+        // audio thread (and the main thread before processing starts)
+        Request want{};
+        bool have{false};
+        uint64_t posted{0}, applied{0};
+        Cascade cur, old;
+        int fade{0}, fadeLen{1};
+    };
+    std::unique_ptr<State> st;
+
+    static bool sameDesign(const Request &a, const Request &b)
+    {
+        if (a.count != b.count)
+            return false;
+        for (int i = 0; i < a.count; ++i)
+            if (a.slot[i] != b.slot[i] || !std::equal(a.s[i].b, a.s[i].b + 3, b.s[i].b) ||
+                !std::equal(a.s[i].a, a.s[i].a + 3, b.s[i].a))
+                return false;
+        return true;
+    }
+    // Matches in this thread, waiting for the worker if it is matching (offline only, or before
+    // processing starts).
+    void matchExclusive(const Request &req)
+    {
+        while (st->busy.exchange(true, std::memory_order_acquire))
+            std::this_thread::yield();
+        matchLocked(req);
+        st->busy.store(false, std::memory_order_release);
+    }
+    void matchLocked(const Request &req)
+    {
+        auto &S = *st;
+        Result &out = S.results.writeSlot();
+        rate::Section flat[3 * N];
+        int counts[N]{};
+        if (req.count > 0)
+            S.matcher.match(req.s, req.count, S.rate, flat, req.slot, counts);
+        std::fill(out.cnt, out.cnt + N, 0);
+        for (int i = 0, at = 0; i < req.count; at += counts[i++])
+        {
+            out.cnt[req.slot[i]] = counts[i];
+            std::copy(flat + at, flat + at + counts[i], out.s[req.slot[i]]);
+        }
+        out.gen = req.gen;
+        S.results.publish();
+    }
+    // A slot's biquads keep their states where they remain; new ones start from silence.
+    void apply(const Result &r, bool crossfade)
+    {
+        auto &S = *st;
+        S.applied = r.gen;
+        if (crossfade)
+        {
+            S.old = S.cur;
+            S.fade = S.fadeLen;
+        }
+        for (int s = 0; s < N; ++s)
+        {
+            for (int k = 0; k < r.cnt[s]; ++k)
+            {
+                auto &b = S.cur.sec[s][k];
+                if (k >= S.cur.cnt[s])
+                    b.reset();
+                b.b0 = r.s[s][k].b[0];
+                b.b1 = r.s[s][k].b[1];
+                b.b2 = r.s[s][k].b[2];
+                b.a1 = r.s[s][k].a[1];
+                b.a2 = r.s[s][k].a[2];
+            }
+            S.cur.cnt[s] = r.cnt[s];
+        }
     }
 };
 // The network's three band-passes, weights and roles at 44.1 kHz as up to three biquads.
@@ -223,6 +422,10 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
                typename FXConfig::ValueStorage *p)
         : sst::effects::core::EffectTemplateBase<FXConfig>(s, e, p)
     {
+        if constexpr (requires { s->worker; s->offline; })
+            cascade.prepare(this->sampleRate(), s->worker, s->offline);
+        else
+            cascade.prepare(this->sampleRate(), nullptr, nullptr);
     }
 
     void initialize()
@@ -232,7 +435,6 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
         for (auto &b : peaks)
             b.reset();
         cascade.reset();
-        cascade.n = 0;
         last.fill(NAN);
         update();
     }
@@ -244,20 +446,16 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
     {
         update();
         if (matched)
-        {
-            for (int i = 0; i < FXConfig::blockSize; ++i)
-            {
-                L[i] = (float)(cascade.run(0, L[i]) * gain);
-                R[i] = (float)(cascade.run(1, R[i]) * gain);
-            }
-            return;
-        }
+            return cascade.process(L, R, FXConfig::blockSize, gain);
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             L[i] = (float)(network(0, shelves[1].run(0, shelves[0].run(0, L[i]))) * gain);
             R[i] = (float)(network(1, shelves[1].run(1, shelves[0].run(1, R[i]))) * gain);
         }
     }
+
+    static size_t heapBytesAt(double rate) { return decltype(cascade)::heapBytesAt(rate); }
+    size_t heapBytes() const { return cascade.heapBytes(); }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
@@ -366,15 +564,13 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
         {
             Biquad net[3];
             const int nn = networkBiquads(peaks.data(), weight.data(), role.data(), net);
-            const Biquad *design[5];
-            int count = 0;
-            for (const Biquad *b : {&shelves[0], &shelves[1]})
-                if (!isIdentity(*b))
-                    design[count++] = b;
+            // slots: the shelves, then the network's sections
+            const Biquad *design[5]{};
+            for (int i = 0; i < 2; ++i)
+                design[i] = isIdentity(shelves[i]) ? nullptr : &shelves[i];
             for (int i = 0; i < nn; ++i)
-                if (!isIdentity(net[i]))
-                    design[count++] = &net[i];
-            cascade.set(design, count, running);
+                design[2 + i] = isIdentity(net[i]) ? nullptr : &net[i];
+            cascade.set(design);
         }
     }
 };

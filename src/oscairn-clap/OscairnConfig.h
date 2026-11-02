@@ -9,11 +9,14 @@
 #ifndef OSCAIRN_CLAP_OSCAIRNCONFIG_H
 #define OSCAIRN_CLAP_OSCAIRNCONFIG_H
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 
 namespace oscairn_fx
 {
+class Worker;
+
 struct Config
 {
     struct BC
@@ -27,7 +30,12 @@ struct Config
     {
         double sampleRate;
         uint32_t rng{0x9E3779B9u};
-        GS(double sr) : sampleRate(sr) {}
+        // The engine's worker thread for work kept off the audio thread (OffThread.h), and the
+        // host's offline render flag; without a worker, or when rendering offline, effects do
+        // that work in process instead.
+        Worker *worker{nullptr};
+        const std::atomic<bool> *offline{nullptr};
+        GS(double sr, Worker *w = nullptr, const std::atomic<bool> *o = nullptr) : sampleRate(sr), worker(w), offline(o) {}
     };
     struct ES
     {

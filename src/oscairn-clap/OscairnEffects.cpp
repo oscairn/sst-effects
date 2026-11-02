@@ -12,9 +12,11 @@
  */
 #include "OscairnEffects.h"
 #include "OscairnConfig.h"
+#include "OffThread.h"
 
 #include <oscairn-clap/effect-contexts.h>
 #include <oscairn-clap/memory.h>
+#include <clap/ext/render.h>
 
 #include "sst/basic-blocks/simd/setup.h"
 #include "sst/effects/Reverb1.h"
@@ -55,17 +57,33 @@ struct Effect
     virtual size_t bytes() const = 0;
 };
 
+// An effect's own heap allocations (made at construction), where it has any.
+template <typename FX> size_t heapBytesAt(double rate)
+{
+    if constexpr (requires { FX::heapBytesAt(rate); })
+        return FX::heapBytesAt(rate);
+    return 0;
+}
+
 template <typename FX> struct EffectOf final : Effect
 {
     Cfg::GS gs;
     Cfg::ES es;
     FX fx;
-    explicit EffectOf(double rate) : gs(rate), fx(&gs, &es, nullptr) {}
+    EffectOf(double rate, oscairn_fx::Worker *worker, const std::atomic<bool> *offline)
+        : gs(rate, worker, offline), fx(&gs, &es, nullptr)
+    {
+    }
     float *params() override { return fx.paramStorage; }
     void initialize() override { fx.initialize(); }
     void process(float *L, float *R) override { fx.processBlock(L, R); }
     int ringoutBlocks() const override { return fx.getRingoutDecay(); }
-    size_t bytes() const override { return sizeof(*this); }
+    size_t bytes() const override
+    {
+        if constexpr (requires { fx.heapBytes(); })
+            return sizeof(*this) + fx.heapBytes();
+        return sizeof(*this);
+    }
 };
 
 struct Mode
@@ -73,27 +91,28 @@ struct Mode
     uint32_t id;      // stable: the Mode parameter's value and the high bits of parameter IDs
     const char *name; // generic, also the module path of the mode's parameters
     std::vector<pm::ParamMetaData> meta;
-    std::unique_ptr<Effect> (*make)(double rate);
-    size_t (*bytes)(double rate); // what make(rate) allocates
+    std::unique_ptr<Effect> (*make)(double rate, oscairn_fx::Worker *, const std::atomic<bool> *offline);
+    size_t (*bytes)(double rate); // what make(rate, ...) allocates
 };
 
 // An effect instance whose buffers are sized for the running rate (OscairnConfig.h).
-template <template <typename> class FX> std::unique_ptr<Effect> makeSized(double rate)
+template <template <typename> class FX>
+std::unique_ptr<Effect> makeSized(double rate, oscairn_fx::Worker *w, const std::atomic<bool> *o)
 {
     using namespace oscairn_fx;
     if (rate <= sizedRates[0])
-        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[0]>>>>(rate);
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[0]>>>>(rate, w, o);
     if (rate <= sizedRates[1])
-        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[1]>>>>(rate);
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[1]>>>>(rate, w, o);
     if (rate <= sizedRates[2])
-        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[2]>>>>(rate);
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[2]>>>>(rate, w, o);
     if (rate <= sizedRates[3])
-        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[3]>>>>(rate);
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[3]>>>>(rate, w, o);
     if (rate <= sizedRates[4])
-        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[4]>>>>(rate);
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[4]>>>>(rate, w, o);
     if (rate <= sizedRates[5])
-        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[5]>>>>(rate);
-    return std::make_unique<EffectOf<FX<Cfg>>>(rate);
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[5]>>>>(rate, w, o);
+    return std::make_unique<EffectOf<FX<Cfg>>>(rate, w, o);
 }
 
 template <template <typename> class FX> size_t sizedBytes(double rate)
@@ -106,9 +125,9 @@ template <template <typename> class FX> size_t sizedBytes(double rate)
                 sizeof(EffectOf<FX<SizedConfig<sizedRates[0]>>>), sizeof(EffectOf<FX<SizedConfig<sizedRates[1]>>>),
                 sizeof(EffectOf<FX<SizedConfig<sizedRates[2]>>>), sizeof(EffectOf<FX<SizedConfig<sizedRates[3]>>>),
                 sizeof(EffectOf<FX<SizedConfig<sizedRates[4]>>>), sizeof(EffectOf<FX<SizedConfig<sizedRates[5]>>>)};
-            return sizes[i];
+            return sizes[i] + heapBytesAt<FX<Cfg>>(rate);
         }
-    return sizeof(EffectOf<FX<Cfg>>);
+    return sizeof(EffectOf<FX<Cfg>>) + heapBytesAt<FX<Cfg>>(rate);
 }
 
 template <template <typename> class FX> Mode mode(uint32_t id, const char *name)
@@ -116,7 +135,7 @@ template <template <typename> class FX> Mode mode(uint32_t id, const char *name)
     Mode m{id, name, {}, makeSized<FX>, sizedBytes<FX>};
     static_assert(FX<Cfg>::numParams <= Cfg::BC::maxParamCount);
     // Metadata from the smallest instance; it does not depend on the buffer sizes.
-    auto probe = std::make_unique<EffectOf<FX<oscairn_fx::SizedConfig<oscairn_fx::sizedRates[0]>>>>(48000.0);
+    auto probe = std::make_unique<EffectOf<FX<oscairn_fx::SizedConfig<oscairn_fx::sizedRates[0]>>>>(48000.0, nullptr, nullptr);
     for (int i = 0; i < FX<Cfg>::numParams; ++i)
         m.meta.push_back(probe->fx.paramAt(i));
     return m;
@@ -206,6 +225,9 @@ struct Engine
 {
     double sampleRate;
     std::atomic<uint32_t> contexts{0};
+    // Off-audio-thread work of the engine's contexts (the EQs' rate matching); its thread starts
+    // with the first context that needs it.
+    oscairn_fx::Worker worker;
     explicit Engine(double rate) : sampleRate(rate) {}
 };
 
@@ -227,6 +249,7 @@ struct Context
     uint32_t pos{0};
     uint32_t quietBlocks{0}, quietLimit{1};
     std::atomic<bool> tail{false};
+    std::atomic<bool> offline{false}; // clap.render: the host renders offline
 
     Context(const clap_host_t *h, const Category &c, std::shared_ptr<Engine> e)
         : host(h), cat(c), engine(std::move(e)), values(c.params.size()), wanted(c.defaultMode)
@@ -265,7 +288,7 @@ size_t contextHeldBytes(const Context &s)
 std::unique_ptr<Effect> build(Context &s, uint32_t modeId)
 {
     const int m = s.cat.modeIndex(modeId);
-    auto fx = s.cat.modes[m].make(s.engine->sampleRate);
+    auto fx = s.cat.modes[m].make(s.engine->sampleRate, &s.engine->worker, &s.offline);
     fx->mode = modeId;
     float *store = fx->params();
     for (size_t p = 1; p < s.cat.params.size(); ++p)
@@ -445,6 +468,17 @@ const clap_plugin_audio_ports_t audioPorts{portCount, portGet};
 const clap_plugin_latency_t latency{[](const clap_plugin_t *) -> uint32_t {
     return oscairn_fx::latencySamples;
 }};
+
+// Offline, effects do in process what they otherwise hand to the worker thread, so an offline
+// render does not depend on timing.
+const clap_plugin_render_t renderExt{
+    [](const clap_plugin_t *) { return false; },
+    [](const clap_plugin_t *plugin, clap_plugin_render_mode mode) {
+        if (mode != CLAP_RENDER_REALTIME && mode != CLAP_RENDER_OFFLINE)
+            return false;
+        self(plugin).offline.store(mode == CLAP_RENDER_OFFLINE);
+        return true;
+    }};
 
 const clap_plugin_tail_t tailExt{[](const clap_plugin_t *plugin) -> uint32_t {
     auto &s = self(plugin);
@@ -740,6 +774,8 @@ const clap_plugin_t *create(const clap_host_t *host, const Category &cat,
             return &latency;
         if (!std::strcmp(id, CLAP_EXT_TAIL))
             return &tailExt;
+        if (!std::strcmp(id, CLAP_EXT_RENDER))
+            return &renderExt;
         if (!std::strcmp(id, OSCAIRN_EXT_EFFECT_CONTEXTS))
             return &contexts;
         if (!std::strcmp(id, OSCAIRN_EXT_MEMORY))

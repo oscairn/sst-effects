@@ -228,8 +228,10 @@ class Matcher
     static constexpr double tolMain = 0.01, tolDeep = 0.1, tolHold = 6.0;
 
     // Fits every 44.1 kHz section of an EQ (all of `secs`, n of them) at `rate`. out receives up
-    // to 3 sections per input section; returns their count.
-    int match(const Section *secs, int n, double rate, Section *out)
+    // to 3 sections per input section; returns their count. slots (optional) names each input
+    // section's place in the EQ, which keys the previous fit used as the next start (default: its
+    // index); counts (optional) receives the number of output sections of each input section.
+    int match(const Section *secs, int n, double rate, Section *out, const int *slots = nullptr, int *counts = nullptr)
     {
         all = secs;
         nAll = n;
@@ -249,10 +251,20 @@ class Matcher
         for (int k = 0; k < dense; ++k)
             told[k] = tot[k] > peak - 20 ? tolMain : tolDeep;
         int count = 0;
+        bool used[maxSections]{};
         for (int i = 0; i < n; ++i)
-            count += fitSection(secs[i], i, rate, out + count);
-        for (int i = n; i < maxSections; ++i)
-            prev[i].nq = 0;
+        {
+            const int slot = slots ? slots[i] : i;
+            const int c = fitSection(secs[i], slot, rate, out + count);
+            if (slot >= 0 && slot < maxSections)
+                used[slot] = true;
+            if (counts)
+                counts[i] = c;
+            count += c;
+        }
+        for (int i = 0; i < maxSections; ++i)
+            if (!used[i])
+                prev[i].nq = 0;
         return count;
     }
 
