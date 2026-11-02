@@ -14,6 +14,7 @@
 #include "OscairnConfig.h"
 
 #include <oscairn-clap/effect-contexts.h>
+#include <oscairn-clap/memory.h>
 
 #include "sst/basic-blocks/simd/setup.h"
 #include "sst/effects/Reverb1.h"
@@ -245,6 +246,18 @@ Context &self(const clap_plugin_t *p) { return *static_cast<Context *>(p->plugin
 
 // The context's own storage, whatever its mode.
 size_t contextFixedBytes(const Context &s) { return sizeof(Context) + s.values.size() * sizeof(std::atomic<float>); }
+
+// The context's storage and every effect it holds: during a mode change, the new one and the old
+// one until it is freed. Reported the same through oscairn.effect-contexts and oscairn.memory.
+size_t contextHeldBytes(const Context &s)
+{
+    size_t held = contextFixedBytes(s) + s.fxBytes.load();
+    if (auto *p = s.pending.load())
+        held += p->bytes();
+    if (auto *r = s.retired.load())
+        held += r->bytes();
+    return held;
+}
 
 std::unique_ptr<Effect> build(Context &s, uint32_t modeId)
 {
@@ -611,6 +624,25 @@ const clap_plugin_state_t state{stateSave, stateLoad};
 const clap_plugin_t *create(const clap_host_t *host, const Category &cat,
                             std::shared_ptr<Engine> engine);
 
+// oscairn.memory: what activating would allocate for the loaded state (the mode it selects, at
+// the rate), and what is held. Allocations do not depend on the maximum block size; no assets.
+const oscairn_plugin_memory_t memory{
+    [](const clap_plugin_t *p, double rate, uint32_t, oscairn_memory_t *out) -> bool {
+        if (!out || !std::isfinite(rate) || rate < 8000 || rate > 768000)
+            return false;
+        auto &s = self(p);
+        const int m = s.cat.modeIndex(s.wanted.load());
+        *out = {sizeof(Engine), contextFixedBytes(s) + s.cat.modes[m].bytes(rate), 0};
+        return true;
+    },
+    [](const clap_plugin_t *p, oscairn_memory_t *out) -> bool {
+        auto &s = self(p);
+        if (!out || !s.active || !s.engine)
+            return false;
+        *out = {sizeof(Engine), contextHeldBytes(s), 0};
+        return true;
+    }};
+
 const oscairn_plugin_effect_contexts_t contexts{
     [](const clap_plugin_t *p, const clap_host_t *host) -> const clap_plugin_t * {
         auto &s = self(p);
@@ -629,7 +661,7 @@ const oscairn_plugin_effect_contexts_t contexts{
         auto &s = self(p);
         if (!out || !s.engine)
             return false;
-        *out = {sizeof(Engine), contextFixedBytes(s) + s.fxBytes.load(),
+        *out = {sizeof(Engine), contextHeldBytes(s),
                 oscairn_fx::contextCapacity, s.engine->contexts.load(), s.tail.load()};
         return true;
     }};
@@ -707,40 +739,14 @@ const clap_plugin_t *create(const clap_host_t *host, const Category &cat,
             return &tailExt;
         if (!std::strcmp(id, OSCAIRN_EXT_EFFECT_CONTEXTS))
             return &contexts;
+        if (!std::strcmp(id, OSCAIRN_EXT_MEMORY))
+            return &memory;
         return nullptr;
     };
     s->plugin.on_main_thread = onMainThread;
     return &s->plugin;
 }
 
-} // namespace
-
-bool oscairn_fx::memoryEstimate(const clap_plugin_t *plugin, double rate, MemoryBytes *out)
-{
-    if (!plugin || !out || !std::isfinite(rate) || rate < 8000 || rate > 768000)
-        return false;
-    auto &s = self(plugin);
-    const int m = s.cat.modeIndex(s.wanted.load());
-    *out = {sizeof(Engine), contextFixedBytes(s) + s.cat.modes[m].bytes(rate), 0};
-    return true;
-}
-
-bool oscairn_fx::memoryCurrent(const clap_plugin_t *plugin, MemoryBytes *out)
-{
-    if (!plugin || !out)
-        return false;
-    auto &s = self(plugin);
-    size_t held = s.fxBytes.load();
-    if (auto *p = s.pending.load())
-        held += p->bytes();
-    if (auto *r = s.retired.load())
-        held += r->bytes();
-    *out = {s.engine ? sizeof(Engine) : 0, contextFixedBytes(s) + held, 0};
-    return true;
-}
-
-namespace
-{
 const clap_plugin_factory_t factory{
     [](const clap_plugin_factory_t *) -> uint32_t { return (uint32_t)categories().size(); },
     [](const clap_plugin_factory_t *, uint32_t i) -> const clap_plugin_descriptor_t * {

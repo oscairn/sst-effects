@@ -1,5 +1,9 @@
 # Oscairn CLAP extension headers (vendored)
 
-`include/oscairn-clap/effect-contexts.h`, copied unchanged from Oscairn
-(`core/clap-ext/include/oscairn-clap/`, commit `4e84501`), where it is MIT licensed (SPDX header
-in the file). Update by copying it again; do not edit it here.
+Copied unchanged from Oscairn (`core/clap-ext/include/oscairn-clap/`), where they are MIT licensed
+(SPDX headers in the files). Update by copying them again; do not edit them here.
+
+| Header | Oscairn commit |
+| --- | --- |
+| `include/oscairn-clap/effect-contexts.h` | `4e84501` |
+| `include/oscairn-clap/memory.h` | `17c43f6` |

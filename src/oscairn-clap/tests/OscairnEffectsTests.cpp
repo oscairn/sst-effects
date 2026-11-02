@@ -8,6 +8,7 @@
 #include "OscairnConfig.h"
 #include "OscairnEffects.h"
 #include <oscairn-clap/effect-contexts.h>
+#include <oscairn-clap/memory.h>
 
 #include "sst/basic-blocks/simd/setup.h"
 #include "sst/effects/Reverb1.h"
@@ -526,11 +527,15 @@ TEST_CASE("Mode changes build the new effect on the main thread")
     pl.p->on_main_thread(pl.p);                          // builds Reverb 1
     pl.render(inL, inR, r, {64});                        // swaps it in, asks to free the old one
     REQUIRE(pl.host.callbacks == 2);
+    const size_t r1 = sizeof(sst::effects::reverb1::Reverb1<oscairn_fx::SizedConfig<48000>>);
+    ctx->resources(pl.p, &res);
+    // Both held until freed: Reverb 1 (plus its small wrapper) on top of what was there.
+    REQUIRE(res.context_bytes >= before.context_bytes + r1);
+    REQUIRE(res.context_bytes < before.context_bytes + r1 + 1024);
+    pl.p->on_main_thread(pl.p);                                     // frees Reverb 2
     ctx->resources(pl.p, &res);
     REQUIRE(res.context_bytes ==
-            before.context_bytes - sizeof(sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<48000>>) +
-                sizeof(sst::effects::reverb1::Reverb1<oscairn_fx::SizedConfig<48000>>));
-    pl.p->on_main_thread(pl.p);
+            before.context_bytes - sizeof(sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<48000>>) + r1);
     pl.render(inL, inR, r, {64});
     REQUIRE(pl.host.callbacks == 2); // nothing more to do
 }
@@ -913,59 +918,94 @@ TEST_CASE("Per-context memory by mode and sample rate")
     }
 }
 
-TEST_CASE("Memory estimates before activation equal what activation holds")
+// ---- oscairn.memory (RFC 0025 draft) ----
+namespace
 {
+const oscairn_plugin_memory_t *memoryExt(const clap_plugin_t *p)
+{
+    return ext<oscairn_plugin_memory_t>(p, OSCAIRN_EXT_MEMORY);
+}
+oscairn_effect_resources_t resourcesOf(const clap_plugin_t *p)
+{
+    oscairn_effect_resources_t r{};
+    REQUIRE(ext<oscairn_plugin_effect_contexts_t>(p, OSCAIRN_EXT_EFFECT_CONTEXTS)->resources(p, &r));
+    return r;
+}
+std::string stateWithMode(const char *id, int mode)
+{
+    Plugin a(id);
+    a.set(1, mode);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    return buf.data;
+}
+} // namespace
+
+TEST_CASE("Declared memory equals what activation holds and what effect contexts report")
+{
+    // For every plugin and mode at 44.1 to 192 kHz: estimate (after state load, before
+    // activate) == current (after activate) == the effect contexts' resources.
     for (const char *id : {reverbId, eqId})
     {
         Plugin probe(id);
         clap_param_info_t info;
         ext<clap_plugin_params_t>(probe.p, CLAP_EXT_PARAMS)->get_info(probe.p, 0, &info);
         for (int m = (int)info.min_value; m <= (int)info.max_value; ++m)
-            for (double rate : {44100.0, 48000.0, 50000.0, 96000.0, 192000.0, 384000.0})
+            for (double rate : {44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0})
             {
                 INFO(id << " mode " << m << " at " << rate);
                 Plugin pl(id);
-                pl.set(1, m);
-                oscairn_fx::MemoryBytes est, cur;
-                REQUIRE(oscairn_fx::memoryEstimate(pl.p, rate, &est));
+                Buffer buf;
+                buf.data = stateWithMode(id, m);
+                REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in));
+                auto *mem = memoryExt(pl.p);
+                REQUIRE(mem);
+                oscairn_memory_t est{}, cur{};
+                REQUIRE(mem->estimate(pl.p, rate, 4096, &est));
+                REQUIRE_FALSE(mem->current(pl.p, &cur)); // not activated yet
                 pl.activate(rate);
-                REQUIRE(oscairn_fx::memoryCurrent(pl.p, &cur));
-                REQUIRE(est.shared == cur.shared);
-                REQUIRE(est.context == cur.context);
-                REQUIRE(est.asset == 0);
-                oscairn_effect_resources_t res;
-                ext<oscairn_plugin_effect_contexts_t>(pl.p, OSCAIRN_EXT_EFFECT_CONTEXTS)->resources(pl.p, &res);
-                REQUIRE(res.context_bytes == cur.context); // the same bytes through both
-                REQUIRE(res.shared_bytes == cur.shared);
+                REQUIRE(mem->current(pl.p, &cur));
+                const auto res = resourcesOf(pl.p);
+                REQUIRE(est.shared_bytes == cur.shared_bytes);
+                REQUIRE(est.context_bytes == cur.context_bytes);
+                REQUIRE(est.asset_bytes == 0);
+                REQUIRE(cur.asset_bytes == 0);
+                REQUIRE(res.shared_bytes == cur.shared_bytes);
+                REQUIRE(res.context_bytes == cur.context_bytes);
             }
     }
 }
 
-TEST_CASE("Loading state while active builds the new mode before returning")
+TEST_CASE("The memory estimate follows another state load, and both extensions agree in a mode change")
 {
-    Plugin a;
-    a.set(1, 1); // Reverb 1
-    Buffer buf;
-    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
     Plugin pl; // Reverb 2
-    pl.activate();
-    oscairn_fx::MemoryBytes r1, r2, cur;
-    REQUIRE(oscairn_fx::memoryCurrent(pl.p, &r2));
-    {
-        Plugin probe;
-        probe.set(1, 1);
-        oscairn_fx::memoryEstimate(probe.p, 48000, &r1);
-    }
+    auto *mem = memoryExt(pl.p);
+    oscairn_memory_t r2{}, r1{};
+    REQUIRE(mem->estimate(pl.p, 48000, 512, &r2));
+    Buffer buf;
+    buf.data = stateWithMode(reverbId, 1);
     REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in));
-    oscairn_fx::memoryCurrent(pl.p, &cur);
-    // Reverb 1 is built already; both are held until the audio thread swaps and the old is freed.
-    REQUIRE(cur.context > r1.context);
-    REQUIRE(cur.context > r2.context);
+    REQUIRE(mem->estimate(pl.p, 48000, 512, &r1)); // called again after another state load
+    REQUIRE(r1.context_bytes != r2.context_bytes);
+    // Activate in Reverb 1, then load Reverb 2's state while active: the new mode is built before
+    // load returns, both effects are held until the swap, and both extensions say so.
+    pl.activate();
+    oscairn_memory_t cur{};
+    REQUIRE(mem->current(pl.p, &cur));
+    REQUIRE(cur.context_bytes == r1.context_bytes);
+    buf.data = stateWithMode(reverbId, 2);
+    buf.at = 0;
+    REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in));
+    REQUIRE(mem->current(pl.p, &cur));
+    REQUIRE(cur.context_bytes > r1.context_bytes);
+    REQUIRE(cur.context_bytes > r2.context_bytes);
+    REQUIRE(resourcesOf(pl.p).context_bytes == cur.context_bytes);
     std::vector<float> inL(1024, 0), inR(1024, 0), r;
     pl.render(inL, inR, r, {64});
-    pl.p->on_main_thread(pl.p);
-    oscairn_fx::memoryCurrent(pl.p, &cur);
-    REQUIRE(cur.context == r1.context);
+    pl.p->on_main_thread(pl.p); // frees the old effect
+    REQUIRE(mem->current(pl.p, &cur));
+    REQUIRE(cur.context_bytes == r2.context_bytes);
+    REQUIRE(resourcesOf(pl.p).context_bytes == cur.context_bytes);
 }
 
 // ---- Two-band EQ (plan, section 15, M1) ----
