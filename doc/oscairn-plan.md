@@ -495,16 +495,13 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
 13. **Decided (Jacob, 2026-11-02): higher sample rates sound as the reference does at 44.1 kHz.**
     Fitted effects must match their 44.1 kHz response at 48, 88.2, 96 and 192 kHz within the
     tolerance, gated, with any residual in the known-differences register (section 16). Status:
-    not met yet. The shipped EQs keep each peak's centre and mid-gain edges and each shelf's
-    half-gain frequency in Hz, which holds to 0.05 dB below 4 kHz for moderate settings but not
-    for wide or near-Nyquist sections (register entry 10). A per-section fit to the 44.1 kHz
-    response (complex, from the 44.1 kHz poles and zeros mapped by frequency) was tried: it
-    brings most sections at 48 and 88.2 kHz to within 0.05 dB (0.004 dB for a single band), but
-    it leaves 0.06–0.13 dB at 20 kHz for wide sections, and at 192 kHz the direct-form fit is
-    badly conditioned (errors of several dB), and the five-band EQ's band network needs fitting
-    as a whole. Next: fit in a better-conditioned parametrisation (pole and zero frequency and
-    radius), fit the band network as one sixth-order response, and gate every fitted mode at all
-    four rates.
+    met for the four fitted EQ modes (section 15, "Rate matching"): from 20 Hz to 20 kHz within
+    0.05 dB where the response is within 20 dB of its peak and 0.5 dB below (tolerance
+    proposed), at all four rates, on 39 settings in the plugin tests and 2,400 random settings
+    in a stress run. Each 44.1 kHz section is replaced at other rates by up to three biquads
+    fitted to its magnitude, so the plugins hold up to three times as many sections there, and
+    the coefficients cost 0.13–0.54 ms per change on average (worst seen 2.8 ms), computed in process.
+    Rates below 44.1 kHz are not covered (their band ends below 20 kHz).
 14. **Converter value laws.** The Data List prints rounded labels for the EQ frequency and Q
     tables (125 Hz is 125.9 Hz, 500 Hz is 501.2 Hz). The converter should use the laws measured
     in section 15 (frequency index i is 10^((i + 48) / 40) Hz, Q index j is 0.5 × 2^(j / 12),
@@ -627,7 +624,7 @@ Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
 | Reverb 2 | 44.1 kHz | 16 → 16 | 14,534,184 | 872,856 | 0 | 12.74 MB → 0.77 MB |
 | Reverb 2 | 48 kHz | 16 → 16 | 14,534,184 | 1,188,856 | 0 | 12.76 MB → 1.19 MB |
 | Reverb 2 | 96 kHz | 16 → 16 | 14,534,184 | 2,375,928 | 0 | 12.75 MB → 2.40 MB |
-| Five-band EQ | any | 16 → 16 | 1,156 | 1,156 | 0 | below a page |
+| Five-band EQ | any | 16 → 16 | 1,156 | 1,156 (58,016 since rate matching) | 0 | below a page |
 
 "Context" is the context's own storage plus its effect (`sizeof`, arm64 macOS build), the same
 figure `resources` reports. "Resident growth" is macOS `phys_footprint` growth per context,
@@ -822,6 +819,66 @@ half-gain frequency at other rates.
 Not done in M1 yet: the low-frequency peak question (known differences 1 and 2), the three-band
 mid near Nyquist (5), a further three-band hold-out, and listening.
 
+#### Rate matching (decision 13, 2026-11-02)
+
+The shipped rule (each peak's centre and mid-gain edges, each shelf's half-gain frequency kept in
+Hz) held to 0.05 dB below 4 kHz for moderate settings only, and nothing was checked at 88.2 or
+192 kHz. The previous attempt (a direct-form biquad fitted to each section's complex response)
+was badly conditioned at 192 kHz. What replaced both (`effects/RateMatch.h`):
+
+- The EQs always design their sections at 44.1 kHz. At 44.1 kHz they run them through the same code as before
+  (the 44.1 kHz tests are unchanged and pass to 0.01 dB; bit-identity with the previous build was
+  not checked). At any other rate each section's magnitude
+  is matched by a cascade of one to three biquads; the five-band EQ's band network is first
+  factored into three biquads (its numerator and denominator are degree-6 polynomials; roots by
+  the Aberth iteration, grouped into sections by least root distance), so the network's own
+  delay-free loop is not needed there.
+- Each section is fitted on 48 log-spaced points from 20 Hz to 20 kHz, 12 more from 14 to 20 kHz
+  and 17 around each of its resonances, to 0.01 dB where the whole EQ is within 20 dB of its peak
+  and 0.1 dB below (a fifth of the gate, so that sections add up within it). Above
+  20 kHz, 12 points hold the 44.1 kHz response's continuation loosely.
+- Starts, in order, until one meets that tolerance: the section's roots moved to keep their
+  frequencies in Hz; a Sanathanan–Koerner linear least-squares fit of |H|² as a ratio of
+  polynomials in sin²(πf/rate), spectrally factored (sign-changing roots moved first); the first
+  start with an extra resonant pair near 22.05 kHz; Sanathanan–Koerner of degree 4 and 6. Each is
+  polished by Levenberg–Marquardt on the dB error in analog quadratics at the running rate (log
+  natural frequency, damping), which always give a stable real cascade through the bilinear
+  transform and are well conditioned at any rate. A first-order high-pass keeps its zero at DC
+  exactly. Fits whose response above 20 kHz exceeds the section's 20–22.05 kHz level by more than
+  1 dB rank below those that do not (sections whose continuations cancel in the product, as a
+  near-Nyquist pole and zero split over two sections can, stay cancelled).
+- The previous fit of each section is the first start for the next (parameter changes are mostly
+  small steps); an unchanged section reuses its result if it still meets the tolerance.
+
+Developed against a Python reference of the same steps (scratch, not committed), then ported.
+Results:
+
+| Rate | Before (old rule restored), same 39 settings: within 20 dB / below | After: within 20 dB of the peak / below / above 20 kHz (39 settings) | After, stress run (2,400 random settings, matcher alone): within 20 dB / below |
+| --- | --- | --- | --- |
+| 48 kHz | 3.50 / 4.49 dB | 0.011 / 0.077 dB / +1.3 dB | 0.021 / 0.16 dB |
+| 88.2 kHz | 5.54 / 12.0 dB | 0.016 / 0.12 dB / +0.5 dB | 0.024 / 0.26 dB |
+| 96 kHz | 5.71 / 12.3 dB | 0.017 / 0.24 dB / +0.4 dB | 0.035 / 0.20 dB |
+| 192 kHz | 6.32 / 13.4 dB | 0.023 / 0.29 dB / +0.9 dB | 0.036 / 0.35 dB |
+
+Per mode, before (within 20 dB of the peak, 48 / 88.2 / 96 / 192 kHz): five-band 2.37 / 5.39 /
+5.57 / 6.25 dB, two-band 1.72 / 5.54 / 5.71 / 6.32, three-band 3.50 / 3.94 / 3.94 / 3.92, Master
+1.36 / 3.48 / 3.55 / 3.80. The worst cases are the random settings with bands near 20 kHz; the
+fixed setting with a wide band at 20 kHz was 1.47 dB off at 48 kHz.
+"Before" is the plugin test run with the old rule restored (each mode fails the new gate at every
+rate). The stress run's above-20 kHz excess reached 7.8 dB (known
+difference 10). The tests gate 0.05 dB / 0.5 dB (proposed) and, above 20 kHz, 10 dB as a sanity
+bound (proposed; set after the stress run). Each new test fails with its change undone (the old
+rule restored per mode; an allocation inserted in the matcher fails the allocation test, which now
+also changes EQ parameters in process at 48 kHz).
+
+Cost, measured (arm64 macOS; plugin test in the RelWithDebInfo build, stress and sweep programs at
+-O2): computing a five-band EQ's coefficients cold takes 0.35–0.40 ms on average and 1.2 ms at
+worst over 40 random settings in the plugin test; the stress run saw means of 0.13–0.54 ms per
+mode and rate and a worst of 2.8 ms; sweeping one five-band peak from 1 to 20 kHz in 302 steps
+costs 0.20–0.24 ms per step (worst 1.4 ms). It runs in process when a parameter changes, at most
+once per 16-sample block, and allocates nothing. Memory: every EQ context grows from about 1.2 KB
+to about 58 KB (the matcher's fixed scratch arrays), at every rate.
+
 ### First measurements of the compressor, the cross delay and the hall reverb (2026-11-02)
 
 Measurement only; nothing built for these types yet. Analysis in the measurement repository's
@@ -895,7 +952,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 7 | Three-band low shelf at index 182 | 0.32 dB | Unknown | Unresolved | fx11a `lo_i182` | `shelf` |
 | 8 | Three-band high-shelf scale measured at 17 indices only | Formula within 0.66% of those; corner rule (gain-independent) found on hold-out fx12 | A full table needs a sweep of 125 indices | Formula shipped; a further hold-out due | fx6, fx11a, fx12 | `threeBandHighShelfHalfGainHz`, `threeBandHighShelfCornerHz` |
 | 9 | Three-band Q index law | Within 1.2% of the three measured Q values (indices 0, 15, 31) | Only three points measured | Geometric law in the converter | fx4, fx6 | converter (gate scripts for now) |
-| 10 | Fitted EQs at 48, 88.2, 96 and 192 kHz | Gated below 4 kHz at 48 and 96 kHz for moderate settings (worst 0.046 dB). Not gated yet: five-band EQ with a wide band at 20 kHz, 1.14 / 1.17 dB below 4 kHz at 48 / 96 kHz; wide peaks at 96 kHz, up to 0.20 dB (Master EQ) and 0.12 dB (three-band mid at 7 kHz); first-order passes at 96 kHz, 0.12 dB at 4 kHz; above 4 kHz up to 2.2 dB; 88.2 and 192 kHz not checked | The reference is a 44.1 kHz bilinear design; the shipped rate rule keeps centre, edge and half-gain frequencies, which cannot match wide skirts at other rates | Unresolved: decision 13 now requires matching at all four rates (work in progress) | Plugin tests (`… keep … at 48 and 96 kHz`) | `peakingQAt`, `shelf`, `masterHighShelf` |
+| 10 | Fitted EQs at 48, 88.2, 96 and 192 kHz | Within the proposed gate everywhere checked: worst 0.023 dB within 20 dB of the peak and 0.29 dB below over the plugin tests' 39 settings, 20 Hz–20 kHz; 0.036 / 0.35 dB over 2,400 random settings (stress run, matcher alone). Above 20 kHz (where the reference has no response) the matched EQs may exceed the design's peak up to 22.05 kHz by up to 7.8 dB (stress run; 1.3 dB in the tests) | The reference is a 44.1 kHz bilinear design; a biquad at another rate cannot follow its warping, so each section is replaced by up to three fitted biquads, and above 20 kHz only a loose bound is kept | In-band: met (decision 13). Above 20 kHz: deliberate, sanity bound 10 dB in the tests (proposed, set after seeing 7.8 dB) | Plugin test "Fitted EQs keep their 44.1 kHz response at 48, 88.2, 96 and 192 kHz"; stress program (scratch, not committed) | `effects/RateMatch.h`, `MatchedCascade` in `effects/FiveBandEq.h` |
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix: a deterministic click (oscillator phase reset at note-on, or a sampled click) | fx10, fx15; `fit_rev.py`, `fit_rev2.py` | none (measurement) |
 | 13 | Hall reverb not built; displayed time against measured decay | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: about 0.7 / 0.9 / 1.7–1.9 / 2.5 / 2.9 / 3.6 / 4.1 / 4.8 / 6.1 / 8.4 s (fx10 where measured, else fx15; displayed 0.3 / … / 18.0 s; at index 0 fx15 gives 1.9 s against fx10's 0.68 s, the click residual dominating a short decay); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.8 / 1.2 / 1.75 / 2.4 / 3.0 s; high ratio 0.1 shortens 8 kHz to about 0.4 of the low bands. fx15's 8 kHz values run higher than fx10's (residual of the click) | Reference behaviour | To be fitted when the reverb mode is built, from wet-only renders with a deterministic click | fx10, fx15; `fit_rev.py`, `fit_rev2.py` | none yet |
