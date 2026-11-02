@@ -510,14 +510,14 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     never initialize with some parameters. Oscairn needs repeatable renders; when those effects
     become modes, the wrapper will reseed them from a fixed seed in a new file (stock DSP
     unchanged), and the uninitialized reads go upstream as bug reports. Section 15, M0.
-16. **Memory declaration waits on Oscairn.** RFC 0025's draft `oscairn.memory` extension
-    (`estimate(rate, max_frames)` and `current`, each giving shared, per-context and asset
-    bytes) has no header yet. The plugins compute exactly those figures
-    (`oscairn_fx::memoryEstimate` and `memoryCurrent`); exposing them as the extension waits on
-    Oscairn's header. Until then Oscairn measures memory from outside, keyed by plugin build, so
-    two modes of one plugin share a figure (Reverb 1 2.2 MB, Reverb 2 1.2 MB at 48 kHz): a
-    request for the Oscairn session is to key memory by the effect context's state or to read
-    the plugin's estimate (section 15, effect memory).
+16. **Memory declaration.** The plugins implement Oscairn's draft `oscairn.memory` extension
+    (`memory.h`, vendored from Oscairn `17c43f6`): `estimate(rate, max_frames)` after state
+    load and before activation, `current` after activation, as shared, per-context and asset
+    bytes, the same shared and context bytes as `oscairn.effect-contexts`. Oscairn's host does
+    not read it yet, so it is tested only through this repository's test host. Until the host
+    reads it, Oscairn measures memory from outside, keyed by plugin build, so two modes of one
+    plugin share a figure: the request stands to key memory by the context's state or to read
+    the estimate (section 15, effect memory).
 17. **A measured frequency scale.** The three-band EQ's frequency scale (and possibly the Master
     EQ's low indices) does not follow a formula. Measuring every index is allowed (fit
     measurements), but it is a table built from about 210 renders per band. Confirm that is
@@ -643,15 +643,20 @@ Done here:
   are held (and reported);
 - idle contexts hold only their own storage (1–2 KB); a prepared context's size is a function of
   mode and rate only;
-- `oscairn_fx::memoryEstimate(plugin, rate)` (no allocation; after state load, before
-  activation) and `memoryCurrent(plugin)` give shared, per-context and asset bytes, the figures
-  RFC 0025's draft `oscairn.memory` extension asks for. A test checks the estimate equals what
-  activation then holds, for every mode at 44.1, 48, 50, 96, 192 and 384 kHz, and equals
-  `resources`. Exposing them through the extension waits on Oscairn's header (decision 16).
+- the plugins implement `oscairn.memory` (decision 16): `estimate` (no allocation; after state
+  load, before activation; again after another state load) and `current` (after activation;
+  false before) give shared, per-context and asset bytes. `resources` (effect contexts) and
+  `current` report the same bytes, both counting a mode change's old and new effects until the
+  old one is freed. Tests, through the repository's own test host: for every mode at 44.1,
+  48, 88.2, 96, 176.4 and 192 kHz, the estimate equals what activation holds, `current` and
+  `resources`; the estimate follows another state load; both extensions agree through a mode
+  change. Each fails with its law broken (estimate ignoring the rate, a wrong shared figure,
+  `current` ignoring the effect being swapped in). The maximum block size does not change
+  what the plugins allocate.
 
 Requests for the Oscairn session (not implemented here): measurement keyed only by plugin build
-gives every mode of a category plugin one figure, the largest seen; reading `memoryEstimate`
-through the planned extension, or keying by the context's state, would fix that. For effect
+gives every mode of a category plugin one figure, the largest seen; reading the plugins'
+`oscairn.memory` estimate, or keying by the context's state, would fix that. For effect
 contexts the per-context cost is `context_bytes` from `resources` (or the extension), which the
 budget does not read today.
 
