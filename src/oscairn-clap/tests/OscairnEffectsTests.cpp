@@ -456,6 +456,40 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
     }
 }
 
+TEST_CASE("Audio ports stay the same whatever the mode or state")
+{
+    // The host refuses a plugin whose audio port layout changes while it is loaded.
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay"})
+    {
+        Plugin pl(id);
+        auto *ports = ext<clap_plugin_audio_ports_t>(pl.p, CLAP_EXT_AUDIO_PORTS);
+        auto layout = [&] {
+            std::string out;
+            for (bool in : {true, false})
+                for (uint32_t i = 0; i < ports->count(pl.p, in); ++i)
+                {
+                    clap_audio_port_info_t info;
+                    REQUIRE(ports->get(pl.p, i, in, &info));
+                    out += std::to_string(info.id) + ":" + std::to_string(info.channel_count) + ":" + std::to_string(info.flags) + ":" + info.name + ";";
+                }
+            return out;
+        };
+        const auto first = layout();
+        clap_param_info_t mode;
+        REQUIRE(ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS)->get_info(pl.p, 0, &mode));
+        for (double m = mode.min_value; m <= mode.max_value; ++m)
+        {
+            pl.set(1, m);
+            REQUIRE(layout() == first);
+        }
+        pl.activate();
+        Buffer buf;
+        REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->save(pl.p, &buf.out));
+        REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in));
+        REQUIRE(layout() == first);
+    }
+}
+
 TEST_CASE("Stock modes render exactly as the sst-effects templates")
 {
     std::vector<float> inL, inR, pr, dr;
@@ -525,6 +559,10 @@ TEST_CASE("State round-trips, and bad state is refused")
     REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
     Plugin b;
     REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    // A worker saves right after every load, as its recovery record: the same bytes come back.
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
     auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
     for (uint32_t k = 0; k < params->count(a.p); ++k)
     {
