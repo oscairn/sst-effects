@@ -35,6 +35,7 @@ struct Config
         // that work in process instead.
         Worker *worker{nullptr};
         const std::atomic<bool> *offline{nullptr};
+        double tempo{120}; // BPM, from the host's transport (120 when it gives none)
         GS(double sr, Worker *w = nullptr, const std::atomic<bool> *o = nullptr) : sampleRate(sr), worker(w), offline(o) {}
     };
     struct ES

@@ -187,6 +187,8 @@ struct Plugin
     }
     // Renders in and returns the output, with host blocks cycling through `blocks`.
     clap_process_status last{};
+    double tempo{0}; // > 0: a transport with this tempo
+    std::vector<clap_process_status> statuses; // of the last render, per host block
     std::vector<float> render(const std::vector<float> &inL, const std::vector<float> &inR,
                               std::vector<float> &outR, std::vector<uint32_t> blocks = {37},
                               std::vector<Event> events = {}, bool count = true)
@@ -195,6 +197,8 @@ struct Plugin
         outR.assign(inL.size(), 0);
         std::vector<float> bl(4096), br(4096), ol(4096), orr(4096);
         size_t at = 0, b = 0;
+        statuses.clear();
+        statuses.reserve(inL.size() / blocks[0] + 2);
         Events ev;
         ev.e.reserve(events.size() + 1);
         while (at < inL.size())
@@ -216,9 +220,16 @@ struct Plugin
             pr.audio_inputs_count = 1;
             pr.audio_outputs_count = 1;
             pr.in_events = &ev.in;
+            clap_event_transport_t tr{};
+            tr.header = {sizeof(tr), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0};
+            tr.flags = CLAP_TRANSPORT_HAS_TEMPO;
+            tr.tempo = tempo;
+            if (tempo > 0)
+                pr.transport = &tr;
             countAllocations = count;
             last = p->process(p, &pr);
             countAllocations = false;
+            statuses.push_back(last);
             REQUIRE(last != CLAP_PROCESS_ERROR);
             std::copy(ol.begin(), ol.begin() + n, outL.begin() + at);
             std::copy(orr.begin(), orr.begin() + n, outR.begin() + at);
@@ -374,7 +385,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 {
     // plugin-porting.md: a mode is best a stepped parameter first by priority; when it changes
     // which controls matter, the others are hidden and the host is told to rescan their info.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay"})
     {
         Plugin pl(id);
         auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
@@ -412,6 +423,11 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
             return mixes;
         };
         const auto first = (uint32_t)mode.default_value, other = first == (uint32_t)mode.min_value ? (uint32_t)mode.max_value : (uint32_t)mode.min_value;
+        if (first == other)
+        {
+            REQUIRE(check(first) == 1); // one mode: the delay, whose Mix is its mix
+            continue;
+        }
         check(first);
         // inactive: a change through flush rescans at once
         pl.set(1, other);
@@ -962,7 +978,7 @@ TEST_CASE("Per-context memory by mode and sample rate")
 {
     // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB), and
     // the EQs at 44.1 kHz below 4 KB: they hold the rate matcher's 58 KB only at other rates.
-    for (const char *id : {reverbId, eqId})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay"})
     {
         Plugin probe(id);
         double lo, hi;
@@ -1020,7 +1036,7 @@ TEST_CASE("Declared memory equals what activation holds and what effect contexts
 {
     // For every plugin and mode at 44.1 to 192 kHz: estimate (after state load, before
     // activate) == current (after activate) == the effect contexts' resources.
-    for (const char *id : {reverbId, eqId})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay"})
     {
         Plugin probe(id);
         clap_param_info_t info;
@@ -1738,6 +1754,165 @@ TEST_CASE("Rate-matched EQs change their number of sections without clicks")
             CHECK(got < std::max(ref + 6, -80.0));
         }
     }
+}
+
+// ---- Tempo cross delay (plan, section 15) ----
+#include "effects/TempoCrossDelay.h"
+namespace
+{
+constexpr const char *delayId = "org.oscairn.effects.delay";
+struct Echo
+{
+    size_t at;
+    double l, r;
+};
+// An impulse into the left input; the delay's settings by name; returns the output.
+std::vector<float> delayImpulse(double rate, const std::vector<std::pair<const char *, double>> &set, std::vector<float> &right,
+                                double seconds = 3, double tempo = 0, bool rightInput = false, Plugin **keep = nullptr)
+{
+    static std::unique_ptr<Plugin> held;
+    held = std::make_unique<Plugin>(delayId);
+    Plugin &pl = *held;
+    pl.tempo = tempo;
+    for (auto [n, v] : set)
+        pl.set(paramIdByName(pl.p, "Tempo Cross Delay", n), v);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds);
+    std::vector<float> inL(n, 0), inR(n, 0);
+    (rightInput ? inR : inL)[0] = 1;
+    auto out = pl.render(inL, inR, right, {64}, {}, false);
+    if (keep)
+        *keep = &pl;
+    return out;
+}
+} // namespace
+
+TEST_CASE("Tempo cross delay: the measured routing, times and gains at 44.1 kHz")
+{
+    // Laws from fx14, fx16 and fx17 (plan, section 15): at 120 BPM a quarter is 22,049 samples;
+    // feedback v / 63.5 per crossing; input L ping-pongs, first on the right.
+    std::vector<float> r;
+    const double fb = 40 / 63.5, wet = std::sin(M_PI / 4), dry = std::cos(M_PI / 4);
+    auto l = delayImpulse(44100, {{"Feedback", 40}, {"High Damping", 1.0}, {"Input", 0}}, r);
+    REQUIRE(l[L] == Approx(dry).epsilon(1e-6));
+    REQUIRE(r[L] == 0);
+    const size_t q = 22049;
+    REQUIRE(r[L + q] == Approx(wet).epsilon(1e-6));
+    REQUIRE(l[L + 2 * q] == Approx(wet * fb).epsilon(1e-6));
+    REQUIRE(r[L + 3 * q] == Approx(wet * fb * fb).epsilon(1e-6));
+    for (size_t i = 1; i < 4 * q; ++i)
+        if (i != q && i != 2 * q && i != 3 * q)
+            REQUIRE((l[L + i] == 0 && r[L + i] == 0));
+
+    SECTION("Mode 2 crosses at unity one way and at the feedback squared the other")
+    {
+        auto l2 = delayImpulse(44100, {{"Feedback", 40}, {"High Damping", 1.0}, {"Input", 3}}, r);
+        REQUIRE(r[L + q] == Approx(wet).epsilon(1e-6));
+        REQUIRE(l2[L + 2 * q] == Approx(wet).epsilon(1e-6));
+        REQUIRE(r[L + 3 * q] == Approx(wet * fb * fb).epsilon(1e-6));
+    }
+    SECTION("Lag shortens or lengthens both lines; the tempo comes from the transport")
+    {
+        // the first echo lands on exactly one sample
+        auto only = [&](size_t at) {
+            for (size_t i = 1; i < at + 100; ++i)
+                if ((i == at) != (r[L + i] != 0))
+                    return false;
+            return true;
+        };
+        delayImpulse(44100, {{"Lag", -63}, {"High Damping", 1.0}, {"Input", 0}}, r);
+        REQUIRE(only(19271)); // 436.98 ms, as measured
+        delayImpulse(44100, {{"Lag", 63}, {"High Damping", 1.0}, {"Input", 0}}, r);
+        REQUIRE(only(24827)); // 562.97 ms
+        delayImpulse(44100, {{"High Damping", 1.0}, {"Input", 0}}, r, 2, 90);
+        REQUIRE(only(29399)); // a quarter at 90 BPM
+        delayImpulse(44100, {{"Time L>R", 5}, {"High Damping", 1.0}, {"Input", 0}}, r);
+        REQUIRE(only(5512)); // a sixteenth: 5,512.5 rounds up, less one
+        delayImpulse(44100, {{"Time L>R", 7}, {"Lag", -16}, {"High Damping", 1.0}, {"Input", 0}}, r);
+        REQUIRE(only(7562)); // 8,269 - 706 - 1: the lag rounds to the nearest sample
+    }
+    SECTION("High damping is the two-tap filter g = 5 (1 - ratio) / 9 on each repeat")
+    {
+        for (double ratio : {0.1, 0.4, 0.7})
+        {
+            auto l3 = delayImpulse(44100, {{"Feedback", 40}, {"High Damping", ratio}, {"Input", 0}}, r);
+            const double g = 5 * (1 - ratio) / 9;
+            REQUIRE(r[L + q] == Approx(wet).epsilon(1e-6)); // the first echo is not filtered
+            REQUIRE(l3[L + 2 * q] == Approx(wet * fb * (1 - g)).epsilon(1e-6));
+            REQUIRE(l3[L + 2 * q + 1] == Approx(wet * fb * g).epsilon(1e-6));
+        }
+    }
+    SECTION("Dry and wet follow the balance as cosine and sine")
+    {
+        for (int v : {-63, -40, 0, 31, 63})
+        {
+            auto out = delayImpulse(44100, {{"Mix", v}, {"Input", 0}}, r, 0.6);
+            const double x = (v + 63) / 126.0;
+            REQUIRE(out[L] == Approx(std::cos(M_PI / 2 * x)).margin(1e-7));
+            REQUIRE(r[L + q] == Approx(std::sin(M_PI / 2 * x)).margin(1e-7));
+        }
+    }
+}
+
+TEST_CASE("Tempo cross delay keeps its 44.1 kHz echoes at 48, 88.2, 96 and 192 kHz")
+{
+    // Decision 13: echo times in seconds within a sample of the running rate, and each repeat's
+    // response (echo 2 over echo 1: feedback and damping) within 0.05 dB of the 44.1 kHz
+    // filter from 20 Hz to 20 kHz, for every damping value (tolerance proposed).
+    for (double damping : {0.1, 0.4, 0.7, 0.9})
+    {
+        const double g = oscairn_fx::delay::dampingCoefficient(damping), fb = 40 / 63.5;
+        for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
+        {
+            std::vector<float> r;
+            auto l = delayImpulse(rate, {{"Feedback", 40}, {"High Damping", damping}, {"Input", 0}, {"Mix", 63}}, r, 1.3);
+            const double q = 22049 / 44100.0 * rate;
+            // echo 1 on the right, echo 2 on the left: their spectra over a window around each
+            auto spectrum = [&](const std::vector<float> &x, double at, double f) {
+                const size_t c = (size_t)std::lround(at) + L, half = (size_t)(0.004 * rate);
+                std::complex<double> acc = 0;
+                for (size_t i = c - half; i < c + half; ++i)
+                    acc += (double)x[i] * std::polar(1.0, -2 * M_PI * f * ((double)i - (double)L - at) / rate);
+                return acc;
+            };
+            size_t peak = 0;
+            for (size_t i = L + 1; i < r.size(); ++i)
+                if (std::abs(r[i]) > std::abs(r[peak]))
+                    peak = i;
+            INFO("damping " << damping << " at " << rate << " Hz");
+            REQUIRE(std::abs((double)(peak - L) - q) <= 1.0);
+            double worst = 0;
+            for (double f : logFreqs(20, 20000, 80))
+            {
+                const double got = std::abs(spectrum(l, 2 * q, f) / spectrum(r, q, f));
+                const double want = fb * std::hypot(1 - g + g * std::cos(2 * M_PI * f / 44100), g * std::sin(2 * M_PI * f / 44100));
+                worst = std::max(worst, std::abs(20 * std::log10(got / want)));
+            }
+            std::printf("Tempo cross delay, damping %.1f at %.0f Hz: repeat response within %.4f dB of 44.1 kHz\n", damping, rate, worst);
+            REQUIRE(worst < 0.05);
+        }
+    }
+}
+
+TEST_CASE("Tempo cross delay keeps playing between its echoes")
+{
+    // An echo a second away must not be cut by the tail rule (100 ms of silence elsewhere).
+    std::vector<float> r;
+    Plugin *pl = nullptr;
+    auto l = delayImpulse(48000, {{"Time L>R", 14}, {"Time R>L", 14}, {"Feedback", 32}, {"Input", 0}}, r, 4, 0, false, &pl);
+    size_t firstSleep = pl->statuses.size();
+    for (size_t b = 0; b < pl->statuses.size(); ++b)
+        if (pl->statuses[b] == CLAP_PROCESS_SLEEP)
+        {
+            firstSleep = b;
+            break;
+        }
+    size_t lastSound = 0;
+    for (size_t i = 0; i < l.size(); ++i)
+        if (std::abs(l[i]) > 1e-6 || std::abs(r[i]) > 1e-6)
+            lastSound = i;
+    REQUIRE(lastSound > (size_t)(3 * 48000)); // the third echo, about 3 s in
+    REQUIRE(firstSleep * 64 > lastSound);
 }
 
 // ---- Converter frequency scales (decision 17) ----

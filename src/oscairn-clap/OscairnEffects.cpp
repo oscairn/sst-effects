@@ -25,6 +25,7 @@
 #include "effects/FiveBandEq.h"
 #include "effects/TwoBandEq.h"
 #include "effects/PartAndMasterEq.h"
+#include "effects/TempoCrossDelay.h"
 
 #include <algorithm>
 #include <array>
@@ -56,6 +57,10 @@ struct Effect
     virtual void process(float *L, float *R) = 0;
     virtual int ringoutBlocks() const = 0;
     virtual size_t bytes() const = 0;
+    virtual void setTempo(double bpm) = 0;
+    // How long the output may stay silent while the effect still holds sound (a delay's longest
+    // gap between echoes); the tail ends after that much silence.
+    virtual double quietSeconds() const = 0;
 };
 
 // An effect's own heap allocations (made at construction), where it has any.
@@ -79,6 +84,13 @@ template <typename FX> struct EffectOf final : Effect
     void initialize() override { fx.initialize(); }
     void process(float *L, float *R) override { fx.processBlock(L, R); }
     int ringoutBlocks() const override { return fx.getRingoutDecay(); }
+    void setTempo(double bpm) override { gs.tempo = bpm; }
+    double quietSeconds() const override
+    {
+        if constexpr (requires { fx.quietSeconds(); })
+            return fx.quietSeconds();
+        return 0.1;
+    }
     size_t bytes() const override
     {
         if constexpr (requires { fx.heapBytes(); })
@@ -184,6 +196,9 @@ struct Category
 const char *const reverbFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_REVERB,
                                       CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
+const char *const delayFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_DELAY,
+                                     CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+
 const char *const eqFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_EQUALIZER,
                                   CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
@@ -216,6 +231,15 @@ const std::vector<Category> &categories()
         eq.finish();
         c.push_back(std::move(eq));
 
+        Category delay{{CLAP_VERSION_INIT, "org.oscairn.effects.delay", "Oscairn FX Delay", "Oscairn",
+                        "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                        "Delays, one mode per design", delayFeatures},
+                       {},
+                       1,
+                       {}};
+        delay.modes.push_back(mode<oscairn_fx::delay::TempoCrossDelay>(1, "Tempo Cross Delay"));
+        delay.finish();
+        c.push_back(std::move(delay));
         return c;
     }();
     return all;
@@ -350,6 +374,7 @@ void runBlock(Context &s)
         s.fxMode.store(p->mode);
         requestCallback(s);
     }
+    s.quietLimit = std::max<uint32_t>(1, (uint32_t)std::ceil(s.fx->quietSeconds() * s.engine->sampleRate / block));
     if (s.fx->mode != s.wanted.load(std::memory_order_relaxed))
         requestCallback(s);
 
@@ -380,6 +405,9 @@ clap_process_status process(const clap_plugin_t *plugin, const clap_process_t *p
     if (!s.fx || pr->audio_outputs_count < 1 || pr->audio_outputs[0].channel_count < 2)
         return CLAP_PROCESS_ERROR;
     oscairn_fx::ScopedFlushDenormals ftz;
+    // Tempo from the host's transport, 120 BPM without one (plan, section 7)
+    const auto *tr = pr->transport;
+    s.fx->setTempo(tr && (tr->flags & CLAP_TRANSPORT_HAS_TEMPO) && tr->tempo > 0 ? tr->tempo : 120.0);
     const bool hasIn = pr->audio_inputs_count > 0 && pr->audio_inputs[0].channel_count >= 2;
     const float *inL = hasIn ? pr->audio_inputs[0].data32[0] : nullptr;
     const float *inR = hasIn ? pr->audio_inputs[0].data32[1] : nullptr;
@@ -774,7 +802,7 @@ bool activate(const clap_plugin_t *plugin, double rate, uint32_t, uint32_t)
     }
     s.fxBytes.store(s.fx->bytes());
     s.fxMode.store(s.fx->mode);
-    s.quietLimit = std::max<uint32_t>(1, (uint32_t)std::ceil(0.1 * rate / block));
+    s.quietLimit = std::max<uint32_t>(1, (uint32_t)std::ceil(s.fx->quietSeconds() * rate / block));
     clear(s);
     s.active = true;
     return true;
