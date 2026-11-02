@@ -9,6 +9,7 @@
 #include "OscairnEffects.h"
 #include <oscairn-clap/effect-contexts.h>
 #include <oscairn-clap/memory.h>
+#include <oscairn-clap/ui.h>
 
 #include "sst/basic-blocks/simd/setup.h"
 #include "sst/effects/Reverb1.h"
@@ -85,6 +86,13 @@ struct Host
 {
     clap_host_t host{};
     std::atomic<int> callbacks{0};
+    int infoRescans{0}; // main thread
+    clap_host_params_t params{
+        [](const clap_host_t *h, clap_param_rescan_flags f) {
+            if (f & CLAP_PARAM_RESCAN_INFO)
+                ++static_cast<Host *>(h->host_data)->infoRescans;
+        },
+        [](const clap_host_t *, clap_id, clap_param_clear_flags) {}, [](const clap_host_t *) {}};
     Host()
     {
         host.clap_version = CLAP_VERSION;
@@ -93,8 +101,8 @@ struct Host
         host.vendor = "test";
         host.url = "";
         host.version = "0";
-        host.get_extension = [](const clap_host_t *, const char *) -> const void * {
-            return nullptr;
+        host.get_extension = [](const clap_host_t *h, const char *id) -> const void * {
+            return std::strcmp(id, CLAP_EXT_PARAMS) ? nullptr : &static_cast<Host *>(h->host_data)->params;
         };
         host.request_restart = [](const clap_host_t *) {};
         host.request_process = [](const clap_host_t *) {};
@@ -359,6 +367,76 @@ TEST_CASE("Every plugin passes the host's load checks")
         auto *lat = ext<clap_plugin_latency_t>(p, CLAP_EXT_LATENCY);
         REQUIRE(lat);
         REQUIRE(lat->get(p) == L);
+    }
+}
+
+TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the others hidden")
+{
+    // plugin-porting.md: a mode is best a stepped parameter first by priority; when it changes
+    // which controls matter, the others are hidden and the host is told to rescan their info.
+    for (const char *id : {reverbId, "org.oscairn.effects.eq"})
+    {
+        Plugin pl(id);
+        auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+        auto *ui = ext<oscairn_plugin_ui_t>(pl.p, OSCAIRN_EXT_UI);
+        REQUIRE(ui);
+        REQUIRE(ui->param_hint);
+        clap_param_info_t mode;
+        REQUIRE(params->get_info(pl.p, 0, &mode));
+        auto check = [&](uint32_t selected) {
+            oscairn_param_hint_t h;
+            REQUIRE(ui->param_hint(pl.p, 1, &h));
+            REQUIRE(h.priority == 1);
+            std::set<uint32_t> priorities;
+            int shown = 0, mixes = 0;
+            for (uint32_t i = 1; i < params->count(pl.p); ++i)
+            {
+                clap_param_info_t info;
+                REQUIRE(params->get_info(pl.p, i, &info));
+                REQUIRE(ui->param_hint(pl.p, info.id, &h));
+                const bool mine = info.id >> 8 == selected;
+                INFO(id << " " << info.module << "/" << info.name);
+                REQUIRE(((info.flags & CLAP_PARAM_IS_HIDDEN) == 0) == mine);
+                REQUIRE((h.priority > 1) == mine);
+                if (mine)
+                {
+                    REQUIRE(priorities.insert(h.priority).second);
+                    ++shown;
+                    mixes += h.role == OSCAIRN_ROLE_MIX;
+                    REQUIRE((h.role == OSCAIRN_ROLE_MIX) == !std::strcmp(info.name, "Mix"));
+                }
+                else
+                    REQUIRE(h.role == OSCAIRN_ROLE_NONE);
+            }
+            REQUIRE(shown > 0);
+            return mixes;
+        };
+        const auto first = (uint32_t)mode.default_value, other = first == (uint32_t)mode.min_value ? (uint32_t)mode.max_value : (uint32_t)mode.min_value;
+        check(first);
+        // inactive: a change through flush rescans at once
+        pl.set(1, other);
+        REQUIRE(pl.host.infoRescans == 1);
+        check(other);
+        // active: a change in process is reported from the main-thread callback it requests
+        pl.activate();
+        std::vector<float> z(256, 0), r;
+        pl.render(z, z, r, {64}, {{10, 1, (double)first}}, false);
+        REQUIRE(pl.host.infoRescans == 1);
+        pl.p->on_main_thread(pl.p);
+        REQUIRE(pl.host.infoRescans == 2);
+        const int mixes = check(first);
+        if (!std::strcmp(id, reverbId))
+            REQUIRE(mixes == 1); // Reverb 2's Mix
+        // a state load that selects another mode rescans too
+        Buffer buf;
+        pl.set(1, other); // in flush while active: reported at the next callback
+        REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->save(pl.p, &buf.out));
+        pl.set(1, first);
+        pl.p->on_main_thread(pl.p);
+        const int before = pl.host.infoRescans;
+        REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in));
+        REQUIRE(pl.host.infoRescans == before + 1);
+        check(other);
     }
 }
 

@@ -16,6 +16,7 @@
 
 #include <oscairn-clap/effect-contexts.h>
 #include <oscairn-clap/memory.h>
+#include <oscairn-clap/ui.h>
 #include <clap/ext/render.h>
 
 #include "sst/basic-blocks/simd/setup.h"
@@ -214,6 +215,7 @@ const std::vector<Category> &categories()
         eq.modes.push_back(mode<oscairn_fx::eq::MasterEq>(4, "Master EQ"));
         eq.finish();
         c.push_back(std::move(eq));
+
         return c;
     }();
     return all;
@@ -242,6 +244,7 @@ struct Context
     std::unique_ptr<Effect> fx;             // audio thread while active
     std::atomic<Effect *> pending{nullptr}, retired{nullptr};
     std::atomic<bool> callbackRequested{false};
+    uint32_t shownMode; // main thread: the mode whose parameters the host last saw unhidden
     std::atomic<size_t> fxBytes{0};
     std::atomic<uint32_t> fxMode{0}; // the mode of fx
     bool active{false};
@@ -252,7 +255,8 @@ struct Context
     std::atomic<bool> offline{false}; // clap.render: the host renders offline
 
     Context(const clap_host_t *h, const Category &c, std::shared_ptr<Engine> e)
-        : host(h), cat(c), engine(std::move(e)), values(c.params.size()), wanted(c.defaultMode)
+        : host(h), cat(c), engine(std::move(e)), values(c.params.size()), wanted(c.defaultMode),
+          shownMode(c.defaultMode)
     {
         for (size_t p = 1; p < cat.params.size(); ++p)
             values[p].store(cat.meta(cat.params[p]).defaultVal);
@@ -424,11 +428,26 @@ void clear(Context &s)
     s.tail.store(false);
 }
 
+// The parameters of modes other than the selected one are hidden (plugin-porting.md: a mode
+// that changes which controls matter hides the others); tell the host when that changes.
+void rescanIfModeChanged(Context &s)
+{
+    const uint32_t want = s.wanted.load();
+    if (want == s.shownMode)
+        return;
+    s.shownMode = want;
+    if (!s.host)
+        return;
+    if (auto *hp = static_cast<const clap_host_params_t *>(s.host->get_extension(s.host, CLAP_EXT_PARAMS)); hp && hp->rescan)
+        hp->rescan(s.host, CLAP_PARAM_RESCAN_INFO);
+}
+
 void onMainThread(const clap_plugin_t *plugin)
 {
     auto &s = self(plugin);
     s.callbackRequested.store(false);
     delete s.retired.exchange(nullptr, std::memory_order_acq_rel);
+    rescanIfModeChanged(s);
     if (!s.active)
         return;
     const uint32_t want = s.wanted.load();
@@ -489,7 +508,8 @@ const clap_plugin_tail_t tailExt{[](const clap_plugin_t *plugin) -> uint32_t {
 
 bool paramInfo(const clap_plugin_t *plugin, uint32_t i, clap_param_info_t *out)
 {
-    const auto &cat = self(plugin).cat;
+    auto &s = self(plugin);
+    const auto &cat = s.cat;
     if (i >= cat.params.size())
         return false;
     *out = {};
@@ -508,6 +528,8 @@ bool paramInfo(const clap_plugin_t *plugin, uint32_t i, clap_param_info_t *out)
     out->flags = CLAP_PARAM_IS_AUTOMATABLE;
     if (md.type == pm::ParamMetaData::INT || md.type == pm::ParamMetaData::BOOL)
         out->flags |= CLAP_PARAM_IS_STEPPED;
+    if (cat.modes[p.mode].id != s.wanted.load())
+        out->flags |= CLAP_PARAM_IS_HIDDEN;
     out->min_value = md.minVal;
     out->max_value = md.maxVal;
     out->default_value = std::clamp(md.defaultVal, md.minVal, md.maxVal);
@@ -573,8 +595,11 @@ const clap_plugin_params_t params{
     valueToText,
     textToValue,
     [](const clap_plugin_t *p, const clap_input_events_t *in, const clap_output_events_t *) {
+        auto &s = self(p);
         for (uint32_t i = 0; in && i < in->size(in); ++i)
-            apply(self(p), in->get(in, i));
+            apply(s, in->get(in, i));
+        if (!s.active)
+            rescanIfModeChanged(s); // inactive: flush is on the main thread
     }};
 
 // State: text independent of byte order and locale. Unknown IDs are skipped, missing ones keep
@@ -653,6 +678,8 @@ bool stateLoad(const clap_plugin_t *plugin, const clap_istream_t *stream)
             setValue(s, id, v);
     if (s.active)
         onMainThread(plugin); // build the loaded mode now, so memory has settled when this returns
+    else
+        rescanIfModeChanged(s);
     return true;
 }
 
@@ -679,6 +706,25 @@ const oscairn_plugin_memory_t memory{
         *out = {sizeof(Engine), contextHeldBytes(s), 0};
         return true;
     }};
+
+// oscairn.ui: Mode first, then the selected mode's parameters in their order; a parameter named
+// "Mix" is the effect's mix (its knob in the Effects bank). Other modes' parameters get no hint.
+const oscairn_plugin_ui_t ui{[](const clap_plugin_t *plugin, clap_id id, oscairn_param_hint_t *h) -> bool {
+    auto &s = self(plugin);
+    const int p = s.cat.paramIndex(id);
+    if (p < 0 || !h)
+        return false;
+    *h = {OSCAIRN_WIDGET_AUTO, 0, CLAP_INVALID_ID, 0, OSCAIRN_ROLE_NONE};
+    if (p == 0)
+        return h->priority = 1, true;
+    const auto &par = s.cat.params[p];
+    if (s.cat.modes[par.mode].id != s.wanted.load())
+        return true;
+    h->priority = 2 + (uint32_t)par.index;
+    if (s.cat.meta(par).name == "Mix")
+        h->role = OSCAIRN_ROLE_MIX;
+    return true;
+}};
 
 const oscairn_plugin_effect_contexts_t contexts{
     [](const clap_plugin_t *p, const clap_host_t *host) -> const clap_plugin_t * {
@@ -780,6 +826,8 @@ const clap_plugin_t *create(const clap_host_t *host, const Category &cat,
             return &contexts;
         if (!std::strcmp(id, OSCAIRN_EXT_MEMORY))
             return &memory;
+        if (!std::strcmp(id, OSCAIRN_EXT_UI))
+            return &ui;
         return nullptr;
     };
     s->plugin.on_main_thread = onMainThread;
