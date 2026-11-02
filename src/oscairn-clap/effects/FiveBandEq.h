@@ -5,7 +5,8 @@
  * Written for Oscairn, not part of sst-effects; it follows the sst-effects effect contract
  * (EffectCore.h) so the plugin wrapper runs it like any stock effect.
  *
- * Every section is a second-order bilinear filter designed at the running sample rate; the
+ * Every section is a second-order bilinear filter designed at 44.1 kHz, the rate the reference
+ * renders at (at other rates the plugin runs a cascade matched to that design, RateMatch.h); the
  * frequency, gain and Q laws were fitted to reference renders (plan, section 15, M1):
  *  - peaking bands form a boost-and-cut network, as console EQs do: with BP_i a unity-peak
  *    band-pass at band i's frequency, the bands give (1 + sum over boosts of (G_i - 1) BP_i) /
@@ -23,6 +24,7 @@
 
 #include "sst/effects/EffectCore.h"
 #include "sst/basic-blocks/params/ParamMetadata.h"
+#include "RateMatch.h"
 
 #include <algorithm>
 #include <array>
@@ -56,8 +58,75 @@ struct Biquad
 // The fitted laws are for the 44.1 kHz design the reference renders at.
 constexpr double designRate = 44100;
 
+// At any other rate an EQ runs its 44.1 kHz sections' rate-matched replacement (RateMatch.h):
+// up to three biquads per section, rebuilt when a parameter changes. States of the sections
+// that remain are kept; new ones start from silence.
+template <int N> struct MatchedCascade
+{
+    std::array<Biquad, 3 * N> sec;
+    int n{0};
+    rate::Matcher matcher;
+    void reset()
+    {
+        for (auto &b : sec)
+            b.reset();
+    }
+    // The 44.1 kHz sections (identity sections may be left out by the caller).
+    void set(const Biquad *const *design, int count, double rate)
+    {
+        rate::Section s44[N], out[3 * N];
+        for (int i = 0; i < count; ++i)
+        {
+            const Biquad &d = *design[i];
+            s44[i].b[0] = d.b0;
+            s44[i].b[1] = d.b1;
+            s44[i].b[2] = d.b2;
+            s44[i].a[1] = d.a1;
+            s44[i].a[2] = d.a2;
+        }
+        const int m = count > 0 ? matcher.match(s44, count, rate, out) : 0;
+        for (int i = n; i < m; ++i)
+            sec[i].reset();
+        for (int i = 0; i < m; ++i)
+        {
+            auto &b = sec[i];
+            b.b0 = out[i].b[0];
+            b.b1 = out[i].b[1];
+            b.b2 = out[i].b[2];
+            b.a1 = out[i].a[1];
+            b.a2 = out[i].a[2];
+        }
+        n = m;
+    }
+    inline float run(int ch, float x)
+    {
+        for (int i = 0; i < n; ++i)
+            x = sec[i].run(ch, x);
+        return x;
+    }
+};
+// The network's three band-passes, weights and roles at 44.1 kHz as up to three biquads.
+inline int networkBiquads(const Biquad *bp, const double *weight, const int *role, Biquad *out)
+{
+    rate::Section in[3], sec[3];
+    for (int i = 0; i < 3; ++i)
+    {
+        in[i].b[0] = bp[i].b0;
+        in[i].b[1] = bp[i].b1;
+        in[i].b[2] = bp[i].b2;
+        in[i].a[1] = bp[i].a1;
+        in[i].a[2] = bp[i].a2;
+    }
+    const int n = rate::networkSections(in, weight, role, sec);
+    for (int i = 0; i < n; ++i)
+        out[i].set(sec[i].b[0], sec[i].b[1], sec[i].b[2], 1, sec[i].a[1], sec[i].a[2]);
+    return n;
+}
+inline bool isIdentity(const Biquad &b) { return b.b0 == 1 && b.b1 == b.a1 && b.b2 == b.a2; }
+
 // Q at `rate` for a peaking section whose 44.1 kHz design has centre hz and Q q: keeps the
-// centre and both mid-gain edge frequencies (in Hz) of the 44.1 kHz response. In the prewarped
+// centre and both mid-gain edge frequencies (in Hz) of the 44.1 kHz response. The plugins now
+// design at 44.1 kHz only (rate matching replaced this rule), so it returns q there. In the prewarped
 // domain a peaking section's mid-gain edges W+ and W- satisfy W+ W- = 1 and W+ - W- = 1/Q.
 inline double peakingQAt(double rate, double hz, double q)
 {
@@ -162,6 +231,8 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
             b.reset();
         for (auto &b : peaks)
             b.reset();
+        cascade.reset();
+        cascade.n = 0;
         last.fill(NAN);
         update();
     }
@@ -172,6 +243,15 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
+        if (matched)
+        {
+            for (int i = 0; i < FXConfig::blockSize; ++i)
+            {
+                L[i] = (float)(cascade.run(0, L[i]) * gain);
+                R[i] = (float)(cascade.run(1, R[i]) * gain);
+            }
+            return;
+        }
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             L[i] = (float)(network(0, shelves[1].run(0, shelves[0].run(0, L[i]))) * gain);
@@ -218,6 +298,8 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
     std::array<int, 3> role{};      // +1 boost, -1 cut, 0 flat
     std::array<float, numParamsEnum> last{};
     double gain{1};
+    bool matched{false};          // running at another rate than 44.1 kHz: the cascade below
+    MatchedCascade<5> cascade;    // shelves and the network, matched to the 44.1 kHz design
 
     // The boost sum, then the cut network's delay-free loop solved for its output z:
     // z = y - sum c_j BP_j(z), each BP_j(z) = b0_j z + its state.
@@ -263,7 +345,9 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
         }
         if (!changed)
             return;
-        const double rate = this->sampleRate();
+        const double running = this->sampleRate();
+        matched = running != designRate;
+        const double rate = designRate; // designed at 44.1 kHz; matched below at other rates
         shelf(shelves[0], rate, last[lowFreq], last[lowGain], false);
         shelf(shelves[1], rate, last[highFreq], last[highGain], true);
         const int fi[3] = {freq2, freq3, freq4}, gi[3] = {gain2, gain3, gain4}, qi[3] = {q2, q3, q4};
@@ -278,6 +362,20 @@ template <typename FXConfig> struct FiveBandEq : sst::effects::core::EffectTempl
             bandpass(peaks[b], rate, last[fi[b]], last[qi[b]]);
         }
         gain = std::pow(10.0, last[output] / 20);
+        if (matched)
+        {
+            Biquad net[3];
+            const int nn = networkBiquads(peaks.data(), weight.data(), role.data(), net);
+            const Biquad *design[5];
+            int count = 0;
+            for (const Biquad *b : {&shelves[0], &shelves[1]})
+                if (!isIdentity(*b))
+                    design[count++] = b;
+            for (int i = 0; i < nn; ++i)
+                if (!isIdentity(net[i]))
+                    design[count++] = &net[i];
+            cascade.set(design, count, running);
+        }
     }
 };
 } // namespace oscairn_fx::eq

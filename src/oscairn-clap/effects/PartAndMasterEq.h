@@ -57,6 +57,8 @@ struct SeriesEq : sst::effects::core::EffectTemplateBase<FXConfig>
     {
         for (auto &b : bands)
             b.reset();
+        cascade.reset();
+        cascade.n = 0;
         last.fill(NAN);
         update();
     }
@@ -66,6 +68,15 @@ struct SeriesEq : sst::effects::core::EffectTemplateBase<FXConfig>
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
+        if (matched)
+        {
+            for (int i = 0; i < FXConfig::blockSize; ++i)
+            {
+                L[i] = cascade.run(0, L[i]) * gain;
+                R[i] = cascade.run(1, R[i]) * gain;
+            }
+            return;
+        }
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             float l = L[i], r = R[i];
@@ -85,6 +96,8 @@ struct SeriesEq : sst::effects::core::EffectTemplateBase<FXConfig>
     std::array<bool, N> active{};
     std::array<float, P> last{};
     float gain{1};
+    bool matched{false};         // at another rate than 44.1 kHz the cascade runs instead
+    MatchedCascade<N> cascade;
     void update()
     {
         bool changed = false;
@@ -96,7 +109,18 @@ struct SeriesEq : sst::effects::core::EffectTemplateBase<FXConfig>
         }
         if (!changed)
             return;
-        static_cast<Derived *>(this)->design(this->sampleRate());
+        // Designed at 44.1 kHz; at another rate the active sections are matched to that design.
+        static_cast<Derived *>(this)->design(designRate);
+        matched = this->sampleRate() != designRate;
+        if (matched)
+        {
+            const Biquad *design[N];
+            int count = 0;
+            for (int b = 0; b < N; ++b)
+                if (active[b])
+                    design[count++] = &bands[b];
+            cascade.set(design, count, this->sampleRate());
+        }
     }
     void setActive(int b, bool on)
     {

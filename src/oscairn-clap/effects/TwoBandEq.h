@@ -52,6 +52,8 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
     {
         for (auto &b : bands)
             b.reset();
+        cascade.reset();
+        cascade.n = 0;
         last.fill(NAN);
         update();
     }
@@ -62,6 +64,15 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
+        if (matched)
+        {
+            for (int i = 0; i < FXConfig::blockSize; ++i)
+            {
+                L[i] = cascade.run(0, L[i]) * gain;
+                R[i] = cascade.run(1, R[i]) * gain;
+            }
+            return;
+        }
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             float l = L[i], r = R[i];
@@ -113,6 +124,8 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
     std::array<bool, 2> active{};
     std::array<float, numParamsEnum> last{};
     float gain{1};
+    bool matched{false};          // at another rate than 44.1 kHz the cascade runs instead
+    MatchedCascade<2> cascade;
 
     void update()
     {
@@ -125,7 +138,7 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
         }
         if (!changed)
             return;
-        const double rate = this->sampleRate();
+        const double rate = designRate; // designed at 44.1 kHz; matched below at other rates
         for (int b = 0; b < 2; ++b)
         {
             const int t = (int)std::lround(last[b * 4 + type1]);
@@ -145,6 +158,16 @@ template <typename FXConfig> struct TwoBandEq : sst::effects::core::EffectTempla
             }
         }
         gain = std::pow(10.f, last[output] / 20);
+        matched = this->sampleRate() != designRate;
+        if (matched)
+        {
+            const Biquad *design[2];
+            int count = 0;
+            for (int b = 0; b < 2; ++b)
+                if (active[b])
+                    design[count++] = &bands[b];
+            cascade.set(design, count, this->sampleRate());
+        }
     }
 };
 } // namespace oscairn_fx::eq

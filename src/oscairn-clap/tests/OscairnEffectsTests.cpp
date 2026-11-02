@@ -26,6 +26,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 // ---- allocation counting: process() must not allocate ----
@@ -553,6 +554,20 @@ TEST_CASE("Processing never allocates")
     pl.p->on_main_thread(pl.p);
     pl.render(inL, inR, r, {1, 37, 512}, {{5, 1, 2.0}});
     REQUIRE(allocations == 0);
+    // The EQ modes at 48 kHz rebuild their rate-matched coefficients in process on a change.
+    for (auto [mode, module, name] : {std::tuple{1, "Five-band EQ", "Band 3 Frequency"}, std::tuple{2, "Two-band EQ", "Band 1 Frequency"},
+                                      std::tuple{3, "Three-band EQ", "Mid Frequency"}, std::tuple{4, "Master EQ", "Band 3 Frequency"}})
+    {
+        Plugin eq("org.oscairn.effects.eq");
+        eq.set(1, mode);
+        eq.set(paramIdByName(eq.p, module, mode == 2 ? "Band 1 Type" : (mode == 1 ? "Band 3 Gain" : (mode == 3 ? "Mid Gain" : "Band 3 Gain"))), mode == 2 ? 5 : 6);
+        eq.activate(48000);
+        const clap_id f = paramIdByName(eq.p, module, name);
+        allocations = 0;
+        eq.render(inL, inR, r, {1, 37, 512}, {{5, f, 2500.0}, {700, f, 9000.0}, {20000, f, 15000.0}});
+        INFO(module);
+        REQUIRE(allocations == 0);
+    }
     // The counter works: an allocation while counting is seen.
     countAllocations = true;
     void *probe = ::operator new(16);
@@ -810,31 +825,6 @@ TEST_CASE("Five-band EQ follows its fitted design at 44.1 kHz")
     }
 }
 
-TEST_CASE("Five-band EQ keeps its 44.1 kHz response at 48 and 96 kHz")
-{
-    // Proposed tolerance: 0.05 dB up to 4 kHz against the 44.1 kHz design (which matches the
-    // reference renders to 0.023 dB), for settings with every band at or below 11.2 kHz. Above
-    // 4 kHz, and for bands near 44.1 kHz's Nyquist frequency (setting 2), each rate's bilinear
-    // warping differs; those deviations are printed, not gated (plan, decision 13).
-    const auto low = logFreqs(20, 4000, 41), high = logFreqs(4000, 16000, 21);
-    for (double rate : {48000.0, 96000.0})
-        for (size_t i = 0; i < eqSettings.size(); ++i)
-        {
-            const auto &s = eqSettings[i];
-            auto gl = eqResponseDb(s, rate, low), gh = eqResponseDb(s, rate, high);
-            double wl = 0, wh = 0;
-            for (size_t k = 0; k < low.size(); ++k)
-                wl = std::max(wl, std::abs(gl[k] - s.modelDb(low[k], 44100)));
-            for (size_t k = 0; k < high.size(); ++k)
-                wh = std::max(wh, std::abs(gh[k] - s.modelDb(high[k], 44100)));
-            std::printf("Five-band EQ setting %zu at %.0f Hz: %.4f dB to 4 kHz, %.3f dB 4-16 kHz "
-                        "from the 44.1 kHz design\n",
-                        i, rate, wl, wh);
-            if (i != 2)
-                REQUIRE(wl < 0.05);
-        }
-}
-
 // ---- Effect memory (plan, section 15, effect memory) ----
 namespace
 {
@@ -1077,11 +1067,10 @@ std::vector<double> twoBandResponseDb(const TwoBandSetting &s, double rate, cons
 }
 } // namespace
 
-TEST_CASE("Two-band EQ follows its fitted design at 44.1 kHz, and keeps it at 48 and 96 kHz")
+TEST_CASE("Two-band EQ follows its fitted design at 44.1 kHz")
 {
-    // 0.01 dB at 44.1 kHz, 20 Hz to 20 kHz. Proposed: 0.05 dB up to 4 kHz at 48 kHz, and at
-    // 96 kHz for settings without a first-order pass.
-    const auto all = logFreqs(20, 20000, 61), low = logFreqs(20, 4000, 41);
+    // 0.01 dB at 44.1 kHz, 20 Hz to 20 kHz; other rates: "Fitted EQs keep their 44.1 kHz response".
+    const auto all = logFreqs(20, 20000, 61);
     for (const auto &s : twoBandSettings)
     {
         auto got = twoBandResponseDb(s, 44100, all);
@@ -1090,19 +1079,6 @@ TEST_CASE("Two-band EQ follows its fitted design at 44.1 kHz, and keeps it at 48
             worst = std::max(worst, std::abs(got[k] - s.modelDb(all[k], 44100)));
         INFO("44.1 kHz worst " << worst << " dB");
         REQUIRE(worst < 0.01);
-        for (double rate : {48000.0, 96000.0})
-        {
-            auto g = twoBandResponseDb(s, rate, low);
-            double w = 0;
-            for (size_t k = 0; k < low.size(); ++k)
-                w = std::max(w, std::abs(g[k] - s.modelDb(low[k], 44100)));
-            std::printf("Two-band EQ at %.0f Hz: %.4f dB to 4 kHz from the 44.1 kHz design\n", rate, w);
-            // A first-order pass has one parameter, its corner, so its 44.1 kHz warping cannot be
-            // kept at 96 kHz (0.12 dB at 4 kHz for a 1 kHz low-pass): printed, not gated there.
-            const bool firstOrder = s.t1 == 1 || s.t1 == 2 || s.t2 == 1 || s.t2 == 2;
-            if (rate == 48000 || !firstOrder)
-                REQUIRE(w < 0.05);
-        }
     }
 }
 
@@ -1163,27 +1139,24 @@ std::vector<double> modeResponseDb(int modeId, const char *module, const std::ve
 }
 } // namespace
 
-TEST_CASE("Three-band and Master EQ follow their fitted designs, and keep them at 48 and 96 kHz")
+namespace
 {
-    // 0.01 dB at 44.1 kHz from 20 Hz to 20 kHz; proposed 0.05 dB up to 4 kHz at 48 kHz, and at
-    // 96 kHz for settings without a very wide peak (decision 13).
-    const auto all = logFreqs(20, 20000, 61), low = logFreqs(20, 4000, 41);
-    struct Case
-    {
-        int mode;
-        const char *module;
-        std::vector<std::pair<const char *, double>> set;
-        std::function<double(double, double)> model;
-        bool wide = false; // a wide peak (or one near Nyquist): 96 kHz printed, not gated
-    };
-    const std::vector<Case> cases{
+struct ModeCase
+{
+    int mode;
+    const char *module;
+    std::vector<std::pair<const char *, double>> set;
+    std::function<double(double, double)> model;
+};
+std::vector<ModeCase> threeAndMasterCases()
+{
+    return {
         {3, "Three-band EQ",
          {{"Low Frequency", 200}, {"Low Gain", 9}, {"Mid Frequency", 1200}, {"Mid Gain", -6}, {"Mid Q", 2.6}, {"High Frequency", 6000}, {"High Gain", 4.5}},
          [](double f, double r) { return shelfDb(f, 200, 9, false, r) + threeBandMidDb(f, 1200, -6, 2.6, r) + shelfDb(f, 6000, 4.5, true, r); }},
         {3, "Three-band EQ",
          {{"Low Frequency", 100}, {"Low Gain", -6}, {"Mid Frequency", 7000}, {"Mid Gain", -6}, {"Mid Q", 2.6}, {"High Frequency", 3000}, {"High Gain", 4.5}},
-         [](double f, double r) { return shelfDb(f, 100, -6, false, r) + threeBandMidDb(f, 7000, -6, 2.6, r) + shelfDb(f, 3000, 4.5, true, r); },
-         true}, // a wide band near Nyquist: 96 kHz printed (decision 13)
+         [](double f, double r) { return shelfDb(f, 100, -6, false, r) + threeBandMidDb(f, 7000, -6, 2.6, r) + shelfDb(f, 3000, 4.5, true, r); }},
         {4, "Master EQ",
          {{"Band 1 Gain", 6}, {"Band 1 Frequency", 125}, {"Band 1 Shape", 0}, {"Band 2 Gain", -4}, {"Band 2 Frequency", 500}, {"Band 2 Q", 1.2},
           {"Band 3 Gain", 8}, {"Band 3 Frequency", 1000}, {"Band 3 Q", 3}, {"Band 4 Gain", -9}, {"Band 4 Frequency", 3200}, {"Band 4 Q", 0.7},
@@ -1191,14 +1164,19 @@ TEST_CASE("Three-band and Master EQ follow their fitted designs, and keep them a
          [](double f, double r) {
              return shelfDb(f, 125, 6, false, r) + cookbookPeakDb(f, 500, -4, 1.2, r) + cookbookPeakDb(f, 1000, 8, 3, r) +
                     cookbookPeakDb(f, 3200, -9, 0.7, r) + masterHighShelfDb(f, 8000, 5, r);
-         },
-         true},
+         }},
         {4, "Master EQ",
          {{"Band 1 Gain", -7}, {"Band 1 Frequency", 250}, {"Band 1 Q", 2}, {"Band 1 Shape", 1}, {"Band 5 Gain", 10}, {"Band 5 Frequency", 2500}, {"Band 5 Q", 1}, {"Band 5 Shape", 1}},
-         [](double f, double r) { return cookbookPeakDb(f, 250, -7, 2, r) + cookbookPeakDb(f, 2500, 10, 1, r); },
-         true},
+         [](double f, double r) { return cookbookPeakDb(f, 250, -7, 2, r) + cookbookPeakDb(f, 2500, 10, 1, r); }},
     };
-    for (const auto &c : cases)
+}
+} // namespace
+
+TEST_CASE("Three-band and Master EQ follow their fitted designs at 44.1 kHz")
+{
+    // 0.01 dB at 44.1 kHz from 20 Hz to 20 kHz; other rates: "Fitted EQs keep their 44.1 kHz response".
+    const auto all = logFreqs(20, 20000, 61);
+    for (const auto &c : threeAndMasterCases())
     {
         INFO(c.module);
         auto got = modeResponseDb(c.mode, c.module, c.set, 44100, all);
@@ -1207,16 +1185,6 @@ TEST_CASE("Three-band and Master EQ follow their fitted designs, and keep them a
             worst = std::max(worst, std::abs(got[k] - c.model(all[k], 44100)));
         INFO("44.1 kHz worst " << worst);
         REQUIRE(worst < 0.01);
-        for (double rate : {48000.0, 96000.0})
-        {
-            auto g = modeResponseDb(c.mode, c.module, c.set, rate, low);
-            double w = 0;
-            for (size_t k = 0; k < low.size(); ++k)
-                w = std::max(w, std::abs(g[k] - c.model(low[k], 44100)));
-            std::printf("%s at %.0f Hz: %.4f dB to 4 kHz from the 44.1 kHz design\n", c.module, rate, w);
-            if (rate == 48000 || !c.wide)
-                REQUIRE(w < 0.05);
-        }
     }
 }
 
@@ -1232,6 +1200,211 @@ TEST_CASE("Three-band and Master EQ are transparent when flat")
         auto out = pl.render(inL, inR, r, {37});
         for (size_t i = 0; i + L < inL.size(); ++i)
             REQUIRE((out[i + L] == inL[i] && r[i + L] == inR[i]));
+    }
+}
+
+// ---- Every fitted EQ at 48, 88.2, 96 and 192 kHz (plan, decision 13) ----
+#include <chrono>
+#include <random>
+#include "effects/FiveBandEq.h"
+namespace
+{
+// Magnitude in dB from a rendered impulse response (latency L removed), by phasor recurrence.
+std::vector<double> impulseDb(const std::vector<float> &out, double rate, const std::vector<double> &freqs)
+{
+    std::vector<double> db;
+    for (double f : freqs)
+    {
+        const std::complex<double> step = std::polar(1.0, -2 * M_PI * f / rate);
+        std::complex<double> ph = 1, acc = 0;
+        for (size_t i = L; i < out.size(); ++i)
+        {
+            acc += (double)out[i] * ph;
+            ph *= step;
+            if (((i - L) & 1023) == 1023)
+                ph /= std::abs(ph);
+        }
+        db.push_back(20 * std::log10(std::abs(acc) + 1e-300));
+    }
+    return db;
+}
+std::vector<float> modeImpulse(int modeId, const char *module, const std::vector<std::pair<const char *, double>> &set, double rate)
+{
+    Plugin pl(eqId);
+    pl.set(1, modeId);
+    for (auto [n, v] : set)
+        pl.set(paramIdByName(pl.p, module, n), v);
+    pl.activate(rate);
+    const size_t n = (size_t)rate;
+    std::vector<float> inL(n, 0), inR(n, 0), r;
+    inL[0] = inR[0] = 1;
+    return pl.render(inL, inR, r, {512}, {}, false);
+}
+// Settings for every fitted mode: the fixed ones above and seeded random ones.
+std::vector<ModeCase> allFittedCases()
+{
+    auto cases = threeAndMasterCases();
+    auto five = [](const EqSetting &s) {
+        return ModeCase{1, "Five-band EQ",
+                        {{"Low Shelf Frequency", s.lf}, {"Low Shelf Gain", s.lg}, {"Band 2 Q", s.q2}, {"Band 2 Frequency", s.f2},
+                         {"Band 2 Gain", s.g2}, {"Band 3 Q", s.q3}, {"Band 3 Frequency", s.f3}, {"Band 3 Gain", s.g3},
+                         {"Band 4 Q", s.q4}, {"Band 4 Frequency", s.f4}, {"Band 4 Gain", s.g4}, {"High Shelf Frequency", s.hf},
+                         {"High Shelf Gain", s.hg}, {"Output Level", s.out}},
+                        [s](double f, double r) { return s.modelDb(f, r); }};
+    };
+    auto two = [](const TwoBandSetting &s) {
+        return ModeCase{2, "Two-band EQ",
+                        {{"Band 1 Type", (double)s.t1}, {"Band 1 Frequency", s.f1}, {"Band 1 Gain", s.g1}, {"Band 1 Q", s.q1},
+                         {"Band 2 Type", (double)s.t2}, {"Band 2 Frequency", s.f2}, {"Band 2 Gain", s.g2}, {"Band 2 Q", s.q2},
+                         {"Output Level", s.out}},
+                        [s](double f, double r) { return s.modelDb(f, r); }};
+    };
+    for (const auto &s : eqSettings)
+        cases.push_back(five(s));
+    for (const auto &s : twoBandSettings)
+        cases.push_back(two(s));
+    std::mt19937 rng(1302);
+    auto uni = [&](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+    auto lf = [&](double lo, double hi) { return lo * std::pow(hi / lo, uni(0, 1)); };
+    for (int k = 0; k < 8; ++k)
+        cases.push_back(five({lf(20, 2000), uni(-12, 12), lf(0.5, 16), lf(20, 20000), uni(-18, 18), lf(0.5, 16), lf(20, 20000),
+                              uni(-18, 18), lf(0.5, 16), lf(20, 20000), uni(-18, 18), lf(500, 20000), uni(-12, 12), 0}));
+    for (int k = 0; k < 8; ++k)
+    {
+        const int t1 = 1 + (int)(uni(0, 5)), t2 = 1 + (int)(uni(0, 5));
+        cases.push_back(two({t1, lf(20, 20000), uni(-12, 12), lf(0.1, 12), t2, lf(20, 20000), uni(-12, 12), lf(0.1, 12), 0}));
+    }
+    for (int k = 0; k < 6; ++k)
+    {
+        const double lfq = lf(20, 5000), lg = uni(-12, 12), mf = lf(20, 20000), mg = uni(-12, 12), mq = lf(0.5, 12), hf = lf(500, 20000), hg = uni(-12, 12);
+        cases.push_back({3, "Three-band EQ",
+                         {{"Low Frequency", lfq}, {"Low Gain", lg}, {"Mid Frequency", mf}, {"Mid Gain", mg}, {"Mid Q", mq}, {"High Frequency", hf}, {"High Gain", hg}},
+                         [=](double f, double r) { return shelfDb(f, lfq, lg, false, r) + threeBandMidDb(f, mf, mg, mq, r) + shelfDb(f, hf, hg, true, r); }});
+    }
+    for (int k = 0; k < 6; ++k)
+    {
+        double g[5], fr[5], q[5];
+        for (int b = 0; b < 5; ++b)
+        {
+            g[b] = uni(-12, 12);
+            fr[b] = b == 0 ? lf(20, 2000) : (b == 4 ? lf(500, 20000) : lf(20, 20000));
+            q[b] = lf(0.1, 12);
+        }
+        const int sh1 = uni(0, 1) < 0.5 ? 0 : 1, sh5 = uni(0, 1) < 0.5 ? 0 : 1;
+        std::vector<std::pair<const char *, double>> set{{"Band 1 Shape", (double)sh1}, {"Band 5 Shape", (double)sh5}};
+        static const char *names[5][3] = {{"Band 1 Gain", "Band 1 Frequency", "Band 1 Q"}, {"Band 2 Gain", "Band 2 Frequency", "Band 2 Q"},
+                                          {"Band 3 Gain", "Band 3 Frequency", "Band 3 Q"}, {"Band 4 Gain", "Band 4 Frequency", "Band 4 Q"},
+                                          {"Band 5 Gain", "Band 5 Frequency", "Band 5 Q"}};
+        for (int b = 0; b < 5; ++b)
+        {
+            set.push_back({names[b][0], g[b]});
+            set.push_back({names[b][1], fr[b]});
+            set.push_back({names[b][2], q[b]});
+        }
+        std::array<double, 5> G, F, Q;
+        std::copy(g, g + 5, G.begin());
+        std::copy(fr, fr + 5, F.begin());
+        std::copy(q, q + 5, Q.begin());
+        cases.push_back({4, "Master EQ", set, [=](double f, double r) {
+                             double v = sh1 ? cookbookPeakDb(f, F[0], G[0], Q[0], r) : shelfDb(f, F[0], G[0], false, r);
+                             for (int b = 1; b < 4; ++b)
+                                 v += cookbookPeakDb(f, F[b], G[b], Q[b], r);
+                             return v + (sh5 ? cookbookPeakDb(f, F[4], G[4], Q[4], r) : masterHighShelfDb(f, F[4], G[4], r));
+                         }});
+    }
+    return cases;
+}
+} // namespace
+
+TEST_CASE("Fitted EQs keep their 44.1 kHz response at 48, 88.2, 96 and 192 kHz")
+{
+    // Decision 13, tolerances proposed: from 20 Hz to 20 kHz the plugin's response at each rate
+    // is within 0.05 dB of the 44.1 kHz design wherever the design is within 20 dB of its peak,
+    // and within 0.5 dB further down; above 20 kHz it does not exceed the design's peak up to
+    // 22.05 kHz by more than 3 dB. The 44.1 kHz design matches the reference renders (plan,
+    // section 15). Every mode, fixed and seeded random settings.
+    const auto band = logFreqs(20, 20000, 160);
+    const auto cases = allFittedCases();
+    for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
+    {
+        auto above = logFreqs(20000, 0.49 * rate, 40);
+        auto freqs = band;
+        freqs.insert(freqs.end(), above.begin(), above.end());
+        double worstMain = 0, worstDeep = 0, worstOver = -1e9;
+        for (size_t c = 0; c < cases.size(); ++c)
+        {
+            const auto &cs = cases[c];
+            const auto got = impulseDb(modeImpulse(cs.mode, cs.module, cs.set, rate), rate, freqs);
+            double top = -1e9, top22 = -1e9;
+            std::vector<double> m;
+            for (double f : band)
+                m.push_back(cs.model(f, 44100)), top = std::max(top, m.back());
+            for (double f : logFreqs(20000, 22049, 30))
+                top22 = std::max(top22, cs.model(f, 44100));
+            double mainErr = 0, deepErr = 0, over = -1e9;
+            for (size_t k = 0; k < band.size(); ++k)
+            {
+                const double d = std::abs(got[k] - m[k]);
+                (m[k] > top - 20 ? mainErr : deepErr) = std::max(m[k] > top - 20 ? mainErr : deepErr, d);
+            }
+            for (size_t k = band.size(); k < freqs.size(); ++k)
+                over = std::max(over, got[k] - std::max(top, top22));
+            INFO(cs.module << " case " << c << " at " << rate << " Hz: " << mainErr << " dB within 20 dB of the peak, " << deepErr
+                           << " dB below, " << over << " dB over above 20 kHz");
+            CHECK(mainErr < 0.05);
+            CHECK(deepErr < 0.5);
+            CHECK(over < 10);
+            worstMain = std::max(worstMain, mainErr);
+            worstDeep = std::max(worstDeep, deepErr);
+            worstOver = std::max(worstOver, over);
+        }
+        std::printf("Fitted EQs at %.0f Hz, %zu settings: worst %.4f dB within 20 dB of the peak, %.4f dB below, %+.2f dB above 20 kHz\n",
+                    rate, cases.size(), worstMain, worstDeep, worstOver);
+    }
+}
+
+TEST_CASE("Rate matching: coefficient cost")
+{
+    // Printed, not gated: the time to compute an EQ's coefficients at another rate (on a
+    // parameter change, in process), cold, over the same settings.
+    using namespace oscairn_fx::eq;
+    std::mt19937 rng(7);
+    auto uni = [&](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+    auto lf = [&](double lo, double hi) { return lo * std::pow(hi / lo, uni(0, 1)); };
+    auto m = std::make_unique<rate::Matcher>();
+    for (double r : {48000.0, 96000.0, 192000.0})
+    {
+        double total = 0, worst = 0;
+        const int n = 40;
+        for (int k = 0; k < n; ++k)
+        {
+            Biquad s[2], bp[3], net[3];
+            shelf(s[0], designRate, lf(20, 2000), uni(-12, 12), false);
+            shelf(s[1], designRate, lf(500, 20000), uni(-12, 12), true);
+            double weight[3];
+            int role[3];
+            for (int b = 0; b < 3; ++b)
+            {
+                bandpass(bp[b], designRate, lf(20, 20000), lf(0.5, 16));
+                const double g = uni(-18, 18), G = std::pow(10, g / 20);
+                role[b] = g > 0 ? 1 : -1;
+                weight[b] = g > 0 ? G - 1 : 1 / G - 1;
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            const int nn = networkBiquads(bp, weight, role, net);
+            rate::Section sec[5], out[15];
+            const Biquad *d[5] = {&s[0], &s[1], &net[0], &net[1], &net[2]};
+            for (int i = 0; i < 2 + nn; ++i)
+            {
+                sec[i].b[0] = d[i]->b0, sec[i].b[1] = d[i]->b1, sec[i].b[2] = d[i]->b2;
+                sec[i].a[1] = d[i]->a1, sec[i].a[2] = d[i]->a2;
+            }
+            m->match(sec, 2 + nn, r, out);
+            const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+            total += us;
+            worst = std::max(worst, us);
+        }
+        std::printf("Five-band EQ coefficients at %.0f Hz: mean %.0f us, worst %.0f us (40 random settings)\n", r, total / n, worst);
     }
 }
 
