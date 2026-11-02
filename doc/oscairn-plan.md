@@ -215,7 +215,7 @@ reverb DSP:
 | Plugin | Modes (types) | Base | Borrowed | Written | Side-chain input |
 | --- | --- | --- | --- | --- | --- |
 | Reverb | 16 (15 reverbs + Early Reflection) | 4 | 2 | 10 | |
-| Delay | 9 | 7 | 2 | 0 | |
+| Delay | 9 | Three-band Q index law | Within 1.2% of the three measured Q values (indices 0, 15, 31); hold-out fx16: settings with mid Q index 20–29 miss by 0.23–0.64 dB at 1.2–4.7 kHz | Only three points measured; the law (or the centre) is off at high Q | Unresolved; next: a Q sweep at several centres | fx4, fx6, fx16 `p3ho00/01/06/09/10` | converter (gate scripts for now) |
 | Chorus | 6 | 4 | 1 | 1 | |
 | Flanger | 5 | 4 | 0 | 1 | yes |
 | Phaser | 5 | 3 | 0 | 2 | yes |
@@ -224,7 +224,7 @@ reverb DSP:
 | Dynamics | 7 | 5 | 0 | 2 | yes |
 | Wah | 3 | 0 | 0 | 3 | |
 | Lo-Fi | 4 | 3 | 0 | 1 | |
-| Tech | 18 | 4 | 1 | 13 | yes |
+| Tech | 18 | 4 | 1 | 13 | Hall reverb not built; displayed time against measured decay | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
 | EQ | VCM EQ 501 + Part 3-band, Part 2-band, Master 5-band | 0 (+3 EQs on sst-filters biquads) | 0 | 1 | |
 | Misc | 11 | 3 | 3 | 5 | yes |
 | **All 104 types** | | **42** | **23** | **39** | |
@@ -275,7 +275,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | VCM FLANGER | 04 00 | Var,InsA/B,A/D |  | 210 | 116 | Flanger | written | own circuit-style flanger on the Surge XT BBD line |
 | CLASSIC FLANGER | 04 10 | Var,InsA/B,A/D |  | 124 | 224 | Flanger | base | sst Flanger + mapping |
 | TEMPO FLANGER | 04 20 | Var,InsA/B,A/D |  | 79 | 33 | Flanger | base | sst Flanger, tempo-synced LFO + mapping |
-| DYNAMIC FLANGER | 04 30 | Var,InsA/B,A/D | yes | 16 | 10 | Flanger | base | sst Flanger + own envelope follower (side-chain) |
+| DYNAMIC FLANGER | 04 30 | Var,InsA/B,A/D | yes | 16 | Tempo cross delay not built | Measured (fx14, fx16): echoes at 499.98 ms for a quarter note at the host's 120 BPM; lag adds 1 ms per step to every repeat; feedback gain v / 63.5 (within 0.01 dB per repeat for v = 8 to 63, either sign); the wet path is unfiltered; high damping is a low-pass in the feedback path only (ratio 0.1: −7.5 dB per repeat at 16 kHz); the EQ parameters have no effect; L-MODE2 and R-MODE2 alternate sides at two notes per repeat. The four fx14 probes without an echo were a detector failure (another render's click as template). Not measured: the dry/wet balance law, the high-damping law between 0.1, 0.5 and 1.0, tempo other than 120 BPM | Recorder fixed at 120 BPM; balance not probed | Next: balance and damping sweeps; tempo from the host transport (not plumbed in the wrapper yet) | fx9, fx14, fx16 `d_*`; `fit_dly3.py`, `fit_fx16.py dly` | none yet |
 | CONTROL FLANGER | 04 08 | Var,InsA/B,A/D |  | 7 | 0 | Flanger | base | sst Flanger, manual sweep + mapping |
 | VCM PHASER MONO | 05 00 | Var,InsA/B,A/D |  | 51 | 55 | Phaser | written | own circuit-style phaser (OTA all-pass stages) |
 | VCM PHASER STEREO | 05 10 | Var,InsA/B,A/D |  | 158 | 101 | Phaser | written | own circuit-style phaser, stereo |
@@ -296,7 +296,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | US COMBO | 07 40 | Var,InsA/B,A/D |  | 46 | 0 | Distortion & Amp | borrowed | Guitarix tone stacks (GPL-2.0+) + sst-waveshapers preamp + own cabinet filter |
 | JAZZ COMBO | 07 41 | Var,InsA/B,A/D |  | 30 | 11 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
 | US HIGH GAIN | 07 42 | Var,InsA/B,A/D |  | 6 | 0 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
-| BRITISH LEAD | 07 43 | Var,InsA/B,A/D |  | 8 | 18 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
+| BRITISH LEAD | 07 43 | Var,InsA/B,A/D |  | 8 | Three-band high-shelf scale measured at 17 indices only | Formula within 0.66% of those; corner rule (gain-independent), found on fx12, confirmed on the fresh hold-out fx16: shelf-only settings 0.0087–0.053 dB | A full table needs a sweep of 125 indices | Formula shipped; rule held on a fresh hold-out | fx6, fx11a, fx12, fx16 `p3ho02/05/08/11` | `threeBandHighShelfHalfGainHz`, `threeBandHighShelfCornerHz` |
 | MULTI FX | 07 44 | Var,InsA/B,A/D |  | 45 | 26 | Distortion & Amp | base | chain of the suite's own blocks: compressor, distortion, wah, phaser/flanger, delay |
 | SMALL STEREO | 07 45 | Var,InsA/B,A/D |  | 41 | 27 | Distortion & Amp | borrowed | Surge XT Distortion + own small-cabinet filter |
 | BRITISH COMBO | 07 46 | Var,InsA/B,A/D |  | 31 | 1 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
@@ -318,7 +318,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | RING MODULATOR | 0C 00 | Var,InsA/B,A/D,Mas | yes | 236 | 95 | Tech | base | sst voice RingMod (side-chain as modulator) + mapping |
 | CS RING MODULATOR | 0C 08 | Var,InsA/B,A/D,Mas |  | 26 | 0 | Tech | borrowed | Surge XT RingModulator (diode model, GPL-3.0) + mapping |
 | DYNAMIC RING MODULATOR | 0C 10 | Var,InsA/B,A/D | yes | 53 | 33 | Tech | base | sst RingMod + own envelope follower (side-chain) |
-| DYNAMIC FILTER | 0C 20 | Var,InsA/B,A/D,Mas | yes | 48 | 15 | Tech | base | sst-filters + own envelope follower (side-chain) |
+| DYNAMIC FILTER | 0C 20 | Var,InsA/B,A/D,Mas | yes | 48 | 15 | Compressor type not built; its dynamics not measured | Static curve measured (fx7, fx13): a fixed +65.9 dB gain after the input-level law, output-level law exact, digital silence at the two lowest input levels, compression from about −14 dBFS RMS with a soft knee and effective ratios of about 3.2 / 3.7 / 4.6 for settings 2 / 4 / 20. fx16: at a fixed input the output level moves 9.2 dB with the attack setting (−11.95 dB at attack 0 to −2.71 dB at 150–200, release 0): the detector is an asymmetric follower on the rectified signal, not RMS. Time constants still not measured (the fx16 steps went to silence) | Probe design | Next: two-level steps (velocity 127 against about 90, or an amplitude-LFO square), then fit detector and time constants together | fx7, fx13, fx16 `c_*`; `fit_comp.py`, `fit_comp2.py`, `fit_fx16.py comp` | none yet |
 | AUTO SYNTH | 0C 30 | Var,InsA/B,A/D |  | 50 | 28 | Tech | written | own |
 | SPIRALIZER P | 0C 38 | Var,InsA/B,A/D,Mas |  | 12 | 0 | Tech | written | own (sst ShepardPhaser as a starting block) |
 | TEMPO SPIRALIZER P | 0C 39 | Var,InsA/B,A/D,Mas |  | 3 | 0 | Tech | written | own, tempo-synced |
@@ -934,6 +934,61 @@ frequency-dependent decay (8 kHz T60 is 0.4× the low-band value at 0.1, 1.0× a
 the dry click in each render for onsets and levels, a grid over time and room size, the
 early-reflection pattern, and then the reverb design (written, per section 6).
 
+### Batch fx16: three-band hold-out, compressor steps, delay laws, hall decay (2026-11-02)
+
+100 renders (78 single notes, 22 sequences), one batch on the shared recorder, all written; held
+tones checked for dropouts (none; the sequences have deliberate gaps). Analysis scripts are kept
+outside the repositories (`fit_fx16.py`, `gate_peq.py`, `fit_dly3.py`).
+
+- **The four delay probes without an echo (fx14) were a detector failure**, not behaviour: the
+  echo detector cross-correlated each render with another render's click, and the click is not
+  repeatable (known difference 12), so the template did not match. With each render's own click
+  as the template every fx14 probe echoes: lag −32 → 467.98 ms, +32 → 531.97 ms, +63 →
+  562.97 ms, equal 500 ms times without feedback → 499.98 ms (the lag adds 1 ms per step).
+- **Tempo cross delay laws (fx16, fitted on these renders only):** feedback gain = v / 63.5 for
+  displayed feedback v (v = 8, 16, 24, 40, 48, 56, 63 give 18.00, 11.98, 8.46, 4.02, 2.43,
+  1.10, 0.07 dB per repeat; the law predicts 17.99, 11.97, 8.45, 4.02, 2.43, 1.10, 0.07);
+  negative values decay alike. The first echo equals the dry click in every octave band (0.00
+  dB) at balance D=W, so the wet path has no filter. High damping filters the feedback path only:
+  per repeat, at ratio 0.1, −0.31 / −1.42 / −7.5 dB at 4 / 8 / 16 kHz relative to 125 Hz; at 0.5,
+  −0.29 / −1.12 / −3.7 dB; flat at 1.0. The EQ parameters (low and high gain ±12 dB) change
+  neither the first echo nor the repeats in any band (to 0.01 dB). Lag applies to every repeat
+  (repeats at multiples of 436.98 and 562.97 ms). Input modes 3 and 4 (L-MODE2, R-MODE2): the
+  first echo on one side at one note, then repeats every two notes on each side, interleaved.
+  Eighth and dotted eighth with feedback ping-pong at 374.99 / 249.98 ms as expected.
+- **Three-band EQ hold-out (fresh, fx16, seed 1616, never used for fitting; task: the
+  gain-independent high-shelf corner):** the four settings with only the high shelf set match to
+  0.0087–0.053 dB (rule holds; one 0.003 dB over the proposed 0.05 dB). With the low shelf and the
+  mid band also set, 4 of 8 miss by 0.23–0.64 dB, at 1.2–4.7 kHz, every one with a mid Q index of
+  20 or more (Q 4.1–8.6): the mid band's Q index law (known difference 9) or its centre near
+  those Qs, not the shelf. Worst 0.64 dB, RMS of per-render worst 0.30 dB.
+- **Compressor steps:** the velocity steps failed as steps — with amplitude velocity sensitivity
+  +255 a velocity of 40 is silent, so the probe toggled the tone off and on and release could not
+  be measured. Steady state, though, explains the earlier puzzle: at a fixed input the output
+  level depends strongly on attack (−11.95, −10.36, −4.52, −2.71, −2.71 dB output for attack 0,
+  50, 100, 150, 200 at release 0), and less on release. That is what an asymmetric envelope
+  follower on the rectified signal does (fast attack and slow release ride the peaks, slow
+  attack and fast release sit lower in the waveform), not an RMS detector: the detector law is
+  next to fit, from these levels, with two-level steps (velocity 127 against about 90, or an
+  amplitude-LFO square) for the time constants.
+- **Hall reverb with oscillator phase reset:** the click is still not repeatable (energies
+  −0.74, −7.64, −8.70 dB over three identical renders; shapes differ by about the peak value
+  after alignment), so phase reset alone does not fix it; levels and onsets remain unusable. The
+  decay times are repeatable (three identical renders within 0.1 s up to 4 kHz) and give a grid:
+  mid-band (1 kHz) T60 for time index 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size
+  29: 0.85 / 0.90 / 1.75 / 2.42 / 2.89–2.97 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s; room size 0 / 8
+  / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; at time 8, room 0 / 15: 0.22 /
+  0.66 s; at time 56, 1.94 / 3.21 s (room and time do not scale separately); high ratio 0.1 /
+  0.3 / 0.5 / 1.0 gives 4 kHz T60 2.27 / 1.90 / 2.12 / 3.13 s against about 3.0 s at 125 Hz;
+  diffusion, initial delay, decay, HPF and LPF leave T60 within about 0.15 s (HPF 30 lengthens
+  the low bands by 0.4 s).
+
+Nothing was built from fx16 yet: the delay needs the dry/wet balance law (not probed) and tempo
+from the host transport (the wrapper has none yet); the compressor needs its detector and time
+constants; the reverb needs a repeatable source for levels and onsets — next, a source without an
+oscillator under a short envelope (a steady tone or noise switched off, or a sample-based click
+in the AWM2 engine).
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -954,7 +1009,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 9 | Three-band Q index law | Within 1.2% of the three measured Q values (indices 0, 15, 31) | Only three points measured | Geometric law in the converter | fx4, fx6 | converter (gate scripts for now) |
 | 10 | Fitted EQs at 48, 88.2, 96 and 192 kHz | Within the proposed gate everywhere checked: worst 0.023 dB within 20 dB of the peak and 0.29 dB below over the plugin tests' 39 settings, 20 Hz–20 kHz; 0.036 / 0.35 dB over 2,400 random settings (stress run, matcher alone). Above 20 kHz (where the reference has no response) the matched EQs may exceed the design's peak up to 22.05 kHz by up to 7.8 dB (stress run; 1.3 dB in the tests) | The reference is a 44.1 kHz bilinear design; a biquad at another rate cannot follow its warping, so each section is replaced by up to three fitted biquads, and above 20 kHz only a loose bound is kept | In-band: met (decision 13). Above 20 kHz: deliberate, sanity bound 10 dB in the tests (proposed, set after seeing 7.8 dB) | Plugin test "Fitted EQs keep their 44.1 kHz response at 48, 88.2, 96 and 192 kHz"; stress program (scratch, not committed) | `effects/RateMatch.h`, `MatchedCascade` in `effects/FiveBandEq.h` |
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
-| 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix: a deterministic click (oscillator phase reset at note-on, or a sampled click) | fx10, fx15; `fit_rev.py`, `fit_rev2.py` | none (measurement) |
+| 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
 | 13 | Hall reverb not built; displayed time against measured decay | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: about 0.7 / 0.9 / 1.7–1.9 / 2.5 / 2.9 / 3.6 / 4.1 / 4.8 / 6.1 / 8.4 s (fx10 where measured, else fx15; displayed 0.3 / … / 18.0 s; at index 0 fx15 gives 1.9 s against fx10's 0.68 s, the click residual dominating a short decay); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.8 / 1.2 / 1.75 / 2.4 / 3.0 s; high ratio 0.1 shortens 8 kHz to about 0.4 of the low bands. fx15's 8 kHz values run higher than fx10's (residual of the click) | Reference behaviour | To be fitted when the reverb mode is built, from wet-only renders with a deterministic click | fx10, fx15; `fit_rev.py`, `fit_rev2.py` | none yet |
 | 14 | Types not built | 103 of the 104 types (only the five-band EQ type is built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
 | 15 | Compressor type not built; its dynamics not measured | Static curve measured (fx7, fx13): a fixed +65.9 dB gain after the input-level law, output-level law exact, digital silence at the two lowest input levels, compression from about −14 dBFS RMS with a soft knee and effective ratios of about 3.2 / 3.7 / 4.6 for settings 2 / 4 / 20, output levelling near −1.5 dBFS RMS. Time constants still not measured: on this source velocity does not change level, and adding an equal tone did not change the compressed pilot's level | Probe design (and possibly behaviour not yet understood) | Next probes: level steps from the amplitude envelope or a volume change | fx7, fx13; `fit_comp.py`, `fit_comp2.py` | none yet |
