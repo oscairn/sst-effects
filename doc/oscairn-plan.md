@@ -518,11 +518,13 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     reads it, Oscairn measures memory from outside, keyed by plugin build, so two modes of one
     plugin share a figure: the request stands to key memory by the context's state or to read
     the estimate (section 15, effect memory).
-17. **A measured frequency scale.** The three-band EQ's frequency scale (and possibly the Master
-    EQ's low indices) does not follow a formula. Measuring every index is allowed (fit
-    measurements), but it is a table built from about 210 renders per band. Confirm that is
-    wanted, or accept the nearest formula with its error stated.
-
+17. **Measured frequency scales, table or formula (tried both).** For the three-band Part EQ
+    and the Master EQ, a table measured from renders and the nearest closed form were built
+    behind `OSCAIRN_FREQUENCY_SCALE_TABLE` and compared (section 15, "Decision 17"). The tables
+    match at least as well everywhere, cost about 0.8 KB, and are cheaper per conversion, so they
+    ship. Neither version meets the 0.05 dB tolerance yet: the remaining error is in laws other
+    than the scale (known differences 2 and 5). Confirm the tables (the Master EQ's is the Data
+    List's printed scale, which the measurements confirm).
 ## 14. Risks and not verified
 
 - Determinism of the stock effects: settled in M0 (decision 15).
@@ -773,8 +775,48 @@ dB. Built as mode "Two-band EQ" of Oscairn FX EQ, tests as for the five-band EQ.
   81.8, 126.8, 325 Hz, and the high end bends. It looks tabulated; pinning it down means a sweep
   over every index (about 210), possibly with interleaved notes. Decision 17.
 
-Not done in M1 yet: the three-band and Master EQ modes, the low-frequency peak question, and
-listening.
+#### Decision 17: the frequency scales, table against formula (2026-11-02)
+
+Sweeps: fx11a (218 renders: the three-band EQ at every index 46–255, the mid band at Q 2.6 for
+83–241, the low shelf below, the high shelf above, and overlaps) and fx11b (112: every Master EQ
+index of its peaks, low shelf and high shelf). Fresh hold-out fx12 (12 random settings of each
+EQ). Results:
+
+- **Three-band scale T(i)** (low shelf corner 2T, mid centre T): piecewise linear in Hz, the
+  octave split into 25.5 equal steps (the step doubles every 25.5 indices), with a warp above
+  about 3 kHz. Nearest closed form: F = 55.113 × 2^⌊u⌋ × (1 + frac u), u = (i − 50.5)/25.5,
+  f = 44100/(π k) tan(π k F / 44100), k = 1.2059; within 1.52% of the table (RMS 0.69%).
+- **Three-band high shelf**: its own mapping, the same linear-octave code (54.267 Hz) compressed
+  by the bilinear transform, 44100/π atan(π F / 44100), within 0.66% of 17 measured indices. Its
+  corner does not depend on the gain (it is the 12 dB shelf's corner), as for the low shelf;
+  this rule was found on the fx12 hold-out, so fx12 counts as fitting data for it and a further
+  hold-out is due.
+- **Three-band mid Q**: falls near Nyquist as the cookbook's bandwidth-in-octaves form predicts
+  (2.5% RMS in Q); Q index law 0.7 × (10.3/0.7)^(j/31) (within 1.2% of three measured values).
+- **Master EQ scale**: the Data List's printed values, confirmed by measurement (low shelf 0.0%,
+  high shelf ≤ 0.8%, peaks ≤ 0.4% from index 23); the nearest formula 20 × 10^(i/20) is up to
+  5.16% off.
+
+| Scale | Version | Size | Per conversion (test benchmark, same build) | Fit renders: worst / RMS of per-render worst, dB | Hold-out fx12: worst / RMS, dB |
+| --- | --- | --- | --- | --- | --- |
+| Three-band | Table (196 measured + 14 formula entries) | 840 B data + 312 B code | 2.7 ns | fx11a 0.63 / 0.098 | 1.96 / 0.58 (0.29 without ho01) |
+| Three-band | Formula | 916 B code (+ libm `tan`, `exp2`) | 8.1 ns | fx11a 0.92 / 0.21 | 2.06 / 0.65 (0.59 without ho01) |
+| Master | Table (printed, 61 entries) | 244 B data (61 floats; computed, not measured) | not benchmarked (a table lookup) | fx11b 1.58 / 0.24 | 4.53 / 1.55 |
+| Master | Formula 20 × 10^(i/20) | not measured (one libm `pow`) | not benchmarked | fx11b 1.55 / 0.27 | 4.46 / 1.63 |
+
+CPU per block is the same for both versions: the conversion runs in the converter (once per
+value), and the plugins take Hz. Three-band sizes from the object file of a probe built both ways (arm64, -O2); its
+conversion times from the plugin test's benchmark. ho01 is a wide mid band at 5 kHz
+(known difference 5); the Master EQ's errors are at 65–200 Hz (known difference 2) in both
+versions, and above 300 Hz the table is better (mho01 0.03 dB against 0.58 dB). Shipped: the
+tables (decision 17).
+
+Built: modes "Three-band EQ" and "Master EQ" of Oscairn FX EQ (`effects/PartAndMasterEq.h`),
+and the converter's scales (`converter/FrequencyScales.h`). Shelves now keep their 44.1 kHz
+half-gain frequency at other rates.
+
+Not done in M1 yet: the low-frequency peak question (known differences 1 and 2), the three-band
+mid near Nyquist (5), a further three-band hold-out, and listening.
 
 ### First measurements of the compressor, the cross delay and the hall reverb (2026-11-02)
 
@@ -830,3 +872,30 @@ So room size scales the decay as much as the time parameter does, and the high r
 frequency-dependent decay (8 kHz T60 is 0.4× the low-band value at 0.1, 1.0× at 1.0). Next:
 the dry click in each render for onsets and levels, a grid over time and room size, the
 early-reflection pattern, and then the reverb design (written, per section 6).
+
+## 16. Known differences from the reference
+
+One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
+scripts kept outside the repositories, `probes_*.py`) and the comparison (`compare_transfer.py`
+and `dynamics.py` in the measurement repository's `fx/`, driven by `gate_*.py`). Sizes are worst
+cases over the stated renders, 20 Hz–19 kHz unless stated.
+
+| # | What differs | Size and where | Cause | Status | Reproduce | Code |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | Two-band EQ peaks below about 300 Hz | 1.2 dB at 163 Hz (index 80, Q 8, fx4); hold-out fx8 0.26 and 0.20 dB at 98 and 294 Hz; fitted centres scatter (110, 134, 155, 205, 246 Hz for nominal 100, 126, 158, 200, 251) | Unknown: a different low-frequency law, or too few harmonics (every 32.7 Hz) inside a narrow band to fit it | Unresolved; next: the same settings at several notes | fx4, fx6, fx8 two-band probes; `gate_peq.py … two` | `effects/TwoBandEq.h` (peak), `converter` (none yet) |
+| 2 | Master EQ peaks at indices 14–22 (printed 100–225 Hz) | Fitted centres within ±10% of printed (fx11b); hold-outs fx8 up to 2.09 dB and fx12 up to 4.53 dB, at 65–330 Hz | As #1 | Unresolved | fx5, fx8, fx11b; `check_master.py`, `fit_scale.py fx11b` | `effects/PartAndMasterEq.h`, `converter/FrequencyScales.h` (`masterPrintedHz`) |
+| 3 | Master EQ high shelf at 500 Hz | 0.14 dB (+12 dB) and 0.80 dB (−12 dB) | Unknown; at 2–16 kHz it fits to 0.026 dB | Unresolved | fx5 `m5sh_f28_*`; `check_master.py` | `masterHighShelf` |
+| 4 | Master EQ high shelf: √2 or 10^(\|g\|/80) | Equal at ±12 dB, the only gains probed alone | The probes cannot tell them apart | Unresolved; √2 shipped | fx5, fx8 | `masterHighShelf` |
+| 5 | Three-band EQ mid band above about 4 kHz with a Q far from 2.6 | Up to 10.3 dB (fx4/fx6, index 241, Q 0.7 and 10.3); 2.9 dB at index 202, Q 10.3; hold-out fx12 1.96 dB (5 kHz, Q 1.0) | Its centre moves with Q near Nyquist (index 239: 12.3 kHz at Q 2.6, 11.0 kHz at Q 10.3); the law is two-dimensional and not fitted | Unresolved | fx4, fx6, fx11a; `gate_peq.py … three` | `midWidening`, `converter/FrequencyScales.h` |
+| 6 | Three-band mid at its top indices at Q 2.6 | 0.63 dB at index 241 (18.3 kHz), 0.33 at 239 | The bandwidth law (2.5% RMS in Q) | Unresolved | fx11a | `midWidening` |
+| 7 | Three-band low shelf at index 182 | 0.32 dB | Unknown | Unresolved | fx11a `lo_i182` | `shelf` |
+| 8 | Three-band high-shelf scale measured at 17 indices only | Formula within 0.66% of those; corner rule (gain-independent) found on hold-out fx12 | A full table needs a sweep of 125 indices | Formula shipped; a further hold-out due | fx6, fx11a, fx12 | `threeBandHighShelfHalfGainHz`, `threeBandHighShelfCornerHz` |
+| 9 | Three-band Q index law | Within 1.2% of the three measured Q values (indices 0, 15, 31) | Only three points measured | Geometric law in the converter | fx4, fx6 | converter (gate scripts for now) |
+| 10 | Fitted EQs at 48 and 96 kHz near Nyquist | Five-band EQ with a wide band at 20 kHz: 1.14 / 1.17 dB below 4 kHz at 48 / 96 kHz; wide peaks at 96 kHz: up to 0.20 dB (Master EQ), 0.12 dB (three-band mid at 7 kHz); first-order passes at 96 kHz: 0.12 dB at 4 kHz | The reference is a 44.1 kHz bilinear design; peaks keep their centre and edge frequencies, shelves their half-gain frequency, which cannot match wide skirts at other rates | Deliberate, decision 13; printed by the tests | Plugin tests (`… keep … at 48 and 96 kHz`) | `peakingQAt`, `shelf`, `masterHighShelf` |
+| 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
+| 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10 base0, base1); onsets differ by up to 70 ms | Unknown; not the effect under test so far (the recorder's note timing jitters too) | Unresolved; fx15 repeats the base four times with the dry click in each render | fx10, fx15; `fit_rev.py` | none (measurement) |
+| 13 | Hall reverb: displayed time against measured decay | Displayed 0.3 / 1.9 / 3.5 / 5.5 / 18.0 s give a mid-band T60 of 0.69 / 1.72 / 3.0 / 4.2 / 8.8 s (room size 29) | Reference behaviour (the display is not T60 at these settings) | To be matched when the reverb mode is built | fx10; `fit_rev.py` | none yet |
+| 14 | Types not built | 103 of the 104 types (only the five-band EQ type is built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 15 | Compressor type measurements incomplete | Static curve probed too hot; time constants inconclusive (fx7) | Probe design | fx13 redesigns both | fx7, fx13; `fit_comp.py` | none yet |
+| 16 | Tempo cross delay: tempo behaviour unmeasured | The reference follows its host's tempo; the recorder's host is fixed at 120 BPM | Recorder limitation | Tempo sync taken from the parameter definitions until the recorder can set the host tempo | fx9; `fit_dly.py` | none yet |
+| 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
