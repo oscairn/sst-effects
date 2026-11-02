@@ -21,6 +21,7 @@
 #include "sst/effects/Reverb2.h"
 #include "effects/FiveBandEq.h"
 #include "effects/TwoBandEq.h"
+#include "effects/PartAndMasterEq.h"
 
 #include <algorithm>
 #include <array>
@@ -190,6 +191,8 @@ const std::vector<Category> &categories()
                     {}};
         eq.modes.push_back(mode<oscairn_fx::eq::FiveBandEq>(1, "Five-band EQ"));
         eq.modes.push_back(mode<oscairn_fx::eq::TwoBandEq>(2, "Two-band EQ"));
+        eq.modes.push_back(mode<oscairn_fx::eq::ThreeBandEq>(3, "Three-band EQ"));
+        eq.modes.push_back(mode<oscairn_fx::eq::MasterEq>(4, "Master EQ"));
         eq.finish();
         c.push_back(std::move(eq));
         return c;

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <new>
 #include <set>
@@ -1116,3 +1117,121 @@ TEST_CASE("Two-band EQ is transparent when off")
     for (size_t i = 0; i + L < inL.size(); ++i)
         REQUIRE((out[i + L] == inL[i] && r[i + L] == inR[i]));
 }
+
+// ---- Three-band and Master EQ (plan, section 15, M1) ----
+namespace
+{
+double masterHighShelfDb(double f, double fc, double g, double rate)
+{
+    const double G = std::pow(10, g / 40);
+    const double w = 2 * std::atan(std::tan(M_PI * fc / rate) / std::sqrt(2.0));
+    const double c = std::cos(w), s = std::sqrt(G) * std::sin(w) / 0.5;
+    return sectionDb(G * ((G + 1) + (G - 1) * c + s), -2 * G * ((G - 1) + (G + 1) * c),
+                     G * ((G + 1) + (G - 1) * c - s), (G + 1) - (G - 1) * c + s,
+                     2 * ((G - 1) - (G + 1) * c), (G + 1) - (G - 1) * c - s, f, rate);
+}
+// The three-band EQ's mid: the cookbook peak with its bandwidth kept in octaves near Nyquist.
+double threeBandMidDb(double f, double fc, double g, double q, double rate)
+{
+    const double qc = q * std::pow(10, -std::abs(g) / 40), w = 2 * M_PI * fc / 44100;
+    const double bw = 2 / std::log(2.0) * std::asinh(1 / (2 * qc));
+    const double qd = 1 / (2 * std::sinh(std::log(2.0) / 2 * bw * w / std::sin(w)));
+    return cookbookPeakDb(f, fc, g, q * qd / qc, rate);
+}
+// A mode's response from its impulse response, parameters by module and name.
+std::vector<double> modeResponseDb(int modeId, const char *module, const std::vector<std::pair<const char *, double>> &set,
+                                   double rate, const std::vector<double> &freqs)
+{
+    Plugin pl(eqId);
+    pl.set(1, modeId);
+    for (auto [n, v] : set)
+        pl.set(paramIdByName(pl.p, module, n), v);
+    pl.activate(rate);
+    const size_t n = (size_t)rate;
+    std::vector<float> inL(n, 0), inR(n, 0), r;
+    inL[0] = inR[0] = 1;
+    auto out = pl.render(inL, inR, r, {512}, {}, false);
+    std::vector<double> db;
+    for (double f : freqs)
+    {
+        std::complex<double> acc = 0;
+        for (size_t i = L; i < n; ++i)
+            acc += (double)out[i] * std::polar(1.0, -2 * M_PI * f * (double)(i - L) / rate);
+        db.push_back(20 * std::log10(std::abs(acc)));
+    }
+    return db;
+}
+} // namespace
+
+TEST_CASE("Three-band and Master EQ follow their fitted designs, and keep them at 48 and 96 kHz")
+{
+    // 0.01 dB at 44.1 kHz from 20 Hz to 20 kHz; proposed 0.05 dB up to 4 kHz at 48 kHz, and at
+    // 96 kHz for settings without a very wide peak (decision 13).
+    const auto all = logFreqs(20, 20000, 61), low = logFreqs(20, 4000, 41);
+    struct Case
+    {
+        int mode;
+        const char *module;
+        std::vector<std::pair<const char *, double>> set;
+        std::function<double(double, double)> model;
+        bool wide = false; // a wide peak (or one near Nyquist): 96 kHz printed, not gated
+    };
+    const std::vector<Case> cases{
+        {3, "Three-band EQ",
+         {{"Low Frequency", 200}, {"Low Gain", 9}, {"Mid Frequency", 1200}, {"Mid Gain", -6}, {"Mid Q", 2.6}, {"High Frequency", 6000}, {"High Gain", 4.5}},
+         [](double f, double r) { return shelfDb(f, 200, 9, false, r) + threeBandMidDb(f, 1200, -6, 2.6, r) + shelfDb(f, 6000, 4.5, true, r); }},
+        {3, "Three-band EQ",
+         {{"Low Frequency", 100}, {"Low Gain", -6}, {"Mid Frequency", 7000}, {"Mid Gain", -6}, {"Mid Q", 2.6}, {"High Frequency", 3000}, {"High Gain", 4.5}},
+         [](double f, double r) { return shelfDb(f, 100, -6, false, r) + threeBandMidDb(f, 7000, -6, 2.6, r) + shelfDb(f, 3000, 4.5, true, r); },
+         true}, // a wide band near Nyquist: 96 kHz printed (decision 13)
+        {4, "Master EQ",
+         {{"Band 1 Gain", 6}, {"Band 1 Frequency", 125}, {"Band 1 Shape", 0}, {"Band 2 Gain", -4}, {"Band 2 Frequency", 500}, {"Band 2 Q", 1.2},
+          {"Band 3 Gain", 8}, {"Band 3 Frequency", 1000}, {"Band 3 Q", 3}, {"Band 4 Gain", -9}, {"Band 4 Frequency", 3200}, {"Band 4 Q", 0.7},
+          {"Band 5 Gain", 5}, {"Band 5 Frequency", 8000}, {"Band 5 Shape", 0}},
+         [](double f, double r) {
+             return shelfDb(f, 125, 6, false, r) + cookbookPeakDb(f, 500, -4, 1.2, r) + cookbookPeakDb(f, 1000, 8, 3, r) +
+                    cookbookPeakDb(f, 3200, -9, 0.7, r) + masterHighShelfDb(f, 8000, 5, r);
+         },
+         true},
+        {4, "Master EQ",
+         {{"Band 1 Gain", -7}, {"Band 1 Frequency", 250}, {"Band 1 Q", 2}, {"Band 1 Shape", 1}, {"Band 5 Gain", 10}, {"Band 5 Frequency", 2500}, {"Band 5 Q", 1}, {"Band 5 Shape", 1}},
+         [](double f, double r) { return cookbookPeakDb(f, 250, -7, 2, r) + cookbookPeakDb(f, 2500, 10, 1, r); },
+         true},
+    };
+    for (const auto &c : cases)
+    {
+        INFO(c.module);
+        auto got = modeResponseDb(c.mode, c.module, c.set, 44100, all);
+        double worst = 0;
+        for (size_t k = 0; k < all.size(); ++k)
+            worst = std::max(worst, std::abs(got[k] - c.model(all[k], 44100)));
+        INFO("44.1 kHz worst " << worst);
+        REQUIRE(worst < 0.01);
+        for (double rate : {48000.0, 96000.0})
+        {
+            auto g = modeResponseDb(c.mode, c.module, c.set, rate, low);
+            double w = 0;
+            for (size_t k = 0; k < low.size(); ++k)
+                w = std::max(w, std::abs(g[k] - c.model(low[k], 44100)));
+            std::printf("%s at %.0f Hz: %.4f dB to 4 kHz from the 44.1 kHz design\n", c.module, rate, w);
+            if (rate == 48000 || !c.wide)
+                REQUIRE(w < 0.05);
+        }
+    }
+}
+
+TEST_CASE("Three-band and Master EQ are transparent when flat")
+{
+    std::vector<float> inL, inR, r;
+    signal(48000, inL, inR);
+    for (int mode : {3, 4})
+    {
+        Plugin pl(eqId);
+        pl.set(1, mode);
+        pl.activate();
+        auto out = pl.render(inL, inR, r, {37});
+        for (size_t i = 0; i + L < inL.size(); ++i)
+            REQUIRE((out[i + L] == inL[i] && r[i + L] == inR[i]));
+    }
+}
+
