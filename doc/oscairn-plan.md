@@ -215,7 +215,7 @@ reverb DSP:
 | Plugin | Modes (types) | Base | Borrowed | Written | Side-chain input |
 | --- | --- | --- | --- | --- | --- |
 | Reverb | 16 (15 reverbs + Early Reflection) | 4 | 2 | 10 | |
-| Delay | 9 | 7 | 2 | 0 | |
+| Delay | 9 | 6 | 2 | 1 | |
 | Chorus | 6 | 4 | 1 | 1 | |
 | Flanger | 5 | 4 | 0 | 1 | yes |
 | Phaser | 5 | 3 | 0 | 2 | yes |
@@ -227,7 +227,7 @@ reverb DSP:
 | Tech | 18 | 4 | 1 | 13 | yes |
 | EQ | VCM EQ 501 + Part 3-band, Part 2-band, Master 5-band | 0 (+3 EQs on sst-filters biquads) | 0 | 1 | |
 | Misc | 11 | 3 | 3 | 5 | yes |
-| **All 104 types** | | **42** | **23** | **39** | |
+| **All 104 types** | | **41** | **23** | **40** | |
 
 **Base** means an sst-effects effect (bus or voice) with a parameter mapping and, where the
 reference differs, a reference-matching mode. **Borrowed** means a block from another project
@@ -258,7 +258,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | REVERSE REVERB | 01 58 | Var,InsA/B,A/D |  | 103 | 1 | Reverb | written | own tapped-delay reflections with a rising envelope |
 | SHIMMER REVERB | 01 60 | Rev |  | 50 | 1 | Reverb | base | sst Reverb2 + own pitch shifter in the feedback path |
 | CROSS DELAY | 02 00 | Var,InsA/B,A/D |  | 358 | 149 | Delay | base | sst Delay (dual line, crossfeed, low/high cut) + mapping |
-| TEMPO CROSS DELAY | 02 10 | Var,InsA/B,A/D |  | 1426 | 787 | Delay | base | sst Delay, tempo-synced times + mapping |
+| TEMPO CROSS DELAY | 02 10 | Var,InsA/B,A/D |  | 1426 | 787 | Delay | written | own cross delay fitted to renders (built; section 15) |
 | TEMPO DELAY MONO | 02 20 | Var,InsA/B,A/D |  | 84 | 61 | Delay | base | sst Delay, mono routing + mapping |
 | TEMPO DELAY STEREO | 02 28 | Var,InsA/B,A/D |  | 361 | 165 | Delay | base | sst Delay, tempo-synced stereo + mapping |
 | CONTROL DELAY | 02 30 | Var,InsA/B,A/D |  | 39 | 1 | Delay | base | sst Delay with a smoothed, controllable time + mapping |
@@ -362,12 +362,14 @@ tests are not changed.
 | Module | One CLAP module, `oscairn-effects.clap`, with one plugin descriptor per category (section 6). IDs `org.oscairn.effects.<category>`, names "Oscairn FX <Category>" (decision 2). Features: audio effect, stereo, and the category's CLAP feature (reverb, delay, chorus, …) |
 | Effect contexts (RFC 0007) | Each category plugin implements `oscairn.effect-contexts/draft`: one engine (shared immutable data, sample rate, context count) and up to 64 contexts, each a full CLAP interface with its own parameters, state, history and tail. A context allocates its effect only on `activate`, so idle contexts cost a few hundred bytes. `resources` reports engine and context bytes, capacity, prepared count and tail activity |
 | Modes | A stepped "Mode" parameter picks the algorithm. The audio thread never allocates: a mode change asks the host for a main-thread callback, which builds the new effect with the current parameter values and publishes it; the audio thread swaps it in at the next block and hands the old one back to the main thread to free. Until then the old mode keeps playing |
-| Parameters | The union of all modes' parameters, each under a module path named after its mode (one editor page per mode), plus Mode. IDs are stable: `mode << 8 \| index`, Mode is 1; modes and indices are never renumbered. Ranges, defaults and value text come from each effect's `ParamMetaData`; values are in physical units (Hz, ms, dB, %), not the platform's raw numbers (decision 10). Parameter metadata never changes with state |
+| Parameters | The union of all modes' parameters, each under a module path named after its mode (one editor page per mode), plus Mode. IDs are stable: `mode << 8 \| index`, Mode is 1; modes and indices are never renumbered. Ranges, defaults and value text come from each effect's `ParamMetaData`; values are in physical units (Hz, ms, dB, %), not the platform's raw numbers (decision 10). IDs, names, ranges and modules never change with state; the parameters of modes other than the selected one are flagged hidden, and the host is asked to rescan parameter info when the mode changes (plugin-porting.md; section 17) |
 | State | Text, locale-independent: a header line with the category, then `id=value` lines with 17 significant digits. Unknown IDs are ignored (newer state in an older plugin), missing IDs keep defaults. History is not state |
 | Block size and latency | sst-effects processes fixed blocks; the wrapper uses 16 samples and buffers one block, reported through the latency extension (16 samples, 0.33 ms at 48 kHz). Output does not depend on the host's block size |
-| Tails | `tail_active` and the CLAP tail extension: active while input is non-silent or output has been above −140 dBFS within the last 100 ms; once inactive with silent input, `process` returns `CLAP_PROCESS_SLEEP` |
+| Tails | `tail_active` and the CLAP tail extension: active while input is non-silent or output has been above −140 dBFS within the last 100 ms, or within a mode's longest silent stretch (the delay: its longer line plus 100 ms); once inactive with silent input, `process` returns `CLAP_PROCESS_SLEEP` |
 | Side-chain | Plugins with side-chain types declare a second, non-main stereo input port, "Side-chain", on every context. A mode without side-chain ignores it; a side-chain mode with nothing connected uses the main input, as the reference does when its source is Off |
-| Tempo | From the CLAP transport; 120 BPM when absent |
+| Tempo | From the CLAP transport at every `process` call; 120 BPM when absent (built with the tempo cross delay) |
+| Work off the audio thread | Each engine owns a worker thread, started with the first context that needs it (decision 19): the EQs' rate matching runs there and comes back through lock-free triple buffers; the audio thread only posts and wakes. Offline (`clap.render`), the same work runs in process so renders do not depend on timing |
+| Editor hints | `oscairn.ui/draft-3`: Mode first by priority, then the selected mode's parameters in their order; a parameter named Mix carries the `mix` role |
 | Sample rates | Oscairn runs mostly at 48 kHz; any rate from 8 kHz to 768 kHz activates. Fitted behaviour is written in seconds and hertz, never in samples at 44.1 kHz, and every fitted-behaviour gate runs at 44.1, 48 and 96 kHz |
 | Real-time safety | No allocation, lock or file access in `process`; parameter values cross threads as atomics. Tests count allocations during `process` and run under ASan/UBSan and TSan |
 | Platforms | macOS (arm64) for the desktop, Linux ARM64 for the device, Linux x86_64 in CI |
@@ -500,8 +502,9 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     proposed), at all four rates, on 39 settings in the plugin tests and 2,400 random settings
     in a stress run. Each 44.1 kHz section is replaced at other rates by up to three biquads
     fitted to its magnitude, so the plugins hold up to three times as many sections there, and
-    the coefficients cost 0.13–0.54 ms per change on average (worst seen 2.8 ms), computed in process.
-    Rates below 44.1 kHz are not covered (their band ends below 20 kHz).
+    the coefficients cost 0.13–0.54 ms per change on average (worst seen 2.8 ms), now computed off
+    the audio thread (decision 19). Rates below 44.1 kHz are not covered (decision 21). The
+    tolerance is accepted (decision 18).
 14. **Converter value laws.** The Data List prints rounded labels for the EQ frequency and Q
     tables (125 Hz is 125.9 Hz, 500 Hz is 501.2 Hz). The converter should use the laws measured
     in section 15 (frequency index i is 10^((i + 48) / 40) Hz, Q index j is 0.5 × 2^(j / 12),
@@ -512,7 +515,7 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     become modes, the wrapper will reseed them from a fixed seed in a new file (stock DSP
     unchanged), and the uninitialized reads go upstream as bug reports. Section 15, M0.
 16. **Memory declaration.** The plugins implement Oscairn's draft `oscairn.memory` extension
-    (`memory.h`, vendored from Oscairn `17c43f6`): `estimate(rate, max_frames)` after state
+    (`memory.h`, vendored from Oscairn `17c43f6`, refreshed from `d7ac261`): `estimate(rate, max_frames)` after state
     load and before activation, `current` after activation, as shared, per-context and asset
     bytes, the same shared and context bytes as `oscairn.effect-contexts`. Oscairn's host does
     not read it yet, so it is tested only through this repository's test host. Until the host
@@ -526,6 +529,28 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     ship. Neither version meets the 0.05 dB tolerance yet: the remaining error is in laws other
     than the scale (known differences 2 and 5). Confirm the tables (the Master EQ's is the Data
     List's printed scale, which the measurements confirm).
+18. **Decided (Jacob, 2026-11-02): the rate gate.** 0.05 dB where the response is within 20 dB of
+    its peak and 0.5 dB further down, from 20 Hz to 20 kHz, and 10 dB above 20 kHz as a sanity
+    bound.
+19. **Decided (Jacob, 2026-11-02): rate-matched coefficients are computed off the audio thread**,
+    swapped in atomically at a block boundary, the previous filter playing until then; no
+    allocation, lock or waiting in process; correct under fast automation. Built (section 15, "Rate
+    matching off the audio thread").
+20. **Decided (Jacob, 2026-11-02): the matcher's scratch is allocated only where matching is
+    needed** (rates other than 44.1 kHz), at activation. Built (same section).
+21. **Decided (Jacob, 2026-11-02): rates below 44.1 kHz are not covered** by the rate matching; the
+    fitted EQs there run the matcher's fit up to 0.45 of the rate but nothing is gated (known
+    difference 18).
+22. **Decided (Jacob, 2026-11-02): the plugins follow every Oscairn recommendation and feature that
+    applies to effects** (`oscairn/docs/plugin-porting.md`). The checklist, with status and the test
+    that proves each item, is section 17.
+23. **Open: the delay's equalizer parameters.** The tempo cross delay's EQ parameters (low and high
+    frequency and gain) had no effect on any render (fx16), so the mode leaves them out. If the
+    converter must round-trip every raw value (M7), they can be added as parameters that do nothing.
+24. **Open: plugin version and signing.** The plugins report version 0.1.0 whatever changes;
+    Oscairn keys its measurements by ID and version and keeps a store build per version, so each
+    published build should get a new version, and be signed (`oscairn-sign`) with a key of Jacob's.
+
 ## 14. Risks and not verified
 
 - Determinism of the stock effects: settled in M0 (decision 15).
@@ -625,9 +650,17 @@ Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
 | Reverb 2 | 48 kHz | 16 → 16 | 14,534,184 | 1,188,856 | 0 | 12.76 MB → 1.19 MB |
 | Reverb 2 | 96 kHz | 16 → 16 | 14,534,184 | 2,375,928 | 0 | 12.75 MB → 2.40 MB |
 | Five-band EQ | any | 16 → 16 | 1,156 | 1,156 (58,016 since rate matching) | 0 | below a page |
+| Five-band EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 58,016 | 1,368 / 62,592 | 0 | not measured |
+| Two-band EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,088 | 1,088 / 59,032 | 0 | not measured |
+| Three-band EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,368 | 1,152 / 60,192 | 0 | not measured |
+| Master EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,992 | 1,344 / 62,568 | 0 | not measured |
+| Tempo Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 527,944 / 574,312 / 1,144,960 | 0 | not measured |
 
 "Context" is the context's own storage plus its effect (`sizeof`, arm64 macOS build), the same
-figure `resources` reports. "Resident growth" is macOS `phys_footprint` growth per context,
+figure `resources` reports; since decision 20 it includes the effect's own heap allocations (the
+EQs' matcher state, the delay's lines). The engine grew from 16 to 120 bytes with its worker; the
+worker thread's stack (allocated by the system when the thread starts, only for an engine running
+a matched EQ) is not counted. "Resident growth" is macOS `phys_footprint` growth per context,
 averaged over eight contexts each created and activated in a fresh process after one warm-up
 instance, for `b966ac3` (before) and this change (after). Old Reverb 2 grew by less than its
 size, presumably because some zero pages were never made resident; the new figures track the
@@ -875,9 +908,11 @@ Cost, measured (arm64 macOS; plugin test in the RelWithDebInfo build, stress and
 -O2): computing a five-band EQ's coefficients cold takes 0.35–0.40 ms on average and 1.2 ms at
 worst over 40 random settings in the plugin test; the stress run saw means of 0.13–0.54 ms per
 mode and rate and a worst of 2.8 ms; sweeping one five-band peak from 1 to 20 kHz in 302 steps
-costs 0.20–0.24 ms per step (worst 1.4 ms). It runs in process when a parameter changes, at most
-once per 16-sample block, and allocates nothing. Memory: every EQ context grows from about 1.2 KB
-to about 58 KB (the matcher's fixed scratch arrays), at every rate.
+costs 0.20–0.24 ms per step (worst 1.4 ms). It ran in process when a parameter changed, at most
+once per 16-sample block, allocating nothing; since decision 19 it runs off the audio thread.
+Memory: every EQ context grows from about 1.2 KB
+to about 58 KB (the matcher's fixed scratch arrays), at every rate (since decision 20 only at rates
+other than 44.1 kHz).
 
 ### First measurements of the compressor, the cross delay and the hall reverb (2026-11-02)
 
@@ -989,6 +1024,123 @@ constants; the reverb needs a repeatable source for levels and onsets — next, 
 oscillator under a short envelope (a steady tone or noise switched off, or a sample-based click
 in the AWM2 engine).
 
+### Rate matching off the audio thread (decisions 19 and 20, 2026-11-02)
+
+Design (`OffThread.h`, `MatchedCascade` in `effects/FiveBandEq.h`):
+
+- Each engine owns a worker thread, started (on the main thread) with the first effect that needs
+  it, joined when the engine goes; contexts of one engine share it. An EQ registers its cascade
+  with the worker when it is built, at rates other than 44.1 kHz only, and leaves when it is freed
+  (on the main thread, waiting for the worker to finish that cascade if it is matching it).
+- On a parameter change the audio thread designs the 44.1 kHz sections (a few microseconds), puts
+  them in a triple buffer and wakes the worker: an atomic increment and `notify_one`, a futex or
+  ulock wake, with no lock, allocation or waiting. The worker matches only the newest design and
+  publishes the result, tagged with its generation, through a second triple buffer; the audio
+  thread takes it at the next block boundary if it is newer than what plays, so a stale result
+  never replaces a newer one. Until then the previous coefficients keep playing.
+- The swap crossfades from the previous cascade over 2 ms. Each 44.1 kHz section keeps a slot (the
+  shelves, then the network's sections), so switching a band on or off no longer moves the other
+  sections' states, and the matcher's previous fits are keyed by slot. A result that arrives
+  during a crossfade waits for it to end.
+- Offline (the plugins now implement `clap.render`), and without a worker (the templates driven
+  directly), the match runs in process, so an offline render does not depend on timing. The first
+  match, when the effect is built on the main thread, is applied at once.
+- The matcher's 58 KB, the buffers and the second cascade are allocated when the effect is built,
+  only at rates other than 44.1 kHz (decision 20); memory table in "Effect memory" above.
+
+Measured (arm64 macOS, RelWithDebInfo plugin tests):
+
+| What | Off the audio thread | In process (the change undone) |
+| --- | --- | --- |
+| Worst `process` call while sweeping one band, 301 changes, one per 64-sample block (333 µs) at 192 kHz | 1.8–5.2 µs in every run seen (the test gates the best of three below 83 µs) | 805–872 µs |
+| Coefficients after one change, against those matched in process (offline) | bit-identical at 48 and 192 kHz | |
+| Response after a 201-step sweep, against in process and against a plugin built with the final setting | 0.00000 dB (gate 0.01 dB) | |
+| Click above 8 kHz in the 50 ms after a band switches on or off, 48 / 96 / 192 kHz | −60.3 to −69.6 dBFS (44.1 kHz, which matches nothing: −23.1 to −71.5 dBFS) | without the crossfade: −11.5 to −16.5 dBFS when a band switches off |
+
+The time from a change to its swap was not measured directly: it is the match itself (0.1–3 ms,
+above), a wake, and the next block boundary; under fast automation a design can wait for the one
+being matched, so at most about two match times, then the 2 ms crossfade. TSan passes locally and
+in CI with the worker running during the sweep tests, where each plugin is destroyed right after
+its sweep, possibly while the worker is still matching.
+The Oscairn host check (section 17) runs the EQ modes at 48 kHz, so through the worker, in the
+engine and in a worker process.
+
+Found on the way: at 44.1 kHz, where nothing is matched, switching a band off clicks (−23 dBFS
+above 8 kHz in the test): the band's contribution stops within a block, as any parameter jump
+does there. The reference's parameter smoothing is not measured (known difference 19).
+
+### Batches fx17 and fx18 (2026-11-02)
+
+fx17: 87 renders and 38 sequences; fx18 (fresh hold-out for the delay, seed 1818): 11 renders and
+38 sequences. One batch at a time under the recorder lock (fx17 in four parts, each with a warm-up),
+renders in the measurements folder; no dropouts (tone renders' envelopes agree across all 22,
+every render as long as asked, Q-sweep renders steady). Analysis in the measurement repository's
+`fx/delay.py` and `fx/reverb.py`, driven by `fit_fx17.py`, `fit_damp.py`, `fit_q3.py` and
+`gate_dly.py` (scratch drivers).
+
+- **Delay balance (fx17, a tone with the echo a second later):** dry and wet are cos and sin of
+  (π/2)(v − 1)/126: the wet-to-dry ratio within each render is within 0.004 dB of the law for all
+  21 values; absolute levels scatter by 0.15 dB with the tone's own envelope.
+- **Input modes (fx17):** L feeds the L>R line only, R the R>L line only (ping-pong, feedback at
+  every crossing). The probes with the source panned hard left showed nothing on the right at all:
+  the part's pan comes after its insertion effects, so they cannot tell whether L&R mixes its
+  inputs (known difference 22).
+- **High damping (fx16, fx17, every value):** a two-tap filter (1 − g) + g z⁻¹ in the feedback
+  path, g = 5(1 − ratio)/9, within 0.001 of a free fit at every value (fitted bin by bin on
+  successive echoes). An earlier fit on octave-band averages gave a table that was 0.5–2 dB off
+  at 16 kHz after a few repeats; the bin fit replaced it.
+- **Hall reverb with a sampled click (fx17):** the AWM2 click is bit-identical in every render, so
+  subtracting it leaves the reverb exactly (residual −300 dB), and the reverb itself repeats:
+  identical renders give the same level to 0.01 dB. Wet energy relative to the dry click
+  (send and return at maximum): −2.89 / −3.23 dB (L / R) at factory settings; −5.7 dB at time 0,
+  +0.5 dB at time 69; −3.96 / −4.74 dB at diffusion 0 / 5 (factory 10); −11.9 dB at high ratio
+  0.1 and +0.5 dB at 1.0. Onset (−30 dB of the peak, 0.5 ms windows) = initial delay + 48.4 ms
+  (initial delay 0.1, 67.8, 100.8, 200 ms). Decay times agree with fx16.
+- **Three-band mid Q (fx17, a Q-index sweep at 507, 1,286 and 2,660 Hz):** the index law holds to
+  within 1.7% at 507 Hz for every index; what misses at higher centres is the centre, which moves
+  with Q, by more the higher it is: +1.9 / +5.3 / +12.1% at index 0 and −0.5 / −1.4 / −2.8% at
+  index 31, about zero near Q 2.6 (the Q the frequency table was measured at). A first joint law
+  (centre shift proportional to frequency and to 1/Q − 1/2.6) reaches only 0.57 dB, so nothing
+  ships yet (known differences 5 and 9).
+- **Compressor steps failed again (fx17, fx18):** the second note, at velocity 90 or 64, is silent in
+  the dry renders too, with or without a millisecond between the note-off and the note-on: the
+  probes' amplitude velocity sensitivity setting silences any velocity below 127. fx16's
+  explanation (velocity 40 too quiet) was wrong for the same reason. Next: default velocity
+  sensitivity, or an amplitude-LFO square. The steady levels repeat fx16's to 0.01 dB.
+
+### Tempo cross delay (built 2026-11-02)
+
+Mode "Tempo Cross Delay" of a new plugin, Oscairn FX Delay (`org.oscairn.effects.delay`),
+`effects/TempoCrossDelay.h`: written, not the sst Delay the plan proposed, because the measured
+structure is a plain cross delay whose laws are simpler to state directly.
+
+| Law | Fitted on | Against renders |
+| --- | --- | --- |
+| Lines L>R (left in, right out) and R>L, cross-fed through the feedback gain v / 63.5 at every crossing; L and R inputs feed one line each, L&R both | fx14, fx16, fx17 | echo times exact, levels within 0.03 dB (first six echoes per side, every octave band within 30 dB of the strongest) |
+| Mode 2: the input side's line receives the other's output at the feedback gain squared, the other at unity | fx16 | 0.32 dB after five loops (0.06 dB per loop; known difference 21) |
+| Length round(T·44100) + round(lag·44.1) − 1 samples at 44.1 kHz, both lines, at most 65,535 | fx14, fx16, fx17; the lag's rounding chosen on fx18 | up to 2 samples per crossing for triplets and dotted values with lag (known difference 20) |
+| High damping g = 5(1 − r)/9 on the feedback only | fx16, fx17 | 0.01–0.02 dB |
+| Dry cos, wet sin of (π/2)(v − 1)/126 | fx17 | 0.004 dB (ratio within a render) |
+| Tempo from the transport, 120 BPM without one | (recorder fixed at 120 BPM) | not measured at other tempos |
+
+Gate against all renders (`gate_dly.py`, each render's own dry click through the plugin, every echo
+compared): fitting renders (fx16, fx17, 34) worst 0.32 dB and 0.18 ms; fresh hold-out fx18 (10
+random settings, never fitted except the lag's rounding, which was chosen after seeing it) worst
+0.26 dB and 0.14 ms, both from Mode 2 and triplet lengths; the eight settings in the other modes
+within 0.03 dB.
+
+At other rates the lines keep their length in seconds (a first-order all-pass carries the
+fraction, so no repeat loses level) and the damping is a 65-tap linear-phase filter fitted to the
+two-tap's magnitude, its 32-sample delay taken off the lines and added to the input. Plugin test:
+at 48, 88.2, 96 and 192 kHz the echo lands within a sample of its time and each repeat's response
+is within 0.04 dB of the 44.1 kHz filter from 20 Hz to 20 kHz, at damping 0.1, 0.4, 0.7 and 0.9
+(proposed tolerance 0.05 dB). The tests fail with each law changed (lag truncated, the old damping
+law, the two-tap at every rate, a length left fractional at 44.1 kHz, the input not delayed with
+the damping filter, the tail rule at 100 ms).
+
+Not built: the delay's EQ parameters (no effect measured; decision 23). Not measured: tempo other
+than 120 BPM, the longest length (65,535 samples is from fx9's "about 1.487 s").
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -1006,12 +1158,73 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 6 | Three-band mid at its top indices at Q 2.6 | 0.63 dB at index 241 (18.3 kHz), 0.33 at 239 | The bandwidth law (2.5% RMS in Q) | Unresolved | fx11a | `midWidening` |
 | 7 | Three-band low shelf at index 182 | 0.32 dB | Unknown | Unresolved | fx11a `lo_i182` | `shelf` |
 | 8 | Three-band high-shelf scale measured at 17 indices only | Formula within 0.66% of those; corner rule (gain-independent), found on fx12, confirmed on the fresh hold-out fx16: shelf-only settings 0.0087–0.053 dB | A full table needs a sweep of 125 indices | Formula shipped; rule held on a fresh hold-out | fx6, fx11a, fx12, fx16 `p3ho02/05/08/11` | `threeBandHighShelfHalfGainHz`, `threeBandHighShelfCornerHz` |
-| 9 | Three-band Q index law | Within 1.2% of the three measured Q values (indices 0, 15, 31); hold-out fx16: settings with mid Q index 20–29 miss by 0.23–0.64 dB at 1.2–4.7 kHz | Only three points measured; the law (or the centre) is off at high Q | Unresolved; next: a Q sweep at several centres | fx4, fx6, fx16 `p3ho00/01/06/09/10` | converter (gate scripts for now) |
-| 10 | Fitted EQs at 48, 88.2, 96 and 192 kHz | Within the proposed gate everywhere checked: worst 0.023 dB within 20 dB of the peak and 0.29 dB below over the plugin tests' 39 settings, 20 Hz–20 kHz; 0.036 / 0.35 dB over 2,400 random settings (stress run, matcher alone). Above 20 kHz (where the reference has no response) the matched EQs may exceed the design's peak up to 22.05 kHz by up to 7.8 dB (stress run; 1.3 dB in the tests) | The reference is a 44.1 kHz bilinear design; a biquad at another rate cannot follow its warping, so each section is replaced by up to three fitted biquads, and above 20 kHz only a loose bound is kept | In-band: met (decision 13). Above 20 kHz: deliberate, sanity bound 10 dB in the tests (proposed, set after seeing 7.8 dB) | Plugin test "Fitted EQs keep their 44.1 kHz response at 48, 88.2, 96 and 192 kHz"; stress program (scratch, not committed) | `effects/RateMatch.h`, `MatchedCascade` in `effects/FiveBandEq.h` |
+| 9 | Three-band mid: the centre moves with Q | Q-index sweep fx17: the index law holds within 1.7% at 507 Hz; the centre moves +1.9 / +5.3 / +12.1% at index 0 and −0.5 / −1.4 / −2.8% at index 31 at 507 / 1,286 / 2,660 Hz, so the shipped law misses by up to 1.9 dB at 2.7 kHz; hold-out fx16 misses of 0.23–0.64 dB come from this | Not the Q law: a centre shift that grows with frequency and away from Q 2.6; a first joint law reaches 0.57 dB | Unresolved; next: the shift's law (same sweep at more centres) | fx4, fx6, fx16 `p3ho*`, fx17 `q3_*`; `fit_q3.py` | `midWidening`, converter |
+| 10 | Fitted EQs at 48, 88.2, 96 and 192 kHz | Within the gate (accepted, decision 18) everywhere checked: worst 0.023 dB within 20 dB of the peak and 0.29 dB below over the plugin tests' 39 settings, 20 Hz–20 kHz; 0.036 / 0.35 dB over 2,400 random settings (stress run, matcher alone). Above 20 kHz (where the reference has no response) the matched EQs may exceed the design's peak up to 22.05 kHz by up to 7.8 dB (stress run; 1.3 dB in the tests) | The reference is a 44.1 kHz bilinear design; a biquad at another rate cannot follow its warping, so each section is replaced by up to three fitted biquads, and above 20 kHz only a loose bound is kept | In-band: met (decision 13). Above 20 kHz: deliberate, sanity bound 10 dB in the tests (proposed, set after seeing 7.8 dB) | Plugin test "Fitted EQs keep their 44.1 kHz response at 48, 88.2, 96 and 192 kHz"; stress program (scratch, not committed) | `effects/RateMatch.h`, `MatchedCascade` in `effects/FiveBandEq.h` |
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
-| 13 | Hall reverb not built; displayed time against measured decay | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
-| 14 | Types not built | 103 of the 104 types (only the five-band EQ type is built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
-| 15 | Compressor type not built; its dynamics not measured | Static curve measured (fx7, fx13): a fixed +65.9 dB gain after the input-level law, output-level law exact, digital silence at the two lowest input levels, compression from about −14 dBFS RMS with a soft knee and effective ratios of about 3.2 / 3.7 / 4.6 for settings 2 / 4 / 20. fx16: at a fixed input the output level moves 9.2 dB with the attack setting (−11.95 dB at attack 0 to −2.71 dB at 150–200, release 0): the detector is an asymmetric follower on the rectified signal, not RMS. Time constants still not measured (the fx16 steps went to silence) | Probe design | Next: two-level steps (velocity 127 against about 90, or an amplitude-LFO square), then fit detector and time constants together | fx7, fx13, fx16 `c_*`; `fit_comp.py`, `fit_comp2.py`, `fit_fx16.py comp` | none yet |
-| 16 | Tempo cross delay not built | Measured (fx14, fx16): echoes at 499.98 ms for a quarter note at the host's 120 BPM; lag adds 1 ms per step to every repeat; feedback gain v / 63.5 (within 0.01 dB per repeat for v = 8 to 63, either sign); the wet path is unfiltered; high damping is a low-pass in the feedback path only (ratio 0.1: −7.5 dB per repeat at 16 kHz); the EQ parameters have no effect; L-MODE2 and R-MODE2 alternate sides at two notes per repeat. The four fx14 probes without an echo were a detector failure (another render's click as template). Not measured: the dry/wet balance law, the high-damping law between 0.1, 0.5 and 1.0, tempo other than 120 BPM | Recorder fixed at 120 BPM; balance not probed | Next: balance and damping sweeps; tempo from the host transport (not plumbed in the wrapper yet) | fx9, fx14, fx16 `d_*`; `fit_dly3.py`, `fit_fx16.py dly` | none yet |
+| 13 | Hall reverb not built; displayed time against measured decay; level and onset now measured (fx17: wet −2.89 / −3.23 dB re the dry click at factory settings, onset = initial delay + 48.4 ms) | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
+| 14 | Types not built | 102 of the 104 types (the five-band EQ and the tempo cross delay are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 15 | Compressor type not built; its dynamics not measured (fx16–fx18 steps failed: the probes' velocity sensitivity silenced the quieter note) | Static curve measured (fx7, fx13): a fixed +65.9 dB gain after the input-level law, output-level law exact, digital silence at the two lowest input levels, compression from about −14 dBFS RMS with a soft knee and effective ratios of about 3.2 / 3.7 / 4.6 for settings 2 / 4 / 20. fx16: at a fixed input the output level moves 9.2 dB with the attack setting (−11.95 dB at attack 0 to −2.71 dB at 150–200, release 0): the detector is an asymmetric follower on the rectified signal, not RMS. Time constants still not measured (the fx16 steps went to silence) | Probe design | Next: two-level steps (velocity 127 against about 90, or an amplitude-LFO square), then fit detector and time constants together | fx7, fx13, fx16 `c_*`; `fit_comp.py`, `fit_comp2.py`, `fit_fx16.py comp` | none yet |
+| 16 | Tempo cross delay at tempos other than 120 BPM | Not measured | The recorder's host is fixed at 120 BPM | The plugin follows the transport tempo by the note values (assumed) | — | `effects/TempoCrossDelay.h` |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
+| 18 | Fitted EQs below 44.1 kHz | Not gated; the matcher fits up to 0.45 of the rate | Not covered, by Jacob's decision (decision 21) | Deliberate | — | `effects/RateMatch.h` |
+| 19 | Parameter jumps in the EQs click at 44.1 kHz | Switching a five-band EQ band off: −23 dBFS above 8 kHz within 50 ms (plugin test "Rate-matched EQs change their number of sections without clicks", printed) | The coefficients change within a block; the reference's smoothing is not measured | Unresolved; needs a probe that moves a parameter while a tone plays | — | `effects/FiveBandEq.h` |
+| 20 | Tempo cross delay: some lengths with triplet or dotted values and lag | 1–2 samples (≤ 0.05 ms) per crossing; Whole/3 is 2 samples short (fx16), 8th/3 with lag −17 2, 32nd dotted 1–2 | The reference's rounding of those values is not found | Unresolved | fx16 `d_t5_15_fb`, fx18 `dho04/06/07`; `gate_dly.py` | `lineSeconds` |
+| 21 | Tempo cross delay Mode 2 loop gain | 0.06 dB per loop louder in the reference than the feedback gain squared (v = 40 and −37) | Unknown law; two values seen | Unresolved | fx16 `d_in3/4`, fx18 `dho00/01/02` | `TempoCrossDelay::processBlock` |
+| 22 | Tempo cross delay L&R input: mixed or one line per side | Indistinguishable with a centred source | Panned probes are panned after the insertion | Shipped as one line per side; needs a stereo source before the effect | fx17 `d_panL_*` | `TempoCrossDelay::processBlock` |
+
+## 17. Oscairn porting checklist (decision 22)
+
+Every item of `oscairn/docs/plugin-porting.md` (read at Oscairn `f0d8f68`) that applies to an
+effect, with its status and what proves it. "Host check" is Oscairn's `oscairn-plugin-check`, built
+from a clone of Oscairn (`fbc8e12`) outside both repositories, run on this branch's
+`oscairn-effects.clap` at 48 kHz for Reverb (both modes), every EQ mode with a gain set, and the
+delay with feedback, in the engine and with `OSCAIRN_PLUGIN_WORKER` set: all passed (2026-11-02).
+
+| Item (plugin-porting.md) | Status | Proof |
+| --- | --- | --- |
+| A `clap_entry` with a plugin factory; `init`, `destroy` and every function filled in | Met | Plugin test "Every plugin passes the host's load checks"; host check "loads in a part" |
+| Audio outputs; at most 64 channels; no port without channels | Met (one stereo input, one stereo output) | Load-checks test |
+| Note ports | Not applicable (effects) | — |
+| Params extension complete; unique IDs; finite ranges; defaults in range; at most 32,768 | Met | Load-checks test |
+| State and audio-ports extensions complete | Met | Load-checks test |
+| `oscairn.memory` complete; the declaration fits the budget | Met (draft vendored from Oscairn `d7ac261`) | "Declared memory equals what activation holds…", "The memory estimate follows another state load…" for every plugin and mode at 44.1–192 kHz |
+| Activates at the host's rate and maximum block | Met: 8–768 kHz, any block | "Output does not depend on the host's block size", the rate tests; host check at 48 kHz, 256-frame blocks |
+| Audio port layout constant while loaded | Met | "Audio ports stay the same whatever the mode or state" (fails with a mode-dependent port count) |
+| Build for macOS arm64 and Linux arm64 | Met in CI (macOS arm64, Linux ARM64, Linux x86_64); no packaged bundle yet | CI jobs |
+| State deterministic, architecture-independent, saves right after a load | Met (text, 17 digits, locale-independent) | "State round-trips…": a save straight after a load gives the same bytes; the same tests pass on arm64 and x86_64 in CI (no test compares bytes across machines) |
+| Ports, note dialect and metadata the same whatever state | Met for ports and IDs; the hidden flag follows the mode, as recommended for modes | "Audio ports stay the same…", "Editor hints…" |
+| Every sound-relevant setting a parameter, with name, module path, value text, stepped and hidden flags | Met: one module per mode, value text from `ParamMetaData`, stepped for integer parameters, other modes hidden | "Editor hints…" |
+| `oscairn.ui` hints and roles | Met: Mode first, the mode's parameters in order, `mix` on a parameter named Mix (Reverb 1 and 2, the delay) | "Editor hints…" (fails without the hidden flag or the rescan) |
+| A mode that changes which controls matter hides the others and rescans info | Met | "Editor hints…" |
+| Real-time safety: no allocation, lock, file access or waiting in `process` | Met; the EQs' matching moved off the audio thread (decision 19) | "Processing never allocates" (including EQ changes at 48 kHz); "Rate matching runs off the audio thread" (worst call 1.8–5.2 µs at 192 kHz in the runs seen); ASan/UBSan and TSan in CI |
+| `CLAP_PROCESS_SLEEP` when idle | Met; a delay sleeps only after its longest gap | "The tail ends, and the plugin then sleeps"; "Tempo cross delay keeps playing between its echoes" |
+| `NOTE_CHOKE`, per-note volume, pitch bend, CLAP notes | Not applicable (no note input) | — |
+| Effect contexts with tails (RFC 0007) | Met: up to 64 contexts per engine, `resources` with tail activity | "Effect contexts are independent and share one engine" |
+| Side-chain inputs where types need them | Not yet needed: no built type takes a side-chain (the compressor is not built) | — |
+| Presets (CLAP preset discovery) | Not implemented: no factory presets of these modes exist yet | — |
+| Transport and tempo | Met: tempo from the transport at every `process`, 120 BPM without one | "Tempo cross delay: the measured routing…" (a quarter at 90 BPM from the transport) |
+| Steady cost; honest version | CPU: matching off the audio thread, so a change no longer costs a block (the worker's CPU is outside the host's per-block measurement). Version: 0.1.0 whatever changes (decision 24) | Timing test above |
+| Worker process: main thread, time limit, memory limit, restart | Works in a worker: the host check passes with the plugin in `oscairn-plugin-worker`. The engine's worker thread runs only for matched EQs; its stack is not in the declaration (within the 64 MiB margin) | Host check with `OSCAIRN_PLUGIN_WORKER` |
+| Tested with `oscairn-plugin-check` | Met (above); the reopened renders of Reverb and the delay differ by 0.0004–0.003 RMS, which the check reports as state not saved (the outgoing Performance's tail rings into the reopened one) | Host check output |
+| Production runner (`core/lv2-host/tests/production/run.py`) | Not run: its probe needs Oscairn built with LV2 | — |
+| Oscairn's own tests against these plugins (offline determinism, `*-workers`) | Not run beyond the host check: they are written for Oscairn's bundled plugins | — |
+| Signed builds (`oscairn-sign`) | Not done: needs Jacob's key (decision 24) | — |
+
+Requests for the Oscairn session:
+
+1. **`clap.render`.** Oscairn does not call it ("Not implemented: … render mode"). These plugins
+   compute EQ coefficients on a worker thread in real time, so an offline render with parameter
+   changes at rates other than 44.1 kHz depends on timing unless the host sets offline mode; with
+   it they compute in process and render deterministically.
+2. **Measurement keyed by declared size** is in place (RFC 0025); the plugins' figures changed
+   (EQ contexts now 1–1.4 KB at 44.1 kHz, about 60 KB elsewhere) without a version change
+   (decision 24), so old measurements under 0.1.0 are stale.
+3. **Roles for effects.** Only instruments fill role banks; the EQ plugin could declare the EQ
+   roles (low/mid/high gain and frequency, mid Q, output) if effects filled the EQ bank. Today an
+   effect without a `mix` role puts its first parameter by priority, Mode, on the Effects knob; a
+   rule that skips a stepped mode parameter there would suit category plugins.
+4. **Worker threads in plugins.** Nothing in plugin-porting.md says whether a plugin may run its own
+   threads in a worker process, or how their CPU is counted; these plugins start one per engine
+   for EQ matching at rates other than 44.1 kHz.
+
