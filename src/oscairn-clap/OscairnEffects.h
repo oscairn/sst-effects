@@ -23,6 +23,18 @@ constexpr uint32_t latencySamples = 16;
 // Contexts per engine, including the one the host created (RFC 0007).
 constexpr uint32_t contextCapacity = 64;
 
+// Memory as Oscairn's proposed `oscairn.memory` extension would report it (RFC 0025 draft;
+// no header exists yet, so these are plain functions for now): bytes held once per engine,
+// per context (this instance is one), and for decoded assets (none here). Main thread.
+struct MemoryBytes
+{
+    uint64_t shared{0}, context{0}, asset{0};
+};
+// What activating at `rate` would allocate for the state loaded now, without allocating it.
+bool memoryEstimate(const clap_plugin_t *plugin, double rate, MemoryBytes *out);
+// What the instance holds now; during a mode change, both effects until the old one is freed.
+bool memoryCurrent(const clap_plugin_t *plugin, MemoryBytes *out);
+
 // Flush denormals to zero while in scope, as Surge does around its effects. The plugin
 // processes under it; tests and the stock gate use it to render the templates the same way.
 struct ScopedFlushDenormals

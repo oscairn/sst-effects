@@ -71,6 +71,7 @@ struct Mode
     const char *name; // generic, also the module path of the mode's parameters
     std::vector<pm::ParamMetaData> meta;
     std::unique_ptr<Effect> (*make)(double rate);
+    size_t (*bytes)(double rate); // what make(rate) allocates
 };
 
 // An effect instance whose buffers are sized for the running rate (OscairnConfig.h).
@@ -92,9 +93,24 @@ template <template <typename> class FX> std::unique_ptr<Effect> makeSized(double
     return std::make_unique<EffectOf<FX<Cfg>>>(rate);
 }
 
+template <template <typename> class FX> size_t sizedBytes(double rate)
+{
+    using namespace oscairn_fx;
+    for (int i = 0; i < 6; ++i)
+        if (rate <= sizedRates[i])
+        {
+            constexpr size_t sizes[] = {
+                sizeof(EffectOf<FX<SizedConfig<sizedRates[0]>>>), sizeof(EffectOf<FX<SizedConfig<sizedRates[1]>>>),
+                sizeof(EffectOf<FX<SizedConfig<sizedRates[2]>>>), sizeof(EffectOf<FX<SizedConfig<sizedRates[3]>>>),
+                sizeof(EffectOf<FX<SizedConfig<sizedRates[4]>>>), sizeof(EffectOf<FX<SizedConfig<sizedRates[5]>>>)};
+            return sizes[i];
+        }
+    return sizeof(EffectOf<FX<Cfg>>);
+}
+
 template <template <typename> class FX> Mode mode(uint32_t id, const char *name)
 {
-    Mode m{id, name, {}, makeSized<FX>};
+    Mode m{id, name, {}, makeSized<FX>, sizedBytes<FX>};
     static_assert(FX<Cfg>::numParams <= Cfg::BC::maxParamCount);
     // Metadata from the smallest instance; it does not depend on the buffer sizes.
     auto probe = std::make_unique<EffectOf<FX<oscairn_fx::SizedConfig<oscairn_fx::sizedRates[0]>>>>(48000.0);
@@ -224,6 +240,9 @@ struct Context
 };
 
 Context &self(const clap_plugin_t *p) { return *static_cast<Context *>(p->plugin_data); }
+
+// The context's own storage, whatever its mode.
+size_t contextFixedBytes(const Context &s) { return sizeof(Context) + s.values.size() * sizeof(std::atomic<float>); }
 
 std::unique_ptr<Effect> build(Context &s, uint32_t modeId)
 {
@@ -581,7 +600,7 @@ bool stateLoad(const clap_plugin_t *plugin, const clap_istream_t *stream)
         if (s.cat.paramIndex(id) >= 0)
             setValue(s, id, v);
     if (s.active)
-        requestCallback(s);
+        onMainThread(plugin); // build the loaded mode now, so memory has settled when this returns
     return true;
 }
 
@@ -608,7 +627,7 @@ const oscairn_plugin_effect_contexts_t contexts{
         auto &s = self(p);
         if (!out || !s.engine)
             return false;
-        *out = {sizeof(Engine), sizeof(Context) + s.values.size() * sizeof(float) + s.fxBytes.load(),
+        *out = {sizeof(Engine), contextFixedBytes(s) + s.fxBytes.load(),
                 oscairn_fx::contextCapacity, s.engine->contexts.load(), s.tail.load()};
         return true;
     }};
@@ -692,6 +711,34 @@ const clap_plugin_t *create(const clap_host_t *host, const Category &cat,
     return &s->plugin;
 }
 
+} // namespace
+
+bool oscairn_fx::memoryEstimate(const clap_plugin_t *plugin, double rate, MemoryBytes *out)
+{
+    if (!plugin || !out || !std::isfinite(rate) || rate < 8000 || rate > 768000)
+        return false;
+    auto &s = self(plugin);
+    const int m = s.cat.modeIndex(s.wanted.load());
+    *out = {sizeof(Engine), contextFixedBytes(s) + s.cat.modes[m].bytes(rate), 0};
+    return true;
+}
+
+bool oscairn_fx::memoryCurrent(const clap_plugin_t *plugin, MemoryBytes *out)
+{
+    if (!plugin || !out)
+        return false;
+    auto &s = self(plugin);
+    size_t held = s.fxBytes.load();
+    if (auto *p = s.pending.load())
+        held += p->bytes();
+    if (auto *r = s.retired.load())
+        held += r->bytes();
+    *out = {s.engine ? sizeof(Engine) : 0, contextFixedBytes(s) + held, 0};
+    return true;
+}
+
+namespace
+{
 const clap_plugin_factory_t factory{
     [](const clap_plugin_factory_t *) -> uint32_t { return (uint32_t)categories().size(); },
     [](const clap_plugin_factory_t *, uint32_t i) -> const clap_plugin_descriptor_t * {

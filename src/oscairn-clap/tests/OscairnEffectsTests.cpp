@@ -899,3 +899,57 @@ TEST_CASE("Per-context memory by mode and sample rate")
     }
 }
 
+TEST_CASE("Memory estimates before activation equal what activation holds")
+{
+    for (const char *id : {reverbId, eqId})
+    {
+        Plugin probe(id);
+        clap_param_info_t info;
+        ext<clap_plugin_params_t>(probe.p, CLAP_EXT_PARAMS)->get_info(probe.p, 0, &info);
+        for (int m = (int)info.min_value; m <= (int)info.max_value; ++m)
+            for (double rate : {44100.0, 48000.0, 50000.0, 96000.0, 192000.0, 384000.0})
+            {
+                INFO(id << " mode " << m << " at " << rate);
+                Plugin pl(id);
+                pl.set(1, m);
+                oscairn_fx::MemoryBytes est, cur;
+                REQUIRE(oscairn_fx::memoryEstimate(pl.p, rate, &est));
+                pl.activate(rate);
+                REQUIRE(oscairn_fx::memoryCurrent(pl.p, &cur));
+                REQUIRE(est.shared == cur.shared);
+                REQUIRE(est.context == cur.context);
+                REQUIRE(est.asset == 0);
+                oscairn_effect_resources_t res;
+                ext<oscairn_plugin_effect_contexts_t>(pl.p, OSCAIRN_EXT_EFFECT_CONTEXTS)->resources(pl.p, &res);
+                REQUIRE(res.context_bytes == cur.context); // the same bytes through both
+                REQUIRE(res.shared_bytes == cur.shared);
+            }
+    }
+}
+
+TEST_CASE("Loading state while active builds the new mode before returning")
+{
+    Plugin a;
+    a.set(1, 1); // Reverb 1
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin pl; // Reverb 2
+    pl.activate();
+    oscairn_fx::MemoryBytes r1, r2, cur;
+    REQUIRE(oscairn_fx::memoryCurrent(pl.p, &r2));
+    {
+        Plugin probe;
+        probe.set(1, 1);
+        oscairn_fx::memoryEstimate(probe.p, 48000, &r1);
+    }
+    REQUIRE(ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in));
+    oscairn_fx::memoryCurrent(pl.p, &cur);
+    // Reverb 1 is built already; both are held until the audio thread swaps and the old is freed.
+    REQUIRE(cur.context > r1.context);
+    REQUIRE(cur.context > r2.context);
+    std::vector<float> inL(1024, 0), inR(1024, 0), r;
+    pl.render(inL, inR, r, {64});
+    pl.p->on_main_thread(pl.p);
+    oscairn_fx::memoryCurrent(pl.p, &cur);
+    REQUIRE(cur.context == r1.context);
+}
