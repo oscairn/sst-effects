@@ -63,15 +63,26 @@ template <typename FXConfig> struct Reverb2 : core::EffectTemplateBase<FXConfig>
     static constexpr int NUM_BLOCKS = 4;
     static constexpr int NUM_INPUT_ALLPASSES = 4;
     static constexpr int NUM_ALLPASSES_PER_BLOCK = 2;
-    static constexpr int MAX_ALLPASS_LEN = 16384 * 8;
-    static constexpr int MAX_DELAY_LEN = 16384 * 8;
+    // An FXConfig may size the buffers for its sample rate (reverb2MaxAllpassLen,
+    // reverb2MaxDelayLen as a power of two, reverb2PredelayBufferSize); otherwise they fit 384 kHz.
+    template <typename C> static constexpr int sizeOr(int fallback, int which)
+    {
+        if constexpr (requires { C::reverb2MaxAllpassLen; C::reverb2MaxDelayLen; C::reverb2PredelayBufferSize; })
+            return which == 0 ? C::reverb2MaxAllpassLen
+                              : (which == 1 ? C::reverb2MaxDelayLen : C::reverb2PredelayBufferSize);
+        else
+            return fallback;
+    }
+    static constexpr int MAX_ALLPASS_LEN = sizeOr<FXConfig>(16384 * 8, 0);
+    static constexpr int MAX_DELAY_LEN = sizeOr<FXConfig>(16384 * 8, 1);
+    static_assert((MAX_DELAY_LEN & (MAX_DELAY_LEN - 1)) == 0);
     static constexpr int DELAY_LEN_MASK = MAX_DELAY_LEN - 1;
     static constexpr int DELAY_SUBSAMPLE_BITS = 8;
     static constexpr int DELAY_SUBSAMPLE_RANGE = (1 << DELAY_SUBSAMPLE_BITS);
     static constexpr int PREDELAY_BUFFER_SIZE =
-        48000 * 8 * 4; // max sample rate is 48000 * 8 probably
+        sizeOr<FXConfig>(48000 * 8 * 4, 2); // max sample rate is 48000 * 8 probably
     static constexpr int PREDELAY_BUFFER_SIZE_LIMIT =
-        48000 * 8 * 3; // allow for one second of diffusion
+        sizeOr<FXConfig>(48000 * 8 * 3, 2); // allow for one second of diffusion
 
     class allpass
     {

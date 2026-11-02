@@ -488,7 +488,7 @@ TEST_CASE("Effect contexts are independent and share one engine")
     REQUIRE(ctx->resources(parent->p, &res));
     REQUIRE(res.capacity == oscairn_fx::contextCapacity);
     REQUIRE(res.prepared == 2);
-    REQUIRE(res.context_bytes > sizeof(sst::effects::reverb2::Reverb2<Cfg>));
+    REQUIRE(res.context_bytes > sizeof(sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<48000>>));
 
     // Capacity: 64 contexts including the parent, then refusal.
     std::vector<std::unique_ptr<Plugin>> more;
@@ -528,8 +528,8 @@ TEST_CASE("Mode changes build the new effect on the main thread")
     REQUIRE(pl.host.callbacks == 2);
     ctx->resources(pl.p, &res);
     REQUIRE(res.context_bytes ==
-            before.context_bytes - sizeof(sst::effects::reverb2::Reverb2<Cfg>) +
-                sizeof(sst::effects::reverb1::Reverb1<Cfg>));
+            before.context_bytes - sizeof(sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<48000>>) +
+                sizeof(sst::effects::reverb1::Reverb1<oscairn_fx::SizedConfig<48000>>));
     pl.p->on_main_thread(pl.p);
     pl.render(inL, inR, r, {64});
     REQUIRE(pl.host.callbacks == 2); // nothing more to do
@@ -814,3 +814,88 @@ TEST_CASE("Five-band EQ keeps its 44.1 kHz response at 48 and 96 kHz")
                 REQUIRE(wl < 0.05);
         }
 }
+
+// ---- Effect memory (plan, section 15, effect memory) ----
+namespace
+{
+// Renders an impulse and a burst through FX with the given parameters, block by block.
+template <typename FX> std::vector<float> renderWith(double rate, const std::vector<std::pair<int, float>> &set)
+{
+    auto gs = std::make_unique<typename FX::FXConfig_t::GS>(rate);
+    typename FX::FXConfig_t::ES es;
+    auto fx = std::make_unique<FX>(gs.get(), &es, nullptr);
+    for (int i = 0; i < FX::numParams; ++i)
+        fx->paramStorage[i] = fx->paramAt(i).defaultVal;
+    for (auto [i, v] : set)
+        fx->paramStorage[i] = v;
+    fx->initialize();
+    std::vector<float> inL, inR, out;
+    signal((size_t)(rate * 4), inL, inR);
+    inL[0] = inR[0] = 1;
+    alignas(16) float bl[Cfg::blockSize], br[Cfg::blockSize];
+    oscairn_fx::ScopedFlushDenormals ftz;
+    for (size_t at = 0; at + Cfg::blockSize <= inL.size(); at += Cfg::blockSize)
+    {
+        std::copy(inL.begin() + at, inL.begin() + at + Cfg::blockSize, bl);
+        std::copy(inR.begin() + at, inR.begin() + at + Cfg::blockSize, br);
+        fx->processBlock(bl, br);
+        out.insert(out.end(), bl, bl + Cfg::blockSize);
+        out.insert(out.end(), br, br + Cfg::blockSize);
+    }
+    return out;
+}
+
+template <int Rate> void reverb2SizedMatchesUpstream(double rate)
+{
+    using R2 = sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<Rate>>;
+    using Up = sst::effects::reverb2::Reverb2<Cfg>;
+    // Defaults, then the longest reach: room size +1, 2 s predelay, full modulation and decay.
+    const std::vector<std::vector<std::pair<int, float>>> sets{
+        {}, {{R2::rev2_room_size, 1.f}, {R2::rev2_predelay, 1.f}, {R2::rev2_modulation, 1.f}, {R2::rev2_decay_time, 6.f}},
+        {{R2::rev2_room_size, -1.f}, {R2::rev2_predelay, -8.f}, {R2::rev2_modulation, 0.f}}};
+    for (const auto &set : sets)
+    {
+        INFO("rate " << rate << " sized for " << Rate);
+        REQUIRE(renderWith<R2>(rate, set) == renderWith<Up>(rate, set));
+    }
+}
+} // namespace
+
+TEST_CASE("Reverb 2 sized for the running rate renders exactly as upstream's")
+{
+    reverb2SizedMatchesUpstream<44100>(44100);
+    reverb2SizedMatchesUpstream<48000>(48000);
+    reverb2SizedMatchesUpstream<88200>(50000); // a rate between tiers uses the next one up
+    reverb2SizedMatchesUpstream<96000>(96000);
+    reverb2SizedMatchesUpstream<192000>(192000);
+}
+
+TEST_CASE("Per-context memory by mode and sample rate")
+{
+    // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB).
+    for (const char *id : {reverbId, eqId})
+    {
+        Plugin probe(id);
+        double lo, hi;
+        clap_param_info_t info;
+        ext<clap_plugin_params_t>(probe.p, CLAP_EXT_PARAMS)->get_info(probe.p, 0, &info);
+        lo = info.min_value;
+        hi = info.max_value;
+        for (int m = (int)lo; m <= (int)hi; ++m)
+            for (double rate : {44100.0, 48000.0, 96000.0})
+            {
+                Plugin pl(id);
+                pl.set(1, m);
+                pl.activate(rate);
+                oscairn_effect_resources_t res;
+                ext<oscairn_plugin_effect_contexts_t>(pl.p, OSCAIRN_EXT_EFFECT_CONTEXTS)->resources(pl.p, &res);
+                char name[64];
+                ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS)->value_to_text(pl.p, 1, m, name, sizeof(name));
+                std::printf("memory: %s %s %.0f Hz: context %llu bytes, engine %llu bytes\n", id, name, rate,
+                            (unsigned long long)res.context_bytes, (unsigned long long)res.shared_bytes);
+                if (std::string(name) == "Reverb 2" && rate == 48000)
+                    REQUIRE(res.context_bytes < 1500000);
+            }
+    }
+}
+

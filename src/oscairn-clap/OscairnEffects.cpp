@@ -73,14 +73,32 @@ struct Mode
     std::unique_ptr<Effect> (*make)(double rate);
 };
 
-template <typename FX> Mode mode(uint32_t id, const char *name)
+// An effect instance whose buffers are sized for the running rate (OscairnConfig.h).
+template <template <typename> class FX> std::unique_ptr<Effect> makeSized(double rate)
 {
-    Mode m{id, name, {}, [](double rate) -> std::unique_ptr<Effect> {
-               return std::make_unique<EffectOf<FX>>(rate);
-           }};
-    static_assert(FX::numParams <= Cfg::BC::maxParamCount);
-    auto probe = std::make_unique<EffectOf<FX>>(48000.0);
-    for (int i = 0; i < FX::numParams; ++i)
+    using namespace oscairn_fx;
+    if (rate <= sizedRates[0])
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[0]>>>>(rate);
+    if (rate <= sizedRates[1])
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[1]>>>>(rate);
+    if (rate <= sizedRates[2])
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[2]>>>>(rate);
+    if (rate <= sizedRates[3])
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[3]>>>>(rate);
+    if (rate <= sizedRates[4])
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[4]>>>>(rate);
+    if (rate <= sizedRates[5])
+        return std::make_unique<EffectOf<FX<SizedConfig<sizedRates[5]>>>>(rate);
+    return std::make_unique<EffectOf<FX<Cfg>>>(rate);
+}
+
+template <template <typename> class FX> Mode mode(uint32_t id, const char *name)
+{
+    Mode m{id, name, {}, makeSized<FX>};
+    static_assert(FX<Cfg>::numParams <= Cfg::BC::maxParamCount);
+    // Metadata from the smallest instance; it does not depend on the buffer sizes.
+    auto probe = std::make_unique<EffectOf<FX<oscairn_fx::SizedConfig<oscairn_fx::sizedRates[0]>>>>(48000.0);
+    for (int i = 0; i < FX<Cfg>::numParams; ++i)
         m.meta.push_back(probe->fx.paramAt(i));
     return m;
 }
@@ -141,8 +159,8 @@ const std::vector<Category> &categories()
                         2,
                         {}};
         // Stock sst-effects reverbs, unchanged. Mode IDs are never reused or renumbered.
-        reverb.modes.push_back(mode<sst::effects::reverb1::Reverb1<Cfg>>(1, "Reverb 1"));
-        reverb.modes.push_back(mode<sst::effects::reverb2::Reverb2<Cfg>>(2, "Reverb 2"));
+        reverb.modes.push_back(mode<sst::effects::reverb1::Reverb1>(1, "Reverb 1"));
+        reverb.modes.push_back(mode<sst::effects::reverb2::Reverb2>(2, "Reverb 2"));
         reverb.finish();
         c.push_back(std::move(reverb));
 
@@ -152,7 +170,7 @@ const std::vector<Category> &categories()
                     {},
                     1,
                     {}};
-        eq.modes.push_back(mode<oscairn_fx::eq::FiveBandEq<Cfg>>(1, "Five-band EQ"));
+        eq.modes.push_back(mode<oscairn_fx::eq::FiveBandEq>(1, "Five-band EQ"));
         eq.finish();
         c.push_back(std::move(eq));
         return c;
