@@ -12,7 +12,7 @@ instrument. Yamaha names appear in this document only to say what is matched (se
 or UI.
 
 File paths are relative to this repository unless they start with `oscairn/` (the
-[Oscairn](https://github.com/jbschooley/oscairn) repository). Statements about sst-effects were
+[Oscairn](https://github.com/oscairn/oscairn) repository). Statements about sst-effects were
 checked against this checkout; anything not checked is marked **unverified**.
 
 ## 1. Goal, scope and relation to RFC 0016
