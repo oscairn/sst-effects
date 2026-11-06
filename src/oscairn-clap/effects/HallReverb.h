@@ -359,7 +359,8 @@ struct Core
         for (int s = 0; s < 2; ++s)
         {
             hp[s].highPass(q.hpf, rate, n, now);
-            shelf[s].lowShelf(800, inShelf, rate, n, now);
+            // 800 Hz is the shelf's corner nearer DC, for a cut and a boost alike
+            shelf[s].lowShelf(800 * std::pow(10.0, std::abs(inShelf) / 40), inShelf, rate, n, now);
             lp1[s].lowPass(f.highHz[h], rate, n, now);
             loopShelf[s].lowShelf(800, loopShelfDb, rate, n, now);
             outLp[s].lowPass(q.lpf, rate, n, now);

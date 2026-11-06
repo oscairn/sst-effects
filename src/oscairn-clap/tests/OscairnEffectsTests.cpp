@@ -2275,6 +2275,51 @@ TEST_CASE("Hall A: the LPF is 0.4 + 0.6 times a first-order low-pass")
     REQUIRE(20 * std::log10(at(b, 8000) / at(a, 8000)) == Approx(20 * std::log10(std::abs(0.4 + 0.6 / std::complex<double>(1, std::tan(M_PI * 8000 / 44100) / std::tan(M_PI * 1000 / 44100))))).margin(0.05));
 }
 
+namespace
+{
+// Power (dB) of x from t0 to t1 seconds after its onset, summed over 11 frequencies spaced 1/30
+// octave around fc: a narrow band, so the ratio of two renders' values is the filter between them
+// whatever the source's spectrum.
+double narrowBandAfterOnset(const std::vector<float> &x, double rate, double fc, double t0, double t1)
+{
+    const double on = firstAbove(x, rate, 1e-7f);
+    double p = 0;
+    for (int k = -5; k <= 5; ++k)
+    {
+        std::complex<double> s = 0;
+        const double f = fc * std::pow(2.0, k / 30.0);
+        for (size_t i = (size_t)std::ceil((on + t0) * rate); i < x.size() && i < (on + t1) * rate; ++i)
+            s += (double)x[i] * std::polar(1.0, -2 * M_PI * f * i / rate);
+        p += std::norm(s);
+    }
+    return 10 * std::log10(p);
+}
+} // namespace
+
+TEST_CASE("Hall A: the low ratio shelves the input as the reference does")
+{
+    // Reference renders (fx19, a sampled click, the same measure): against low ratio 1.0, low
+    // ratio 0.1 and 1.4 shelve the first 300 ms. Within 0.5 dB per band (tolerance proposed).
+    struct Ref
+    {
+        const char *name;
+        double from, to, t1;
+        std::vector<std::pair<double, double>> db; // band (Hz), reference difference (dB)
+    };
+    for (auto &c : std::vector<Ref>{{"Low Ratio", 1.0, 0.1, 0.3, {{1000, -5.61}, {2000, -3.03}, {4000, -1.00}}}, // r_l1 - r_l10
+                                    {"Low Ratio", 1.0, 1.4, 0.3, {{1000, 0.87}, {2000, 0.36}, {4000, 0.10}}}}) // r_l14 - r_l10
+    {
+        auto a = hallImpulse(44100, {{"HPF Cutoff", 90}, {c.name, c.from}}, 0.5).first;
+        auto b = hallImpulse(44100, {{"HPF Cutoff", 90}, {c.name, c.to}}, 0.5).first;
+        for (auto [fc, want] : c.db)
+        {
+            const double got = narrowBandAfterOnset(b, 44100, fc, 0.012, c.t1) - narrowBandAfterOnset(a, 44100, fc, 0.012, c.t1);
+            INFO(c.name << " " << c.from << " to " << c.to << " at " << fc << " Hz: reference " << want << " dB, got " << got);
+            CHECK(std::abs(got - want) < 0.5);
+        }
+    }
+}
+
 TEST_CASE("Hall A keeps its 44.1 kHz decay, onset and level at 48, 88.2, 96 and 192 kHz")
 {
     // Decision 13: per octave band (250 Hz to 8 kHz) the decay time
