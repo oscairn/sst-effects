@@ -1,23 +1,25 @@
 /*
  * Oscairn effects (doc/oscairn-plan.md). GPL-3.0-or-later, see ../OscairnEffects.cpp.
  *
- * A hall reverb whose decay statistics follow reference renders (plan, section 15, "Hall
- * reverb"). Written for Oscairn; follows the sst-effects effect contract. It matches measured
- * statistics, not the reference's structure:
- *  - per octave band (125 Hz to 8 kHz) the decay time is 1 / T = 1 / Tf(time, size) + eh(high
- *    ratio) + el(low ratio), with Tf, eh and el tables measured from renders (fx19);
- *  - the reverb starts at the initial delay plus a room-size dependent onset (fx17, fx19);
- *  - the HPF is first order, the LPF 0.4 + 0.6 times a first-order low-pass (fx19); 20 Hz and
- *    20 kHz switch them off;
- *  - the level follows an eight-line feedback delay network's own energy, corrected by measured
- *    offsets for the time, diffusion and decay parameters (fx19).
- * Each line's loop filter is a seven-band graphic EQ giving that band's decay time; everything is
- * designed in seconds and hertz, so the statistics are the same at every rate.
- * The loop filters' design (eight lines of seven sections and three 7 x 7 solves each) runs on the
- * engine's worker thread (plan, decision 27), as the EQs' matching does: a change posts the
- * settings, the previous filters keep playing until the design arrives, and it is swapped in at a
- * block boundary with a 2 ms crossfade from the previous filters; a design is never applied over a
- * newer one. Without a worker, or offline, and for the first design, it runs in process.
+ * A hall reverb on the reference's structure (plan, section 15, "Hall A rebuilt"). Written for
+ * Oscairn; follows the sst-effects effect contract. Per side:
+ *  - the input passes a first-order HPF and a first-order low shelf at 800 Hz whose gain is
+ *    10 x low ratio - 10 dB, held at +2 dB;
+ *  - three all-passes diffuse it, and diffusion only crossfades the diffused and the plain signal;
+ *  - one long line holds the initial delay, four early-reflection taps (moved by room size and the
+ *    decay parameter, the later two raised by decay, the first absent at the shortest reverb time)
+ *    and three taps after the first reflection that feed the tank;
+ *  - the tank is a loop through both sides: an all-pass, a first-order low-pass set by the high
+ *    ratio, a line, a nested all-pass, a low shelf set by the low ratio, a line, then the other
+ *    side times the loop gain;
+ *  - the output is the early reflections plus taps of the tank's lines, through the LPF (0.4 + 0.6
+ *    times a first-order low-pass), times a level.
+ * Room size changes only delays (three fitted scales), reverb time only gains (the loop gain, the
+ * level, the first reflection's gain); nothing is modulated. The delays below are this design's
+ * own; the scales, the gains per reverb time, the high-ratio cutoffs, the loop shelf and the
+ * early-reflection laws are fitted to reference renders (fx19, fx24, fx27).
+ * A parameter change costs a few first-order designs, so it is made in process, and every gain
+ * and filter coefficient then ramps over 2 ms.
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_HALLREVERB_H
 #define OSCAIRN_CLAP_EFFECTS_HALLREVERB_H
@@ -25,65 +27,77 @@
 #include "sst/effects/EffectCore.h"
 #include "sst/basic-blocks/params/ParamMetadata.h"
 
-#include "../OffThread.h"
-
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
-#include <memory>
-#include <thread>
 #include <vector>
 
 namespace oscairn_fx::hall
 {
-constexpr int bands = 7, lines = 8;
+constexpr int bands = 7;
 constexpr double bandHz[bands] = {125, 250, 500, 1000, 2000, 4000, 8000};
 
-// Measured (fx19, 44.1 kHz renders of a sampled click, analysed with the measurement repository's
-// fx/reverb.py): the decay time without high-frequency damping (s) at these displayed reverb
-// times and room sizes.
-constexpr double timeAt[10] = {0.3, 1.1, 1.9, 2.7, 3.5, 4.3, 5.5, 9.5, 13.5, 18.0};
-constexpr double sizeAt[6] = {0, 8, 15, 22, 29, 31};
-constexpr double flatDecay[10][6] = {
-    {0.171, 0.356, 0.518, 0.710, 0.857, 0.904}, {0.182, 0.380, 0.558, 0.767, 0.929, 0.997},
-    {0.419, 0.771, 1.077, 1.468, 1.775, 1.876}, {0.530, 1.023, 1.494, 2.038, 2.530, 2.618},
-    {0.850, 1.307, 1.825, 2.410, 3.057, 3.138}, {1.266, 1.784, 2.430, 3.003, 3.616, 3.944},
-    {1.400, 2.000, 2.720, 3.381, 4.160, 4.513}, {1.731, 2.399, 3.253, 4.009, 4.995, 5.371},
-    {1.873, 2.683, 3.917, 4.951, 6.311, 6.725}, {2.914, 3.501, 5.313, 6.987, 9.023, 9.619}};
-// Extra decay rate (1/s) per band for high ratio 0.1 ... 1.0 (the 125 Hz band takes 250 Hz's).
-constexpr double highRate[10][bands] = {
-    {0.030, 0.030, 0.042, 0.128, 0.237, 0.340, 0.363}, {0.027, 0.027, 0.027, 0.079, 0.170, 0.277, 0.366},
-    {0.022, 0.022, 0.016, 0.053, 0.124, 0.222, 0.346}, {0.018, 0.018, 0.009, 0.037, 0.093, 0.182, 0.324},
-    {0.021, 0.021, 0.008, 0.022, 0.064, 0.137, 0.285}, {0.021, 0.021, 0.006, 0.016, 0.050, 0.115, 0.257},
-    {0.017, 0.017, 0.005, 0.012, 0.039, 0.097, 0.231}, {0.016, 0.016, 0.004, 0.009, 0.031, 0.083, 0.209},
-    {0.015, 0.015, 0.000, -0.002, -0.003, 0.012, 0.055}, {0.016, 0.016, 0.000, -0.004, -0.009, -0.004, 0.002}};
-// Extra decay rate per band for low ratio 0.1, 0.4, 0.7, 1.0 and 1.4, relative to 0.7.
-constexpr double lowAt[5] = {0.1, 0.4, 0.7, 1.0, 1.4};
-constexpr double lowRate[5][bands] = {{0.0088, 0.0088, 0.0132, 0.0183, 0.0152, 0.0103, 0.0047},
-                                      {0.0081, 0.0081, 0.0094, 0.0101, 0.0068, 0.0042, 0.0018},
-                                      {0, 0, 0, 0, 0, 0, 0},
-                                      {-0.0124, -0.0124, -0.0154, -0.0108, -0.0049, -0.0025, -0.0011},
-                                      {-0.0308, -0.0308, -0.0333, -0.0185, -0.0080, -0.0041, -0.0018}};
-// The reverb's onset after the initial delay (ms), by room size.
-constexpr double onsetMs[6] = {23.8, 31.2, 37.3, 44.0, 48.4, 52.7};
-// Level corrections (dB) to the network's own energy: by reverb time, high and low ratio,
-// diffusion and decay.
-constexpr double timeLevel[10] = {3.28, 3.46, 1.25, 0.47, 0.21, -0.30, -0.36, -0.29, -0.16, -0.45};
-constexpr double highLevel[10] = {-6.92, -4.77, -3.37, -2.35, -1.28, -0.76, -0.34, 0, 1.89, 2.32};
-constexpr double lowLevel[5] = {-1.12, -0.43, 0, 0.25, 0.40};
-constexpr double diffusionAt[5] = {0, 2, 5, 8, 10};
-constexpr double diffusionLevel[5] = {-1.267, -1.906, -1.974, -0.988, 0};
-constexpr double decayAt[5] = {0, 16, 32, 55, 63};
-constexpr double decayLevel[5] = {-2.490, -2.043, -1.192, 0, 0.396};
-constexpr double levelOffset = -9.82;
-// The decay parameter moves the reverb's onset (ms, relative to its value at 55).
-constexpr double decayOnset[5] = {-57.1, -44.5, -31.8, 0, 34.5};
+// What is fitted to reference renders. Times are the displayed reverb times (s) of the measured
+// grid; sizes the measured room sizes; values in between are interpolated.
+struct Fit
+{
+    double timeAt[10];
+    double loopGain[10];  // the tank's gain per pass through one side
+    double levelDb[10];   // output level
+    double sizeAt[6];
+    double sizeScale[6];  // delay scale (1 = the delays below)
+    double highHz[10];    // high ratio 0.1 ... 1.0: the loop low-pass's cutoff (0: off)
+    double lowAt[5];
+    double loopShelfDb[5]; // low ratio: the loop shelf's gain per pass
+    double apGain[4];     // diffusers, the tank's first all-pass, nested outer, nested inner
+    double erGain[2][4];
+    double erFixedMs[2][4]; // early-reflection tap = initial delay + fixed + scaled x size scale
+    double erScaledMs[2][4];
+    double decayAt[5];
+    double decayShiftMs[5]; // the decay parameter moves the block after the initial delay
+    double decayDb[5];      // and raises the later two early reflections
+    double erLevel;         // early reflections' level against the tank's
+    double firstTap[10];    // the first early reflection's gain, by reverb time
+    double lineScale[6];    // the tank lines' delay scale, by room size (sizeAt)
+    double tankApScale[6];  // the tank's all-passes' delay scale, by room size
+};
 
-// Line lengths (s) at room size 31; smaller rooms scale them down to 0.35 of these at size 0.
-constexpr double lineSeconds[lines] = {0.0397, 0.0431, 0.0459, 0.0491, 0.0523, 0.0557, 0.0593, 0.0631};
-constexpr double allpassSeconds[4] = {0.0047, 0.0036, 0.0127, 0.0093};
-constexpr double maxPreSeconds = 0.2 + 0.0527 + 0.0345 + 0.001;
+inline constexpr Fit fitted{
+    {0.3, 1.1, 1.9, 2.7, 3.5, 4.3, 5.5, 9.5, 13.5, 18},
+    {0, 0, 0.3701, 0.5008, 0.5368, 0.6556, 0.6677, 0.7229, 0.746, 0.8263},
+    {-9.1, -8.63, -8.44, -8.46, -7.94, -8.13, -7.86, -7.6, -7.11, -7.24},
+    {0, 8, 15, 22, 29, 31},
+    {0.2021, 0.408, 0.5778, 0.7879, 0.9687, 1.0085},
+    {2326, 2743, 3234, 3814, 4497, 5303, 6253, 7373, 19744, 0},
+    {0.1, 0.4, 0.7, 1, 1.4},
+    {-0.67, -0.57, 0, 0.76, 1.57},
+    {0.62, 0.6103, 0.572, 0.485},
+    {{-0.6, 1, -1, 1}, {0.6, 0.8, -0.8, 1}},
+    {{17.33, 11.8, 23.5, 21.8}, {19.96, 19.5, 16.7, 21.7}},
+    {{29.7, 68, 64.5, 93.9}, {68.5, 78.5, 98, 104.9}},
+    {0, 16, 32, 55, 63},
+    {-56.72, -44.46, -32.41, 0, 34.33},
+    {-20, -20, -20, 0, 4.96},
+    0.5394,
+    {0, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+    {0.3069, 0.4696, 0.6178, 0.7185, 0.7593, 1.012},
+    {0.2309, 0.3924, 0.5762, 0.7302, 1.2083, 0.8804}};
+
+// This design's delays (s) at size scale 1, per side.
+constexpr double diffuserS[2][3] = {{0.0033, 0.0051, 0.0079}, {0.0037, 0.0057, 0.0089}};
+constexpr double feedS[2][3] = {{0.020, 0.031, 0.043}, {0.023, 0.035, 0.041}};
+constexpr double feedShape[3] = {1, -0.8, 0.6};
+constexpr double erApS[2] = {0.0071, 0.0083};
+constexpr double tankApS[2] = {0.0311, 0.0373};
+constexpr double tankLine1S[2] = {0.0743, 0.0697};
+constexpr double nestOuterS[2] = {0.0527, 0.0479};
+constexpr double nestInnerS[2] = {0.0131, 0.0157};
+constexpr double tankLine2S[2] = {0.0619, 0.0661};
+// Output taps: fractions of the own side's first and second line, and of the other side's second.
+constexpr double outTap[3] = {0.12, 0.33, 0.81};
+constexpr double outSign[4] = {1, -1, 1, -1};
+constexpr double outFrac1b = 0.61;
+constexpr double maxInitialS = 0.2, maxShiftS = 0.0345;
 
 inline double interp(const double *x, const double *y, int n, double v)
 {
@@ -93,36 +107,6 @@ inline double interp(const double *x, const double *y, int n, double v)
         if (v <= x[i])
             return y[i - 1] + (y[i] - y[i - 1]) * (v - x[i - 1]) / (x[i] - x[i - 1]);
     return y[n - 1];
-}
-
-// Line lengths scale with room size: 0.35 of the longest at size 0, all of it at 31.
-inline double lineScale(double size) { return 0.35 + 0.65 * size / 31; }
-inline double sizeRateScale(double size) { return std::sqrt(lineScale(29) / lineScale(size)); }
-
-// The decay time (s) per band for the parameters.
-inline std::array<double, bands> decayTimes(double timeS, double size, double highRatio, double lowRatio)
-{
-    double col[10];
-    for (int t = 0; t < 10; ++t)
-        col[t] = interp(sizeAt, flatDecay[t], 6, size);
-    const double tf = interp(timeAt, col, 10, timeS);
-    const int h = std::clamp((int)std::lround(highRatio * 10), 1, 10) - 1;
-    std::array<double, bands> out{};
-    for (int b = 0; b < bands; ++b)
-    {
-        double lr[5];
-        for (int k = 0; k < 5; ++k)
-            lr[k] = lowRate[k][b];
-        // the damping rates were measured at size 29; per second they grow as the lines shorten
-        const double rate = 1 / tf + (highRate[h][b] + interp(lowAt, lr, 5, lowRatio)) * sizeRateScale(size);
-        out[b] = 1 / std::max(rate, 1 / 60.0);
-    }
-    return out;
-}
-
-inline double onsetSeconds(double initialDelayMs, double size, double decay)
-{
-    return std::max(0.0, initialDelayMs + interp(sizeAt, onsetMs, 6, size) + interp(decayAt, decayOnset, 5, decay)) / 1000;
 }
 
 struct Section
@@ -135,180 +119,316 @@ struct Section
         z2 = b2 * x - a2 * y;
         return y;
     }
-    // Response in dB at hz.
-    double db(double hz, double rate) const
+};
+
+// A delay line; read(d) is the sample pushed d pushes ago (1 <= d <= capacity).
+struct Line
+{
+    std::vector<float> b;
+    int w{0};
+    void reserve(int n) { b.assign((size_t)std::max(2, n + 1), 0.f); }
+    void clear() { std::fill(b.begin(), b.end(), 0.f); w = 0; }
+    inline double read(int d) const
     {
-        const double w = 2 * M_PI * hz / rate;
-        const double cr = std::cos(w), ci = -std::sin(w), c2r = std::cos(2 * w), c2i = -std::sin(2 * w);
-        const double nr = b0 + b1 * cr + b2 * c2r, ni = b1 * ci + b2 * c2i;
-        const double dr = 1 + a1 * cr + a2 * c2r, di = a1 * ci + a2 * c2i;
-        return 10 * std::log10((nr * nr + ni * ni) / (dr * dr + di * di));
+        int r = w - d;
+        if (r < 0)
+            r += (int)b.size();
+        return b[(size_t)r];
+    }
+    inline void push(double x)
+    {
+        b[(size_t)w] = (float)x;
+        if (++w == (int)b.size())
+            w = 0;
     }
 };
 
-// Graphic EQ band k at gain g dB: a low shelf for 125 Hz, a high shelf for 8 kHz, peaks (Q 0.7)
-// between (cookbook designs at the running rate).
-inline void bandSection(Section &s, int k, double g, double rate)
+// A gain or coefficient that ramps linearly to a new target over a fixed number of samples.
+struct Ramp
 {
-    const double A = std::pow(10.0, g / 40);
-    const double f = k == 0 ? bandHz[0] * M_SQRT2 : (k == bands - 1 ? bandHz[bands - 1] / M_SQRT2 : bandHz[k]);
-    const double w = 2 * M_PI * std::min(f, 0.45 * rate) / rate, c = std::cos(w), sn = std::sin(w);
-    double b[3], a[3];
-    if (k == 0 || k == bands - 1)
+    double v{0}, step{0};
+    int left{0};
+    void to(double t, int n, bool now)
     {
-        const double sq = 2 * std::sqrt(A) * sn / M_SQRT2;
-        const double sg = k == 0 ? -1 : 1;
-        b[0] = A * ((A + 1) + sg * (A - 1) * c + sq);
-        b[1] = -sg * 2 * A * ((A - 1) + sg * (A + 1) * c);
-        b[2] = A * ((A + 1) + sg * (A - 1) * c - sq);
-        a[0] = (A + 1) - sg * (A - 1) * c + sq;
-        a[1] = sg * 2 * ((A - 1) - sg * (A + 1) * c);
-        a[2] = (A + 1) - sg * (A - 1) * c - sq;
+        if (now)
+            v = t, left = 0;
+        else
+            step = (t - v) / n, left = n;
     }
-    else
+    inline double next()
     {
-        const double al = sn / (2 * 0.7);
-        b[0] = 1 + al * A, b[1] = -2 * c, b[2] = 1 - al * A;
-        a[0] = 1 + al / A, a[1] = -2 * c, a[2] = 1 - al / A;
+        if (left > 0)
+            v += step, --left;
+        return v;
     }
-    s.b0 = b[0] / a[0], s.b1 = b[1] / a[0], s.b2 = b[2] / a[0], s.a1 = a[1] / a[0], s.a2 = a[2] / a[0];
-}
-
-struct LoopRequest
-{
-    double time{0}, size{0}, highRatio{0}, lowRatio{0};
-    uint64_t gen{0};
-};
-struct LoopDesign
-{
-    std::array<std::array<Section, bands>, lines> eq{};
-    std::array<double, bands> decay{};
-    uint64_t gen{0};
 };
 
-// Solves m * g = target (Gaussian elimination, partial pivoting).
-inline void solveBands(const double (&m)[bands][bands], const double *target, double *g)
+// First-order sections (bilinear at the running rate); coefficients ramp, states persist.
+struct FirstOrder
 {
-    double M[bands][bands + 1];
-    for (int r = 0; r < bands; ++r)
+    Ramp b0, b1, a1;
+    double x1{0}, y1{0};
+    inline double run(double x)
     {
-        for (int c = 0; c < bands; ++c)
-            M[r][c] = m[r][c];
-        M[r][bands] = target[r];
+        const double y = b0.next() * x + b1.next() * x1 - a1.next() * y1;
+        x1 = x, y1 = y;
+        return y;
     }
-    for (int c = 0; c < bands; ++c)
+    void set(double c0, double c1, double d1, int n, bool now) { b0.to(c0, n, now), b1.to(c1, n, now), a1.to(d1, n, now); }
+    // At other rates the low-pass keeps the 44.1 kHz design's response at 6.5 kHz (decision 13): its
+    // bilinear warping there is part of the reference's high-band decay and level.
+    void lowPass(double hz, double rate, int n, bool now)
     {
-        int p = c;
-        for (int r = c + 1; r < bands; ++r)
-            if (std::abs(M[r][c]) > std::abs(M[p][c]))
-                p = r;
-        for (int k = 0; k <= bands; ++k)
-            std::swap(M[c][k], M[p][k]);
-        for (int r = 0; r < bands; ++r)
-            if (r != c)
-            {
-                const double f = M[r][c] / M[c][c];
-                for (int k = c; k <= bands; ++k)
-                    M[r][k] -= f * M[c][k];
-            }
+        if (hz <= 0 || hz >= 0.49 * 44100)
+            return set(1, 0, 0, n, now);
+        const double f0 = std::min(6500.0, 0.45 * rate);
+        const double k = std::tan(M_PI * hz / 44100) * std::tan(M_PI * f0 / rate) / std::tan(M_PI * f0 / 44100);
+        set(k / (1 + k), k / (1 + k), (k - 1) / (k + 1), n, now);
     }
-    for (int r = 0; r < bands; ++r)
-        g[r] = M[r][bands] / M[r][r];
-}
+    void highPass(double hz, double rate, int n, bool now)
+    {
+        const double k = std::tan(M_PI * std::min(hz, 0.45 * rate) / rate);
+        set(1 / (1 + k), -1 / (1 + k), (k - 1) / (k + 1), n, now);
+    }
+    // Low shelf: gain g (dB) at DC, 1 at high frequencies, centred (geometrically) at hz.
+    void lowShelf(double hz, double gDb, double rate, int n, bool now)
+    {
+        const double k = std::tan(M_PI * std::min(hz, 0.45 * rate) / rate), s = std::pow(10.0, gDb / 40);
+        const double d = k / s + 1;
+        set((k * s + 1) / d, (k * s - 1) / d, (k / s - 1) / d, n, now);
+    }
+    void clear() { x1 = y1 = 0; }
+};
 
-// The line length (samples) for line j at a room size.
-inline int lineSamples(int j, double size, double rate) { return std::max(1, (int)std::lround(lineSeconds[j] * lineScale(size) * rate)); }
-
-// Designs every line's graphic EQ for its band decay times (any thread; no allocation).
-inline void designLoops(const double (&interaction)[bands][bands], double rate, const LoopRequest &q, LoopDesign &out)
+struct Settings
 {
-    out.decay = decayTimes(q.time, q.size, q.highRatio, q.lowRatio);
-    for (int j = 0; j < lines; ++j)
+    double time{3.5}, diffusion{10}, initialDelayMs{67.8}, hpf{80}, lpf{5600}, size{29}, highRatio{0.8}, lowRatio{0.7},
+        decay{55};
+    bool operator==(const Settings &) const = default;
+};
+
+// Delay scale for a room size.
+inline double sizeScale(const Fit &f, double size) { return interp(f.sizeAt, f.sizeScale, 6, size); }
+inline double lineScale(const Fit &f, double size) { return interp(f.sizeAt, f.lineScale, 6, size); }
+inline double maxScale(const Fit &f) { return *std::max_element(std::begin(f.sizeScale), std::end(f.sizeScale)); }
+inline double maxLineScale(const Fit &f) { return *std::max_element(std::begin(f.lineScale), std::end(f.lineScale)); }
+inline double tankApScale(const Fit &f, double size) { return interp(f.sizeAt, f.tankApScale, 6, size); }
+inline double maxTankApScale(const Fit &f) { return *std::max_element(std::begin(f.tankApScale), std::end(f.tankApScale)); }
+
+// The reverb itself, independent of the effect contract (the fitting driver uses it directly).
+struct Core
+{
+    const Fit *fit{&fitted};
+    double rate{44100};
+    int fadeLen{1};
+    Line input[2], diff[2][3], erAp[2], tankAp[2], line1[2], outer[2], inner[2], line2[2];
+    FirstOrder hp[2], shelf[2], lp1[2], loopShelf[2], outLp[2];
+    Ramp loopGain, level, erGain[2][4], mix;
+    int dDiff[2][3]{}, dEr[2][4]{}, dFeed[2][3]{}, dErAp[2]{}, dTankAp[2]{}, dLine1[2]{}, dOuter[2]{}, dInner[2]{}, dLine2[2]{},
+        dOut[2][4]{};
+    bool hpOn{false}, lpOn{false}, have{false};
+    double onset{0};
+
+    static int samples(double s, double rate) { return (int)std::ceil(s * rate) + 1; }
+    // Capacities (samples) of the lines in order, for the declared memory.
+    static std::vector<int> capacities(const Fit &f, double rate)
     {
-        const double sec = lineSamples(j, q.size, rate) / rate;
-        double target[bands], g[bands], d[bands];
-        for (int b = 0; b < bands; ++b)
-            target[b] = -60 * sec / out.decay[b];
-        solveBands(interaction, target, g);
-        for (int it = 0; it < 2; ++it) // correct for the bands' interaction at these gains
+        const double m = maxScale(f), ml = maxLineScale(f), ma = maxTankApScale(f);
+        double erMax = 0;
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 4; ++k)
+                erMax = std::max(erMax, (f.erFixedMs[s][k] + f.erScaledMs[s][k] * m) / 1000);
+        double feedMax = 0;
+        for (int s = 0; s < 2; ++s)
+            for (double v : feedS[s])
+                feedMax = std::max(feedMax, (f.erFixedMs[s][0] + f.erScaledMs[s][0] * m) / 1000 + v * m);
+        std::vector<int> c;
+        for (int s = 0; s < 2; ++s)
         {
-            for (int b = 0; b < bands; ++b)
-                bandSection(out.eq[j][b], b, g[b], rate);
-            for (int b = 0; b < bands; ++b)
-            {
-                double sum = 0;
-                for (int k = 0; k < bands; ++k)
-                    sum += out.eq[j][k].db(bandHz[b], rate);
-                d[b] = target[b] - sum;
-            }
-            double dg[bands];
-            solveBands(interaction, d, dg);
-            for (int b = 0; b < bands; ++b)
-                g[b] += dg[b];
+            c.push_back(samples(maxInitialS + maxShiftS + std::max(erMax, feedMax), rate));
+            for (int k = 0; k < 3; ++k)
+                c.push_back(samples(diffuserS[s][k] * m, rate));
+            c.push_back(samples(erApS[s] * m, rate));
+            c.push_back(samples(tankApS[s] * ma, rate));
+            c.push_back(samples(tankLine1S[s] * ml, rate));
+            for (double v : {nestOuterS[s], nestInnerS[s]})
+                c.push_back(samples(v * ma, rate));
+            c.push_back(samples(tankLine2S[s] * ml, rate));
         }
-        for (int b = 0; b < bands; ++b)
-            bandSection(out.eq[j][b], b, g[b], rate);
+        return c;
     }
-    out.gen = q.gen;
-}
-
-// The worker side: takes the newest request and publishes its design.
-class LoopDesigner final : public Job
-{
-  public:
-    LoopDesigner(const double (&m)[bands][bands], double r, Worker *w, const std::atomic<bool> *o) : rate(r), worker(w), offline(o)
+    static size_t heapBytesAt(const Fit &f, double rate)
     {
-        for (int i = 0; i < bands; ++i)
-            for (int k = 0; k < bands; ++k)
-                interaction[i][k] = m[i][k];
-        if (worker)
-            worker->add(this); // main thread, at construction
+        size_t n = 0;
+        for (int v : capacities(f, rate))
+            n += (size_t)std::max(2, v + 1);
+        return n * sizeof(float);
     }
-    ~LoopDesigner()
+    size_t heapBytes() const
     {
-        if (worker)
-            worker->remove(this);
-    }
-    bool service() noexcept override
-    {
-        if (!requests.fresh() || busy.exchange(true, std::memory_order_acquire))
-            return false;
-        bool did = false;
-        if (const LoopRequest *q = requests.read())
+        size_t n = 0;
+        for (int s = 0; s < 2; ++s)
         {
-            designLoops(interaction, rate, *q, results.writeSlot());
-            results.publish();
-            did = true;
+            n += input[s].b.size() + erAp[s].b.size() + tankAp[s].b.size() + line1[s].b.size() + outer[s].b.size() +
+                 inner[s].b.size() + line2[s].b.size();
+            for (auto &d : diff[s])
+                n += d.b.size();
         }
-        busy.store(false, std::memory_order_release);
-        return did;
+        return n * sizeof(float);
     }
-    // Designs in this thread, waiting for the worker if it is designing.
-    void designHere(const LoopRequest &q)
+    void prepare(double r)
     {
-        while (busy.exchange(true, std::memory_order_acquire))
-            std::this_thread::yield();
-        designLoops(interaction, rate, q, results.writeSlot());
-        results.publish();
-        busy.store(false, std::memory_order_release);
+        rate = r;
+        fadeLen = std::max(1, (int)std::lround(0.002 * rate));
+        auto c = capacities(*fit, rate);
+        size_t i = 0;
+        for (int s = 0; s < 2; ++s)
+        {
+            input[s].reserve(c[i++]);
+            for (auto &d : diff[s])
+                d.reserve(c[i++]);
+            for (Line *l : {&erAp[s], &tankAp[s], &line1[s], &outer[s], &inner[s], &line2[s]})
+                l->reserve(c[i++]);
+        }
+        have = false;
     }
-    bool async() const { return worker && !(offline && offline->load(std::memory_order_relaxed)); }
-    void post(const LoopRequest &q)
+    void clear()
     {
-        requests.writeSlot() = q;
-        requests.publish();
-        worker->wake();
+        for (int s = 0; s < 2; ++s)
+        {
+            for (Line *l : {&input[s], &erAp[s], &tankAp[s], &line1[s], &outer[s], &inner[s], &line2[s]})
+                l->clear();
+            for (auto &d : diff[s])
+                d.clear();
+            for (FirstOrder *f : {&hp[s], &shelf[s], &lp1[s], &loopShelf[s], &outLp[s]})
+                f->clear();
+        }
+    }
+    void set(const Settings &q)
+    {
+        const Fit &f = *fit;
+        const bool now = !have;
+        have = true;
+        const int n = fadeLen;
+        const double S = sizeScale(f, std::clamp(q.size, 0.0, 31.0)), SL = lineScale(f, std::clamp(q.size, 0.0, 31.0)),
+                     SA = tankApScale(f, std::clamp(q.size, 0.0, 31.0));
+        // delays keep their 44.1 kHz length in seconds at other rates (decision 13)
+        auto d = [&](double s, int cap) { return std::clamp((int)std::lround(std::round(s * 44100) / 44100 * rate), 1, cap); };
+        const double shift = interp(f.decayAt, f.decayShiftMs, 5, q.decay) / 1000;
+        const double base = q.initialDelayMs / 1000 + shift;
+        for (int s = 0; s < 2; ++s)
+        {
+            const int cap = (int)input[s].b.size() - 1;
+            for (int k = 0; k < 4; ++k)
+                dEr[s][k] = d(base + (f.erFixedMs[s][k] + f.erScaledMs[s][k] * S) / 1000, cap);
+            // the tank's feed starts after the first early reflection, so that reflection is the onset
+            for (int k = 0; k < 3; ++k)
+            {
+                dDiff[s][k] = d(diffuserS[s][k] * S, (int)diff[s][k].b.size() - 1);
+                dFeed[s][k] = d(base + (f.erFixedMs[s][0] + f.erScaledMs[s][0] * S) / 1000 + feedS[s][k] * S, cap);
+            }
+            dErAp[s] = d(erApS[s] * S, (int)erAp[s].b.size() - 1);
+            dTankAp[s] = d(tankApS[s] * SA, (int)tankAp[s].b.size() - 1);
+            dLine1[s] = d(tankLine1S[s] * SL, (int)line1[s].b.size() - 1);
+            dOuter[s] = d(nestOuterS[s] * SA, (int)outer[s].b.size() - 1);
+            dInner[s] = d(nestInnerS[s] * SA, (int)inner[s].b.size() - 1);
+            dLine2[s] = d(tankLine2S[s] * SL, (int)line2[s].b.size() - 1);
+        }
+        for (int s = 0; s < 2; ++s) // after both sides' lines: the last tap reads the other side
+        {
+            dOut[s][0] = std::max(1, (int)std::lround(outTap[0] * dLine1[s]));
+            dOut[s][1] = std::max(1, (int)std::lround(outFrac1b * dLine1[s]));
+            dOut[s][2] = std::max(1, (int)std::lround(outTap[1] * dLine2[s]));
+            dOut[s][3] = std::max(1, (int)std::lround(outTap[2] * dLine2[1 - s]));
+        }
+        onset = dEr[0][0] / rate;
+        const double t = q.time;
+        loopGain.to(interp(f.timeAt, f.loopGain, 10, t), n, now);
+        level.to(std::pow(10.0, interp(f.timeAt, f.levelDb, 10, t) / 20), n, now);
+        const double dk = std::pow(10.0, interp(f.decayAt, f.decayDb, 5, q.decay) / 20);
+        const double first = interp(f.timeAt, f.firstTap, 10, t);
+        for (int s = 0; s < 2; ++s)
+            for (int k = 0; k < 4; ++k)
+                erGain[s][k].to(f.erLevel * f.erGain[s][k] * (k >= 2 ? dk : 1) * (k == 0 ? first : 1), n, now);
+        mix.to(std::clamp(std::round(q.diffusion), 0.0, 10.0) / 10, n, now);
+        const int h = std::clamp((int)std::lround(q.highRatio * 10), 1, 10) - 1;
+        const double inShelf = std::min(10 * q.lowRatio - 10, 2.0);
+        const double loopShelfDb = interp(f.lowAt, f.loopShelfDb, 5, q.lowRatio);
+        hpOn = q.hpf > 20.5;
+        lpOn = q.lpf < 19999.5;
+        for (int s = 0; s < 2; ++s)
+        {
+            hp[s].highPass(q.hpf, rate, n, now);
+            shelf[s].lowShelf(800, inShelf, rate, n, now);
+            lp1[s].lowPass(f.highHz[h], rate, n, now);
+            loopShelf[s].lowShelf(800, loopShelfDb, rate, n, now);
+            outLp[s].lowPass(q.lpf, rate, n, now);
+        }
     }
 
-    TripleBuffer<LoopRequest> requests; // audio thread -> worker
-    TripleBuffer<LoopDesign> results;   // whoever holds busy -> audio thread
-    std::atomic<bool> busy{false};
+    // A Schroeder all-pass whose delayed sample z the caller read (and may have filtered).
+    static inline double allpass(Line &l, double g, double x, double z)
+    {
+        const double v = x + g * z;
+        l.push(v);
+        return z - g * v;
+    }
 
-  private:
-    double interaction[bands][bands]{};
-    double rate;
-    Worker *worker;
-    const std::atomic<bool> *offline;
+    void process(float *L, float *R, int frames)
+    {
+        const Fit &f = *fit;
+        for (int i = 0; i < frames; ++i)
+        {
+            const double in[2] = {L[i], R[i]};
+            const double fb = loopGain.next(), lv = level.next(), m = mix.next();
+            double eg[2][4];
+            for (int s = 0; s < 2; ++s)
+                for (int k = 0; k < 4; ++k)
+                    eg[s][k] = erGain[s][k].next();
+            const double back[2] = {line2[0].read(dLine2[0]), line2[1].read(dLine2[1])};
+            double out[2];
+            for (int s = 0; s < 2; ++s)
+            {
+                double x = in[s];
+                x = hp[s].run(x);
+                if (!hpOn)
+                    x = in[s];
+                x = shelf[s].run(x);
+                double u = x;
+                for (int k = 0; k < 3; ++k)
+                    u = allpass(diff[s][k], f.apGain[0], u, diff[s][k].read(dDiff[s][k]));
+                const double v = m * u + (1 - m) * x;
+                double er = 0, feed = 0;
+                for (int k = 0; k < 4; ++k)
+                    er += eg[s][k] * input[s].read(dEr[s][k]);
+                for (int k = 0; k < 3; ++k)
+                    feed += feedShape[k] * input[s].read(dFeed[s][k]);
+                input[s].push(v);
+                er = allpass(erAp[s], 0.5, er, erAp[s].read(dErAp[s]));
+                // the tank: this side's half of the loop
+                double a = feed + fb * back[1 - s];
+                a = allpass(tankAp[s], f.apGain[1], a, tankAp[s].read(dTankAp[s]));
+                a = lp1[s].run(a);
+                const double b = line1[s].read(dLine1[s]);
+                line1[s].push(a);
+                const double zi = inner[s].read(dInner[s]);
+                const double zo = allpass(inner[s], f.apGain[3], outer[s].read(dOuter[s]), zi);
+                double c = allpass(outer[s], f.apGain[2], b, zo);
+                c = loopShelf[s].run(c);
+                line2[s].push(c);
+                out[s] = er + outSign[0] * line1[s].read(dOut[s][0]) + outSign[1] * line1[s].read(dOut[s][1]) +
+                         outSign[2] * line2[s].read(dOut[s][2]) + outSign[3] * line2[1 - s].read(dOut[s][3]);
+            }
+            for (int s = 0; s < 2; ++s)
+            {
+                double y = out[s];
+                const double lo = outLp[s].run(y);
+                if (lpOn)
+                    y = 0.4 * y + 0.6 * lo;
+                (s ? R : L)[i] = (float)(lv * y);
+            }
+        }
+    }
 };
 
 template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTemplateBase<FXConfig>
@@ -334,60 +454,17 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
                typename FXConfig::ValueStorage *p)
         : sst::effects::core::EffectTemplateBase<FXConfig>(s, e, p)
     {
-        const double rate = this->sampleRate();
-        pre.assign(samples(maxPreSeconds, rate) + 2, 0.f);
-        for (int i = 0; i < lines; ++i)
-            line[i].assign(samples(lineSeconds[i], rate) + 2, 0.f);
-        for (int k = 0; k < 4; ++k)
-            ap[k].assign(samples(allpassSeconds[k], rate) + 2, 0.f);
-        // the graphic EQ's interaction matrix at this rate (response in dB per dB of gain)
-        for (int k = 0; k < bands; ++k)
-        {
-            Section s;
-            bandSection(s, k, -3, rate);
-            for (int j = 0; j < bands; ++j)
-                interaction[j][k] = s.db(bandHz[j], rate) / -3;
-        }
-        fadeLen = std::max(1, (int)std::lround(0.002 * rate));
-        if constexpr (requires { s->worker; s->offline; })
-            designer = std::make_unique<LoopDesigner>(interaction, rate, s->worker, s->offline);
-        else
-            designer = std::make_unique<LoopDesigner>(interaction, rate, nullptr, nullptr);
+        core.prepare(this->sampleRate());
     }
-    static int samples(double s, double rate) { return (int)std::ceil(s * rate); }
-    static size_t heapBytesAt(double rate)
-    {
-        size_t n = (size_t)samples(maxPreSeconds, rate) + 2;
-        for (double l : lineSeconds)
-            n += (size_t)samples(l, rate) + 2;
-        for (double a : allpassSeconds)
-            n += (size_t)samples(a, rate) + 2;
-        return n * sizeof(float) + sizeof(LoopDesigner);
-    }
-    size_t heapBytes() const
-    {
-        size_t n = pre.size();
-        for (auto &l : line)
-            n += l.size();
-        for (auto &a : ap)
-            n += a.size();
-        return n * sizeof(float) + (designer ? sizeof(LoopDesigner) : 0);
-    }
-    double quietSeconds() const { return 0.1 + onset; }
+    static size_t heapBytesAt(double rate) { return Core::heapBytesAt(fitted, rate); }
+    size_t heapBytes() const { return core.heapBytes(); }
+    double quietSeconds() const { return 0.1 + core.onset; }
 
     void initialize()
     {
-        std::fill(pre.begin(), pre.end(), 0.f);
-        for (auto &l : line)
-            std::fill(l.begin(), l.end(), 0.f);
-        for (auto &a : ap)
-            std::fill(a.begin(), a.end(), 0.f);
-        for (auto &l : eq)
-            for (auto &s : l)
-                s.z1 = s.z2 = 0;
-        fade = 0;
-        hpState = lpState = hpX = lpX = 0;
-        last.fill(NAN);
+        core.clear();
+        core.have = false;
+        have = false;
         update();
     }
     void suspendProcessing() { initialize(); }
@@ -397,92 +474,7 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
-        if (fade == 0 && designer->results.fresh())
-            if (const LoopDesign *d = designer->results.read(); d && d->gen > applied)
-                apply(*d, true);
-        const int preN = (int)pre.size();
-        for (int i = 0; i < FXConfig::blockSize; ++i)
-        {
-            double x = 0.5 * ((double)L[i] + R[i]);
-            if (hpOn)
-            {
-                const double y = hpA * (x - hpX) + hpR * hpState; // first-order high-pass, bilinear
-                hpX = x;
-                hpState = y;
-                x = y;
-            }
-            if (lpOn)
-            {
-                const double y = lpB * (x + lpX) - lpA1 * lpState;
-                lpX = x;
-                lpState = y;
-                x = 0.4 * x + 0.6 * y;
-            }
-            pre[(size_t)preW] = (float)x;
-            auto tap = [&](int d) { int r = preW - d; return (double)pre[(size_t)(r < 0 ? r + preN : r)]; };
-            const double early = tap(earlyDelay);
-            double u = tap(netDelay);
-            if (++preW == preN)
-                preW = 0;
-            for (int k = 0; k < 4; ++k)
-            {
-                auto &b = ap[k];
-                int r = apW[k] - apLen[k];
-                if (r < 0)
-                    r += (int)b.size();
-                const double d = b[(size_t)r], w = u + apG * d;
-                b[(size_t)apW[k]] = (float)w;
-                if (++apW[k] == (int)b.size())
-                    apW[k] = 0;
-                u = d - apG * w;
-            }
-            double v[lines];
-            for (int j = 0; j < lines; ++j)
-            {
-                auto &b = line[j];
-                int r = lineW[j] - lineLen[j];
-                if (r < 0)
-                    r += (int)b.size();
-                const double in = b[(size_t)r];
-                double s = in;
-                for (auto &sec : eq[j])
-                    s = sec.run(s);
-                if (fade > 0)
-                {
-                    double o = in;
-                    for (auto &sec : eqOld[j])
-                        o = sec.run(o);
-                    s += (double)fade / fadeLen * (o - s);
-                }
-                v[j] = s;
-            }
-            if (fade > 0)
-                --fade;
-            const double l = v[0] - v[2] + v[4] - v[6], r = v[1] - v[3] + v[5] - v[7];
-            if (gainLeft > 0)
-                gain += gainStep, --gainLeft;
-            L[i] = (float)(gain * (l + early));
-            R[i] = (float)(gain * (r + early));
-            // eight-point Hadamard mixing, normalized
-            double h[lines];
-            for (int j = 0; j < lines; ++j)
-                h[j] = v[j];
-            for (int len = 1; len < lines; len <<= 1)
-                for (int s0 = 0; s0 < lines; s0 += 2 * len)
-                    for (int j = s0; j < s0 + len; ++j)
-                    {
-                        const double a = h[j], c = h[j + len];
-                        h[j] = a + c;
-                        h[j + len] = a - c;
-                    }
-            for (int j = 0; j < lines; ++j)
-            {
-                auto &b = line[j];
-                b[(size_t)lineW[j]] = (float)(h[j] / std::sqrt((double)lines) + u);
-                if (++lineW[j] == (int)b.size())
-                    lineW[j] = 0;
-            }
-        }
+        core.process(L, R, FXConfig::blockSize);
     }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
@@ -503,104 +495,22 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
         return pmd().withName("Unused").withType(pmd::NONE);
     }
 
-    // For the tests: the decay times the network is designed for.
-    std::array<double, bands> designedDecay{};
+    Core core;
 
   private:
-    std::vector<float> pre, line[lines], ap[4];
-    int preW{0}, lineW[lines]{}, apW[4]{}, lineLen[lines]{}, apLen[4]{};
-    int earlyDelay{1}, netDelay{1};
-    double interaction[bands][bands]{};
-    std::array<std::array<Section, bands>, lines> eq{}, eqOld{};
-    std::unique_ptr<LoopDesigner> designer;
-    LoopRequest posted{};
+    Settings last{};
     bool have{false};
-    uint64_t applied{0};
-    int fade{0}, fadeLen{1}, gainLeft{0};
-    bool gainSet{false};
-    double gainStep{0};
-    double apG{0.5}, gain{0}, onset{0};
-    bool hpOn{false}, lpOn{false};
-    double hpA{0}, hpR{0}, hpState{0}, hpX{0}, lpB{0}, lpA1{0}, lpState{0}, lpX{0};
-    std::array<float, numParamsEnum> last{};
-
-    // A design's coefficients, keeping the sections' states; with a crossfade from the filters
-    // that played until now.
-    void apply(const LoopDesign &d, bool crossfade)
-    {
-        applied = d.gen;
-        if (crossfade)
-        {
-            eqOld = eq;
-            fade = fadeLen;
-        }
-        for (int j = 0; j < lines; ++j)
-            for (int b = 0; b < bands; ++b)
-            {
-                auto &x = eq[j][b];
-                const auto &y = d.eq[j][b];
-                x.b0 = y.b0, x.b1 = y.b1, x.b2 = y.b2, x.a1 = y.a1, x.a2 = y.a2;
-            }
-        designedDecay = d.decay;
-    }
 
     void update()
     {
-        bool changed = false;
-        for (int i = 0; i < numParams; ++i)
-        {
-            const float v = this->floatValue(i);
-            changed = changed || !(v == last[i]);
-            last[i] = v;
-        }
-        if (!changed)
+        Settings q{this->floatValue(time), this->floatValue(diffusion), this->floatValue(initialDelay), this->floatValue(hpf),
+                   this->floatValue(lpf), std::round(this->floatValue(roomSize)), this->floatValue(highRatio),
+                   this->floatValue(lowRatio), std::round(this->floatValue(decay))};
+        if (have && q == last)
             return;
-        const double rate = this->sampleRate();
-        const double size = std::clamp((double)std::lround(last[roomSize]), 0.0, 31.0);
-        for (int j = 0; j < lines; ++j)
-            lineLen[j] = lineSamples(j, size, rate);
-        LoopRequest q{last[time], size, last[highRatio], last[lowRatio], 0};
-        if (!have || q.time != posted.time || q.size != posted.size || q.highRatio != posted.highRatio || q.lowRatio != posted.lowRatio)
-        {
-            q.gen = posted.gen + 1;
-            posted = q;
-            if (!have)
-            {
-                // the first design: in process, applied at once without a crossfade
-                have = true;
-                designer->designHere(q);
-                if (const LoopDesign *d = designer->results.read())
-                    apply(*d, false);
-            }
-            else if (designer->async())
-                designer->post(q);
-            else
-                designer->designHere(q); // applied by processBlock at this block boundary
-        }
-        for (int k = 0; k < 4; ++k)
-            apLen[k] = std::max(1, (int)std::lround(allpassSeconds[k] * rate));
-        apG = 0.1 + 0.06 * std::clamp((double)std::lround(last[diffusion]), 0.0, 10.0);
-        onset = onsetSeconds(last[initialDelay], size, std::lround(last[decay]));
-        earlyDelay = std::clamp((int)std::lround(onset * rate), 1, (int)pre.size() - 1);
-        netDelay = std::clamp(earlyDelay - lineLen[0], 1, (int)pre.size() - 1);
-        const int h = std::clamp((int)std::lround(last[highRatio] * 10), 1, 10) - 1;
-        const double levelDb = interp(timeAt, timeLevel, 10, last[time]) + highLevel[h] +
-                               interp(lowAt, lowLevel, 5, last[lowRatio]) +
-                               interp(diffusionAt, diffusionLevel, 5, std::lround(last[diffusion])) +
-                               interp(decayAt, decayLevel, 5, std::lround(last[decay])) + levelOffset;
-        const double g = std::pow(10.0, levelDb / 20);
-        if (!gainSet) // the first level is applied at once; later ones ramp over the crossfade's 2 ms
-            gain = g, gainSet = true;
-        gainStep = (g - gain) / fadeLen;
-        gainLeft = fadeLen;
-        hpOn = last[hpf] > 20.5f;
-        lpOn = last[lpf] < 19999.5f;
-        const double kh = std::tan(M_PI * std::min((double)last[hpf], 0.45 * rate) / rate);
-        hpA = 1 / (1 + kh);
-        hpR = (1 - kh) / (1 + kh);
-        const double kl = std::tan(M_PI * std::min((double)last[lpf], 0.45 * rate) / rate);
-        lpB = kl / (1 + kl);
-        lpA1 = (kl - 1) / (kl + 1);
+        have = true;
+        last = q;
+        core.set(q);
     }
 };
 } // namespace oscairn_fx::hall

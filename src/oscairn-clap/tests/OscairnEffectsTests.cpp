@@ -2094,64 +2094,116 @@ double firstAbove(const std::vector<float> &x, double rate, float thr = 1e-6f)
 }
 } // namespace
 
-TEST_CASE("Hall A: the fitted decay times, onset and filters")
+TEST_CASE("Hall A: room size moves only delays, reverb time only gains, nothing is modulated")
+{
+    // The reference's structure (plan, decision 26), checked on the core: changing the room size
+    // leaves every gain and coefficient alone, changing the reverb time leaves every delay alone.
+    using namespace oscairn_fx::hall;
+    auto core = [](const Settings &q) {
+        auto c = std::make_unique<Core>();
+        c->prepare(44100);
+        c->set(q);
+        return c;
+    };
+    auto gains = [](const Core &c) {
+        std::vector<double> g{c.loopGain.v, c.level.v, c.mix.v};
+        for (auto &s : c.erGain)
+            for (auto &e : s)
+                g.push_back(e.v);
+        for (int s = 0; s < 2; ++s)
+            for (const FirstOrder *f : {&c.hp[s], &c.shelf[s], &c.lp1[s], &c.loopShelf[s], &c.outLp[s]})
+                g.insert(g.end(), {f->b0.v, f->b1.v, f->a1.v});
+        return g;
+    };
+    auto delays = [](const Core &c) {
+        std::vector<int> d;
+        for (int s = 0; s < 2; ++s)
+        {
+            d.insert(d.end(), std::begin(c.dDiff[s]), std::end(c.dDiff[s]));
+            d.insert(d.end(), std::begin(c.dEr[s]), std::end(c.dEr[s]));
+            d.insert(d.end(), std::begin(c.dFeed[s]), std::end(c.dFeed[s]));
+            d.insert(d.end(), std::begin(c.dOut[s]), std::end(c.dOut[s]));
+            d.insert(d.end(), {c.dErAp[s], c.dTankAp[s], c.dLine1[s], c.dOuter[s], c.dInner[s], c.dLine2[s]});
+        }
+        return d;
+    };
+    Settings a{}, b{};
+    b.size = 8;
+    REQUIRE(gains(*core(a)) == gains(*core(b)));
+    REQUIRE(delays(*core(a)) != delays(*core(b)));
+    b = a;
+    b.time = 13.5;
+    REQUIRE(delays(*core(a)) == delays(*core(b)));
+    REQUIRE(gains(*core(a)) != gains(*core(b)));
+    // No modulation: an impulse later in time gives the same response, shifted.
+    auto c = core(a);
+    const int n = 44100 * 2, late = 12345;
+    std::vector<float> l(n, 0), r(n, 0), l2(n, 0), r2(n, 0);
+    l[0] = r[0] = 1;
+    l2[late] = r2[late] = 1;
+    c->process(l.data(), r.data(), n);
+    c = core(a);
+    c->process(l2.data(), r2.data(), n);
+    for (int i = 0; i + late < n; ++i)
+        REQUIRE(l2[i + late] == l[i]);
+}
+
+TEST_CASE("Hall A: the reference's decay per band on fitting renders, and its onset")
+{
+    // Reference renders of the fitting grid (fx19, fx27; a sampled click, fx/reverb.py's
+    // analysis): the plugin's decay per octave band (250 Hz to 8 kHz) within 10% (the M3 gate) at
+    // fitting points the fit reaches. Settings in the platform's units.
+    using namespace oscairn_fx::hall;
+    struct Ref
+    {
+        std::vector<std::pair<const char *, double>> set;
+        double t[6]; // 250 Hz ... 8 kHz
+    };
+    for (auto &c : std::vector<Ref>{
+             {{{"HPF Cutoff", 90}, {"High Ratio", 0.5}}, {2.87, 2.98, 2.87, 2.56, 2.15, 1.63}},                 // fx19 r_h5
+             {{{"HPF Cutoff", 90}, {"Reverb Time", 2.7}, {"Room Size", 31}}, {2.59, 2.62, 2.55, 2.4, 2.16, 1.77}}, // r_t24_s31
+             {{{"HPF Cutoff", 90}, {"High Ratio", 0.6}}, {2.88, 3.0, 2.91, 2.65, 2.26, 1.71}}})                  // r_h6
+    {
+        auto [l, r] = hallImpulse(44100, c.set, 2.5 * c.t[0] + 0.5);
+        for (int b = 1; b < bands; ++b)
+        {
+            const double got = 0.5 * (bandDecay(l, 44100, bandHz[b]) + bandDecay(r, 44100, bandHz[b]));
+            INFO("setting " << c.set.size() << " band " << bandHz[b] << " reference " << c.t[b - 1] << " got " << got);
+            CHECK(std::abs(got / c.t[b - 1] - 1) < 0.1);
+        }
+    }
+    // The onset is the first early reflection: initial delay + fixed + scaled x the room's scale
+    // (measured on fx19's and fx27's diffusion-0 renders), moved by the decay setting.
+    for (auto [id, size, dec] : std::vector<std::array<double, 3>>{{67.8, 29, 55}, {0.1, 0, 63}, {200, 31, 0}, {20, 15, 40}})
+    {
+        auto [l, r] = hallImpulse(44100, {{"Initial Delay", id}, {"Room Size", size}, {"Decay", dec}, {"HPF Cutoff", 20}}, 0.6);
+        const double want = (id + interp(fitted.decayAt, fitted.decayShiftMs, 5, dec) + fitted.erFixedMs[0][0] +
+                             fitted.erScaledMs[0][0] * sizeScale(fitted, size)) / 1000;
+        INFO("initial delay " << id << " size " << size << " decay " << dec);
+        REQUIRE(std::abs(firstAbove(l, 44100, 1e-7f) - want) <= 1.0 / 44100);
+    }
+}
+
+TEST_CASE("Hall A: the LPF is 0.4 + 0.6 times a first-order low-pass")
 {
     using namespace oscairn_fx::hall;
-    // Measured points of the model (fx19): at a table point the decay time is the table's, and
-    // high and low ratio add their decay rates (scaled from size 29).
-    auto t = decayTimes(3.5, 29, 1.0, 0.7);
-    REQUIRE(t[3] == Approx(1 / (1 / 3.057 - 0.004)).epsilon(1e-6));
-    t = decayTimes(9.5, 8, 0.1, 0.7);
-    REQUIRE(t[6] == Approx(1 / (1 / 2.399 + 0.363 * std::sqrt(lineScale(29) / lineScale(8)))).epsilon(1e-6));
-    REQUIRE(onsetSeconds(67.8, 29, 55) == Approx(0.1162).epsilon(1e-9));
-    REQUIRE(onsetSeconds(0.1, 0, 0) == 0); // clamped: the decay setting moves the onset earlier
-    SECTION("The network decays as designed, per octave band, within 6%")
-    {
-        for (auto set : std::vector<std::vector<std::pair<const char *, double>>>{
-                 {{"HPF Cutoff", 20}, {"LPF Cutoff", 20000}},
-                 {{"Reverb Time", 9.5}, {"Room Size", 31}, {"High Ratio", 0.3}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000}},
-                 {{"Reverb Time", 1.9}, {"Room Size", 15}, {"Low Ratio", 1.4}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000}}})
-        {
-            double tm = 3.5, size = 29, hr = 0.8, lr = 0.7;
-            for (auto [n, v] : set)
-                (!std::strcmp(n, "Reverb Time") ? tm : !std::strcmp(n, "Room Size") ? size : !std::strcmp(n, "High Ratio") ? hr : !std::strcmp(n, "Low Ratio") ? lr : v) = v;
-            const auto want = decayTimes(tm, size, hr, lr);
-            auto [l, r] = hallImpulse(44100, set, 1.6 * want[0] + 0.5);
-            for (int b = 1; b < bands; ++b) // 125 Hz has too few modes in these lengths
-            {
-                const double got = bandDecay(l, 44100, bandHz[b]);
-                INFO("time " << tm << " size " << size << " band " << bandHz[b] << " want " << want[b] << " got " << got);
-                REQUIRE(std::abs(got / want[b] - 1) < 0.06);
-            }
-        }
-    }
-    SECTION("The reverb starts at the initial delay plus the size's onset")
-    {
-        for (auto [id, size] : std::vector<std::pair<double, double>>{{0.1, 0}, {67.8, 29}, {200, 31}})
-        {
-            auto [l, r] = hallImpulse(44100, {{"Initial Delay", id}, {"Room Size", size}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000}}, 0.4);
-            REQUIRE(std::abs(firstAbove(l, 44100) - onsetSeconds(id, size, 55)) <= 1.0 / 44100);
-        }
-    }
-    SECTION("The LPF is 0.4 + 0.6 times a first-order low-pass: -2.37 dB at its cutoff")
-    {
-        auto [a, ar] = hallImpulse(44100, {{"HPF Cutoff", 20}, {"LPF Cutoff", 20000}}, 1.0);
-        auto [b, br] = hallImpulse(44100, {{"HPF Cutoff", 20}, {"LPF Cutoff", 1000}}, 1.0);
-        auto at = [&](const std::vector<float> &x, double f) {
-            std::complex<double> s = 0;
-            for (size_t i = 0; i < x.size(); ++i)
-                s += (double)x[i] * std::polar(1.0, -2 * M_PI * f * i / 44100);
-            return std::abs(s);
-        };
-        // the same network both times, so the ratio of the spectra is the filter
-        REQUIRE(20 * std::log10(at(b, 1000) / at(a, 1000)) == Approx(-2.37).margin(0.05));
-        REQUIRE(20 * std::log10(at(b, 8000) / at(a, 8000)) == Approx(20 * std::log10(std::abs(0.4 + 0.6 / std::complex<double>(1, std::tan(M_PI * 8000 / 44100) / std::tan(M_PI * 1000 / 44100))))).margin(0.05));
-    }
+    // a short reverb time, so the 2 s responses hold their whole tails
+    auto [a, ar] = hallImpulse(44100, {{"HPF Cutoff", 20}, {"LPF Cutoff", 20000}, {"Reverb Time", 0.3}}, 2.0);
+    auto [b, br] = hallImpulse(44100, {{"HPF Cutoff", 20}, {"LPF Cutoff", 1000}, {"Reverb Time", 0.3}}, 2.0);
+    auto at = [&](const std::vector<float> &x, double f) {
+        std::complex<double> s = 0;
+        for (size_t i = 0; i < x.size(); ++i)
+            s += (double)x[i] * std::polar(1.0, -2 * M_PI * f * i / 44100);
+        return std::abs(s);
+    };
+    // the same network both times, so the ratio of the spectra is the filter
+    REQUIRE(20 * std::log10(at(b, 1000) / at(a, 1000)) == Approx(-2.37).margin(0.05));
+    REQUIRE(20 * std::log10(at(b, 8000) / at(a, 8000)) == Approx(20 * std::log10(std::abs(0.4 + 0.6 / std::complex<double>(1, std::tan(M_PI * 8000 / 44100) / std::tan(M_PI * 1000 / 44100))))).margin(0.05));
 }
 
 TEST_CASE("Hall A keeps its 44.1 kHz decay, onset and level at 48, 88.2, 96 and 192 kHz")
 {
-    // Decision 13 for a statistical design: per octave band (250 Hz to 8 kHz) the decay time
+    // Decision 13: per octave band (250 Hz to 8 kHz) the decay time
     // within 5% of the 44.1 kHz render's and its energy within 1.5 dB (the plan's M3 energy
     // tolerance; the 8 kHz band reaches about 1 dB, the bilinear filters' warping near 22 kHz at
     // 44.1 kHz, known difference 23), and the onset within 0.1 ms (tolerances proposed). Filters
@@ -2304,12 +2356,12 @@ TEST_CASE("Circuit compressor keeps its 44.1 kHz gain at 48, 88.2, 96 and 192 kH
     }
 }
 
-TEST_CASE("Hall A swaps its loop filters without clicks")
+TEST_CASE("Hall A changes high ratio and reverb time without clicks")
 {
-    // A new design replaces the loop filters with a 2 ms crossfade from the previous ones. The
-    // click is the largest output above 8 kHz (a fourth-order high-pass) in the 50 ms after a high
-    // ratio or reverb time change, for a 220 Hz + 1 kHz input with nothing up there; it must stay
-    // below -60 dBFS (accepted). Offline, so the design lands at the same block every run.
+    // Every gain and filter coefficient ramps over 2 ms to its new value. The click is the
+    // largest output above 8 kHz (a fourth-order high-pass) in the 50 ms after a high ratio or
+    // reverb time change, for a 220 Hz + 1 kHz input with nothing up there; it must stay below
+    // -60 dBFS (accepted). Offline, as before.
     struct Change
     {
         const char *name;
@@ -2352,12 +2404,13 @@ TEST_CASE("Hall A swaps its loop filters without clicks")
         }
 }
 
-TEST_CASE("Hall A designs its loop filters off the audio thread")
+TEST_CASE("Hall A's parameter changes stay cheap on the audio thread")
 {
-    // Decision 27: Hall A's loop filters are designed on the engine's worker. Sweeping reverb
-    // time, room size and high ratio at 192 kHz with one change per 64-sample host block (333 us),
-    // the worst process call must stay under a quarter of the block, as the off-thread EQs' does
-    // (unsanitized builds; the best of three runs, against preemption).
+    // Decision 27, revised: the rebuilt Hall A's changes cost a few first-order designs, so they
+    // are made in process. Sweeping reverb time, room size and high ratio at 192 kHz with one
+    // change per 64-sample host block (333 us), the worst process call must stay under a quarter
+    // of the block, as the off-thread EQs' does (unsanitized builds; the best of three runs,
+    // against preemption).
     const double rate = 192000;
     const uint32_t frames = 64;
     const double blockUs = 1e6 * frames / rate;
