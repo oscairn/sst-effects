@@ -248,7 +248,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(delay));
 
         Category dynamics{{CLAP_VERSION_INIT, "org.oscairn.effects.dynamics", "Oscairn FX Dynamics",
-                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.0",
                            "Compressors and other dynamics, one mode per design", dynamicsFeatures},
                           {},
                           1,

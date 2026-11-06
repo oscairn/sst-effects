@@ -2247,6 +2247,44 @@ TEST_CASE("Circuit compressor: the measured steady gains at 44.1 kHz")
     }
 }
 
+TEST_CASE("Circuit compressor: low input settings, and ratio 2 near full scale (fx7, fx13)")
+{
+    // A steady 440 Hz sine at -24.08 dBFS RMS, output 200, attack and release 100, as in fx7 and
+    // fx13. The reference's gain moves in 6.02 dB steps at the lowest input settings (its input
+    // level is held to steps of 1/16384), and at ratio 2 with input 200 its output is squashed to a
+    // peak of 0.810 without reaching full scale (tolerances proposed: 0.1 dB, 0.3 dB and 0.02).
+    using namespace oscairn_fx::dynamics;
+    auto render = [](int inl, int ratio) {
+        Plugin pl(dynamicsId);
+        auto set = [&](const char *n, double v) { pl.set(paramIdByName(pl.p, "Circuit Compressor", n), v); };
+        set("Input Level", 60 * std::log10(inl / 200.0));
+        set("Output Level", 0);
+        set("Ratio", ratio);
+        set("Attack", attackSeconds(100) * 1000);
+        set("Release", releaseSeconds(100) * 1000);
+        pl.activate(44100);
+        const size_t n = 44100 + oscairn_fx::latencySamples;
+        std::vector<float> in(n), r;
+        for (size_t i = 0; i < n; ++i)
+            in[i] = (float)(0.08891 * std::sin(2 * M_PI * 440 * i / 44100.0));
+        auto l = pl.render(in, in, r, {64}, {}, false);
+        double e = 0, peak = 0;
+        for (size_t i = 22050; i < n; ++i)
+            e += (double)l[i] * l[i], peak = std::max(peak, (double)std::abs(l[i]));
+        return std::make_pair(10 * std::log10(e / (n - 22050)), peak);
+    };
+    for (auto [inl, gain] : std::vector<std::pair<int, double>>{{8, -18.16}, {10, -12.14}, {13, -6.12}, {16, -0.10}, {20, 5.92}})
+    {
+        const double got = render(inl, 1).first + 24.08;
+        INFO("input " << inl << ": gain " << got << " dB, reference " << gain);
+        REQUIRE(std::abs(got - gain) < 0.1);
+    }
+    auto [rms, peak] = render(200, 0);
+    INFO("ratio 2, input 200: " << rms << " dBFS RMS, peak " << peak);
+    REQUIRE(std::abs(rms - -3.30) < 0.3);
+    REQUIRE(std::abs(peak - 0.810) < 0.02);
+}
+
 TEST_CASE("Circuit compressor keeps its 44.1 kHz gain at 48, 88.2, 96 and 192 kHz")
 {
     // The gain in 5 ms windows over a step down and back, compressing, within 0.1 dB of the
