@@ -489,30 +489,41 @@ void rescanIfModeChanged(Context &s)
         hp->rescan(s.host, CLAP_PARAM_RESCAN_INFO);
 }
 
-void onMainThread(const clap_plugin_t *plugin)
+// The main-thread work; false if the wanted mode could not be built, and the current effect stays.
+bool mainThreadWork(Context &s)
 {
-    auto &s = self(plugin);
     s.callbackRequested.store(false);
     delete s.retired.exchange(nullptr, std::memory_order_acq_rel);
     rescanIfModeChanged(s);
     if (!s.active)
-        return;
+        return true;
     const uint32_t want = s.wanted.load();
     auto *p = s.pending.load(std::memory_order_acquire);
     const uint32_t current = p ? p->mode : s.fxMode.load();
     if (current == want)
-        return;
+        return true;
     if (!p)
     {
         // Build only when nothing is pending, so no pointer is freed under the audio thread;
         // a change while one is pending is picked up when the audio thread asks again.
-        auto fx = build(s, want);
+        std::unique_ptr<Effect> fx;
+        try
+        {
+            fx = build(s, want);
+        }
+        catch (...)
+        {
+            return false; // out of memory or threads; the audio thread asks again
+        }
         Effect *expected = nullptr;
         if (!s.pending.compare_exchange_strong(expected, fx.get(), std::memory_order_acq_rel))
-            return;
+            return true;
         fx.release();
     }
+    return true;
 }
+
+void onMainThread(const clap_plugin_t *plugin) { mainThreadWork(self(plugin)); }
 
 // ---- extensions ----
 
@@ -723,16 +734,27 @@ bool stateLoad(const clap_plugin_t *plugin, const clap_istream_t *stream)
         parsed.emplace_back(id, v);
         at = end + 1;
     }
+    std::vector<float> was(s.values.size());
     for (size_t p = 1; p < s.cat.params.size(); ++p)
+    {
+        was[p] = s.values[p].load();
         s.values[p].store(s.cat.meta(s.cat.params[p]).defaultVal);
-    s.wanted.store(s.cat.defaultMode);
+    }
+    const uint32_t wasMode = s.wanted.exchange(s.cat.defaultMode);
     for (auto [id, v] : parsed)
         if (s.cat.paramIndex(id) >= 0)
             setValue(s, id, v);
-    if (s.active)
-        onMainThread(plugin); // build the loaded mode now, so memory has settled when this returns
-    else
+    if (!s.active)
         rescanIfModeChanged(s);
+    else if (!mainThreadWork(s)) // build the loaded mode now, so memory has settled when this returns
+    {
+        // The loaded mode could not be built: put back the state the host had.
+        for (size_t p = 1; p < s.cat.params.size(); ++p)
+            s.values[p].store(was[p]);
+        s.wanted.store(wasMode);
+        rescanIfModeChanged(s);
+        return false;
+    }
     return true;
 }
 

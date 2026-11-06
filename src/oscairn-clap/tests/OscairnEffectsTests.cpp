@@ -43,8 +43,12 @@ static void *allocate(std::size_t n, std::size_t align = 0) noexcept
     align = std::max(align, sizeof(void *));
     return std::aligned_alloc(align, (n + align - 1) / align * align + (n ? 0 : align));
 }
+// Throwing operator new fails allocations larger than this (0: never), as when memory runs out.
+static thread_local std::size_t failAllocationsOver = 0;
 static void *allocateOrAbort(std::size_t n, std::size_t align = 0)
 {
+    if (failAllocationsOver && n > failAllocationsOver)
+        throw std::bad_alloc();
     if (void *p = allocate(n, align))
         return p;
     std::abort();
@@ -679,6 +683,53 @@ TEST_CASE("Mode changes build the new effect on the main thread")
             before.context_bytes - sizeof(sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<48000>>) + r1);
     pl.render(inL, inR, r, {64});
     REQUIRE(pl.host.callbacks == 2); // nothing more to do
+}
+
+TEST_CASE("A mode that cannot be built keeps the current effect, and its state load is refused")
+{
+    std::vector<float> inL, inR, r;
+    signal(4800, inL, inR);
+    Plugin pl;
+    pl.activate();
+    auto *ctx = ext<oscairn_plugin_effect_contexts_t>(pl.p, OSCAIRN_EXT_EFFECT_CONTEXTS);
+    auto *st = ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE);
+    oscairn_effect_resources_t before, res;
+    ctx->resources(pl.p, &before);
+    Buffer original, reverb1;
+    REQUIRE(st->save(pl.p, &original.out));
+    Plugin other;
+    other.set(1, 1);
+    REQUIRE(ext<clap_plugin_state_t>(other.p, CLAP_EXT_STATE)->save(other.p, &reverb1.out));
+    const size_t r1 = sizeof(sst::effects::reverb1::Reverb1<oscairn_fx::SizedConfig<48000>>);
+
+    // A state load whose mode cannot be built: refused, and the state the host had is kept.
+    failAllocationsOver = r1 / 2;
+    bool loaded = true;
+    REQUIRE_NOTHROW(loaded = st->load(pl.p, &reverb1.in));
+    failAllocationsOver = 0;
+    REQUIRE_FALSE(loaded);
+    Buffer after;
+    REQUIRE(st->save(pl.p, &after.out));
+    REQUIRE(after.data == original.data);
+    ctx->resources(pl.p, &res);
+    REQUIRE(res.context_bytes == before.context_bytes);
+
+    // A mode change whose build fails keeps the current effect, and is built when asked again.
+    pl.render(inL, inR, r, {64}, {{100, 1, 1.0}});
+    REQUIRE(pl.host.callbacks == 1);
+    failAllocationsOver = r1 / 2;
+    REQUIRE_NOTHROW(pl.p->on_main_thread(pl.p));
+    failAllocationsOver = 0;
+    ctx->resources(pl.p, &res);
+    REQUIRE(res.context_bytes == before.context_bytes);
+    pl.render(inL, inR, r, {64});
+    REQUIRE(pl.host.callbacks == 2);
+    pl.p->on_main_thread(pl.p);
+    pl.render(inL, inR, r, {64});
+    pl.p->on_main_thread(pl.p);
+    ctx->resources(pl.p, &res);
+    REQUIRE(res.context_bytes ==
+            before.context_bytes - sizeof(sst::effects::reverb2::Reverb2<oscairn_fx::SizedConfig<48000>>) + r1);
 }
 
 TEST_CASE("Processing never allocates")
