@@ -50,7 +50,7 @@ inline double makeupDb(double inputDb, int ratio, double attackS, double release
     const double lg = (inputDb + levelOffsetDb) / 20; // log10 L
     const double base = lg > 0 ? -0.7552 / R * lg : -0.4997 * std::max(lg, std::log10(0.005));
     const double ka = attackS > 1e-3 ? std::min(1.0, std::log10(attackS / 1e-3) / 1.4996) : 0.0;
-    const double kr = releaseS > 31.25e-3 ? std::min(1.0, std::log10(releaseS / 40.7e-3)) : 0.0;
+    const double kr = releaseS > 40.7e-3 ? std::min(1.0, std::log10(releaseS / 40.7e-3)) : 0.0;
     return std::min(makeupMaxDb, 20 * (base - 0.6667 * s * ka * lg + 0.2025 * s * kr * lg) + 3.01);
 }
 
