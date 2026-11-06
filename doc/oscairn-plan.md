@@ -565,19 +565,23 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     the HPF act where the statistical model cannot put them. Not changed this round; no new hall
     hold-out was recorded. Proposed: rebuild Hall A on that structure, with its reverb-time-dependent
     gains fitted on a new grid of renders (time × room size, plus low ratio and diffusion).
-27. **Open (timed 2026-11-05): Hall A designs its coefficients in process**, at a parameter change
-    (eight lines × seven sections, three 7 × 7 solves). Sweeping reverb time, room size or high
-    ratio at 192 kHz with a change every 64-sample host block (333 µs), the worst process call
-    (best of three runs) is 15–44 µs on this Mac (one sweep of 1.1 ms, and one of 153 µs, while its
-    load average was 75–100 from other work), 35–54 µs on CI's macOS arm64 and Linux ARM64
-    runners, and 131 µs on CI's Linux x86_64 runner (230 µs under TSan, about 1 ms under ASan);
-    an EQ matched in process takes 805–872 µs. So it fits in a block everywhere unsanitized, but not
-    in the quarter block the off-thread EQs meet on x86_64. A first version of the test gated a
-    quarter block and failed in CI on x86_64 (run 42160698046); it now gates a whole block and
-    prints the quarter (old gate a quarter block, 83 µs; new gate a block, 333 µs). Fails with the
-    correction passes raised from 2 to 40 (195–197 µs locally, over a quarter; that mutation is
-    not checked against the whole-block gate). Proposed: move the design to the engine's worker as
-    the EQs do (not done this round).
+27. **Decided (Jacob, 2026-11-05): Hall A's coefficients are designed off the audio thread. Done
+    (2026-11-06):** the loop filters' design runs on the engine's worker with the EQs' exchange
+    (newest request only, generation-tagged result taken at a block boundary, never over a newer
+    one) and a 2 ms crossfade from the previous filters; the output level now ramps over the same
+    2 ms instead of jumping. In process only for the first design, offline, or without a worker.
+    The timing test gates a quarter block again (old gate a block, 333 µs; new gate a quarter, 83
+    µs): worst process call 9.7-12.3 µs on this Mac while its load average was about 200 from
+    other work. Mutation: with the correction passes raised from 2 to 40 the test passes off the
+    thread (8.2-8.6 µs) and fails in process (408 µs); in process with 2 passes it was 15-44 µs
+    here, under the quarter block, so only CI's x86_64 runner (131 µs before) would catch that
+    undo. A click test (offline, high ratio 1.0 to 0.1 and back, reverb time 18 to 0.3 s, 44.1 and
+    192 kHz) gates the largest output above 8 kHz in the 50 ms after the change below -60 dBFS
+    (proposed after seeing the results): -62.7 to -77.1 dBFS; without the crossfade -22 to -28
+    dBFS, without the level ramp about -18 dBFS. Reverb plugin
+    version 0.3.0 (memory per Hall A context 146,680 bytes at 44.1 kHz, the designer's exchange
+    included). Not tested: that a result designed on the worker equals the in-process design
+    (both run the same function on the same request).
 
 ## 14. Risks and not verified
 
@@ -1422,7 +1426,7 @@ by default), the five-band and three-band EQs with a gain set, and the delay, in
 | `oscairn.ui` hints and roles | Met: Mode first, the mode's parameters in order, `mix` on a parameter named Mix (Reverb 1 and 2, the delay), or on Output Level in a mode without one (five-band and two-band EQs; Oscairn `cf540a9` otherwise takes the first continuous parameter) | "Editor hints…" (fails without the hidden flag or the rescan, or without the Output Level role) |
 | Render mode (`clap.render`, Oscairn `9bfc302`) | Met: set once after init, before state load and activation; the first set, or activation without one, fixes the mode for the instance's lifetime; offline matches EQs in process | "The render mode is set once and kept for the instance's lifetime" (fails when a later set may change the mode) |
 | A mode that changes which controls matter hides the others and rescans info | Met | "Editor hints…" |
-| Real-time safety: no allocation, lock, file access or waiting in `process` | Met; the EQs' matching moved off the audio thread (decision 19) | "Processing never allocates" (including EQ changes at 48 kHz); "Rate matching runs off the audio thread" (worst call 1.8–5.2 µs at 192 kHz in the runs seen); ASan/UBSan and TSan in CI |
+| Real-time safety: no allocation, lock, file access or waiting in `process` | Met; the EQs' matching (decision 19) and Hall A's loop-filter design (decision 27) run off the audio thread | "Processing never allocates" (including EQ changes at 48 kHz); "Rate matching runs off the audio thread" (worst call 1.8–5.2 µs at 192 kHz in the runs seen); ASan/UBSan and TSan in CI |
 | `CLAP_PROCESS_SLEEP` when idle | Met; a delay sleeps only after its longest gap | "The tail ends, and the plugin then sleeps"; "Tempo cross delay keeps playing between its echoes" |
 | `NOTE_CHOKE`, per-note volume, pitch bend, CLAP notes | Not applicable (no note input) | — |
 | Effect contexts with tails (RFC 0007) | Met: up to 64 contexts per engine, `resources` with tail activity | "Effect contexts are independent and share one engine" |
