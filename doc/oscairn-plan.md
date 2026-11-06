@@ -552,12 +552,12 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     published build should get a new version, and be signed (`oscairn-sign`) with a key of Jacob's.
     Since 2026-11-05 a plugin's version is bumped when its sound or memory changes (Reverb 0.2.0
     with Hall A); signing is still open.
-25. **Done (2026-11-05): the circuit-style compressor** is built (section 15, "Circuit-style
-    compressor"). The steps' puzzle was a makeup gain set by the input level, ratio, attack and
-    release settings. It ships as a first version: a fresh hold-out (fx25) holds below threshold
-    and at ratios 4–20 with a sine, and misses by up to 1.9 dB at ratio 2 and with a saw (known
-    difference 26). Open: whether that is enough for now, or the gain law and detector input are
-    refined first.
+25. **Decided (Jacob, 2026-11-05): fix the circuit-style compressor before shipping it. Done
+    (2026-11-06):** rebuilt on the reference's structure (section 15, "Circuit compressor
+    rebuilt on the reference's structure"). A fresh hold-out (fx26, 20 random settings, four
+    sources, never used for fitting) is within 0.154 dB RMS per render, every 5 ms window within
+    0.29 dB, so the ±1 dB gate is met everywhere it was missed (ratio 2, saw, near full scale, low
+    inputs). The side-chain port is still not built (known difference 29).
 26. **Open: Hall A ships with a hold-out that fails its decay gate** (section 15, "Hall reverb"):
     level and onset hold, decay times per band do not generalise to random settings. The
     reference's hall structure is now known well enough to say why (section 15, "Hall A: what the
@@ -1288,6 +1288,44 @@ which for a steady sine can land whole periods off and put errors of up to 12 dB
 measurement repository's `fx/dynamics.py` now aligns on the whole signal (`f348568`). fx21–fx23's
 earlier conclusions were steady-state levels and are unaffected.
 
+### Circuit compressor rebuilt on the reference's structure (2026-11-06)
+
+Decision 25. The first version's misses came from a structure the fit could not reach. The
+reference's structure (read, then implemented independently; curves fitted, not copied) and what
+each part explains:
+
+| Part | What it explains |
+| --- | --- |
+| Input level held to steps of 1/16384 | The 6.02 dB steps at input settings of 25 or less (known difference 27) |
+| First-order shelves (-3 dB at 2 kHz, then +3 dB at 8 kHz, its direct part clipped at full scale), a 0.43 Hz DC block, clipped again | Part of the saw's difference: the detector and the gain see a tilted spectrum |
+| Detector: the louder channel after a first-order 180 Hz high-pass, two cascaded followers that rise at the attack rate and fall at the release rate, each moving 2 / N per sample (N the displayed time in 44.1 kHz samples) | The fitted 0.4367 and 0.4843 time scales were these factors of 1/2 seen through the wrong gain law |
+| Gain curve per ratio, soft knee at -48.7 / -44.5 / -43.4 / -43.0 / -42.8 dB of full scale, slopes 0.495 / 0.746 / 0.871 / 0.913 / 0.947 (fitted to the reference's curves within 0.1 dB above the knee, 0.3 dB in it); its gain c is at most 1/2, and the signal is c (g x + (1/2 - g) lp(x)) with g = sqrt(c / 2) and lp a 15 kHz Butterworth low-pass | The ratio-dependent knee and slopes (the first version's flattening slopes K were the saturation below seen as compression) |
+| A saturating curve, tanh of a quartic, slope 4 at zero, flat at 1 from 0.6 (within 0.002 of the reference's) | Ratio 2's squash near full scale (known difference 28) and the loud saw's steps |
+| Output level times 8, then the makeup gain (the law of the first version, now with the ratios 2, 4, 8, 12, 20, 0.75 / R, -0.66, 0.2, in steps of 1/2048 and at most 32767/2048), each stage clipped at full scale | The settings-dependent gain below threshold |
+| The reference's level after the effect is 7.91 dB above its input's (one constant, fitted on all 172 fitting renders); the effect runs 7.91 dB down, the output is raised again and clipped at full scale | Why the threshold seemed 10 dB away and the clipping order seemed reversed |
+
+With only that one constant fitted to renders, the structure reproduces the 172 fitting renders
+(fx7, fx13 statics; fx21-fx23 steps) within 0.212 dB RMS per render (median 0.052), the 80 statics
+within 0.005 dB. The plugin's own output against the reference (`ours.py`, ours aligned to the
+reference by correlation):
+
+| Hold-out | Renders | Median RMS | Worst RMS | Worst 5 ms window | Within ±1 dB |
+| --- | --- | --- | --- | --- | --- |
+| fx25 (the old hold-out; this model never fitted on it) | 18 | 0.060 dB | 0.181 dB | 0.29 dB | 18 / 18 |
+| fx26 (fresh, seed 2626: sine steps of 13 and 6 dB and a saw at A4, a saw at A2; attack and release over 0..200; recorded after the model was fixed) | 19 (a 20th, input 1, is silent in both) | 0.069 dB | 0.154 dB | 0.29 dB | 19 / 19 |
+
+(Old numbers, fx25 against the first version: median 0.32 dB, worst 1.88 dB RMS, peaks of 7.4 dB.
+This round's analysis first showed spikes of the same size at the steps when it aligned both outputs
+to the dry render separately; aligning ours to the reference directly removes them, so part of the
+old peaks may have been the analysis. Windows are reported now.)
+
+Plugin tests: the steady gains (unchanged tolerances; now within 0.005 dB below threshold and 0.12 dB compressing), the
+low input steps (inputs 8-20 within 0.1 dB) and ratio 2 at input 200 (-3.29 dBFS RMS, peak 0.810;
+the test fails on the first version), and the rate test (worst 0.064 dB at 192 kHz, gate 0.1 dB;
+filters keep the 44.1 kHz design's bilinear corners, followers their time constants). Memory 1,096
+bytes per context, no buffers. Dynamics plugin version 0.2.0. Not built: the side-chain port (the
+reference's side-chain variant is a separate design; known difference 29).
+
 ### Hall A: what the hold-out failures point to (2026-11-05)
 
 Reference behaviour of the hall (its structure; only partly checked against renders, as noted):
@@ -1350,9 +1388,9 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 23 | Hall A decay times on settings away from the measured grid | Fresh hold-out fx24 (12 random settings): only 25–58% of renders within 10% per band; mid bands mostly 10–30% short where the low ratio is 1.0 or more or the diffusion low; 125–250 Hz far off where the HPF removes those bands. On the fitting grid fx19: 88–97% within 10% from 250 Hz to 8 kHz. At other rates the band energies at 8 kHz differ from 44.1 kHz's by up to 1.34 dB (the bilinear filters' warping) | The model adds per-setting tables and treats low ratio, diffusion and HPF as not changing the decay, which the hold-out contradicts; room size 0 and the shortest times are a different regime | Unresolved; next: a grid over low ratio × diffusion × reverb time, and the HPF's effect on the low bands | fx19 `r_*`, fx24 `rho*`; `gate_rev.py`, `rsum.py` | `effects/HallReverb.h` |
 | 24 | Hall reverb: a burst at 42–53 ms in some reference renders only | Up to −7 dB of the tail's peak (fx19 `r_h1`), absent from renders of identical settings (`r_h8` against `r_base2`) | Unknown: not repeatable, so possibly the recorder | Not modelled; onsets are measured outside 42–58 ms | fx19, fx24; `fx/reverb.py` `main_onset_ms` | — |
 | 25 | Hall A's early reflections, echo density and modulation | Not measured; the mode matches decay times, level and onset only. The reference has four early-reflection taps and no modulation (section 15, "Hall A: what the hold-out failures point to") | A statistical design | Deliberate for the first version | — | `effects/HallReverb.h` |
-| 26 | Circuit compressor compressing at ratio 2, and with harmonic-rich sources | Fresh hold-out fx25: ratio 2 1.13 and 1.88 dB rms; saw 0.71–1.52 dB rms, peaks up to 7.4 dB at the level steps; fitting renders fx22 `c_q0_*` up to 1.2 dB | The gain law is fitted as one soft knee per ratio setting; the reference's curve shape at ratio 2 and anything filtering its detector input are not modelled | Unresolved; next: static curves at ratio 2 in fine input steps, and a two-tone source for the detector input | fx25 `cho02`, `cho11`, `cho13`, `cho14`, `cho16`; `gate25.py`, `ours25.py` | `effects/CircuitCompressor.h` |
-| 27 | Circuit compressor at input settings of 25 or less | The reference's gain moves in 6.02 dB steps there (fx13 inputs 10, 13, 20, 25: −12.14, −6.12, +5.92, +11.94 dB); up to 0.66 dB off (input 13) | The reference's low input gains look quantized; not modelled | Unresolved | fx13 `st_*_in10`–`in25` | `CircuitCompressor::update` |
-| 28 | Circuit compressor near full scale at ratio 2 | fx7 ratio 2 at input 180–200, output 200: the reference's sine is squashed to a crest of 1.47 dB without reaching full scale; the model is up to 3.2 dB louder | An output stage not found | Unresolved | fx7 `st_r0_in180`–`in200` | `CircuitCompressor::processBlock` |
+| 26 | (Resolved 2026-11-06.) Circuit compressor compressing at ratio 2, and with harmonic-rich sources | Fresh hold-out fx26 within 0.154 dB RMS, every 5 ms window within 0.29 dB (was fx25 1.88 dB RMS, peaks 7.4 dB) | The structure was not modelled; rebuilt (section 15) | Resolved | fx25, fx26; `ours.py` | `effects/CircuitCompressor.h` |
+| 27 | (Resolved 2026-11-06.) Circuit compressor at input settings of 25 or less | Inputs 8-20 within 0.06 dB (plugin test) | The input level is held to steps of 1/16384 | Resolved | fx13 `st_*_in8`-`in25` | `heldLevel` |
+| 28 | (Resolved 2026-11-06.) Circuit compressor near full scale at ratio 2 | fx7 `st_r0_in200`: -3.29 dBFS RMS against -3.30, peak 0.810 | A saturating curve and staged clipping | Resolved | fx7 `st_r0_in180`-`in200` | `saturate`, `processBlock` |
 | 29 | Circuit compressor has no side-chain input | The reference takes a side-chain source (parts, A/D, master); its side-chain level changed nothing without a source (fx23) | Not built in the first version; the plugin's port layout will change when it is | Deliberate for now | fx23 `s_sc127` | `OscairnEffects.cpp` (ports) |
 
 ## 17. Oscairn porting checklist (decision 22)
