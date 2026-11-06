@@ -69,6 +69,7 @@ struct Line
     }
     void setLength(double samples)
     {
+        samples = std::max(samples, 1.0); // below a sample the all-pass's pole would leave the unit circle
         if (std::abs(samples - std::round(samples)) < 1e-6) // whole samples (44.1 kHz) stay exact
             samples = std::round(samples);
         frac = samples != std::floor(samples);

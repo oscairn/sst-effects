@@ -1987,6 +1987,29 @@ TEST_CASE("Tempo cross delay keeps playing between its echoes")
     REQUIRE(firstSleep * 64 > lastSound);
 }
 
+TEST_CASE("Tempo cross delay stays stable at its shortest time at every rate")
+{
+    // A 1/32 triplet with lag -63 ms rounds to the shortest line, one 44.1 kHz sample. At other
+    // rates the damping filter's 32-sample delay comes off the line, which must stay at least a
+    // sample long: shorter, the fractional all-pass's pole leaves the unit circle (known
+    // difference 31). Full wet, no feedback: the impulse must come back once, bounded.
+    for (double rate : {44100.0, 48000.0, 96000.0, 192000.0})
+    {
+        std::vector<float> r;
+        auto l = delayImpulse(rate, {{"Time L>R", 0}, {"Time R>L", 0}, {"Lag", -63}, {"Feedback", 0}, {"Mix", 63}, {"Input", 0}}, r, 0.5);
+        double peak = 0, energy = 0;
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            REQUIRE((std::isfinite(l[i]) && std::isfinite(r[i])));
+            peak = std::max({peak, (double)std::abs(l[i]), (double)std::abs(r[i])});
+            energy += (double)r[i] * r[i];
+        }
+        INFO("rate " << rate);
+        REQUIRE(peak <= 1.0 + 1e-6);
+        REQUIRE(energy == Approx(1.0).epsilon(1e-3)); // an all-pass: the echo keeps the impulse's energy
+    }
+}
+
 // ---- Converter frequency scales (decision 17) ----
 #include "converter/FrequencyScales.h"
 #include <chrono>
