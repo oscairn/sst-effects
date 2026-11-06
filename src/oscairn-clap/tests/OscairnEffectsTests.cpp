@@ -2252,7 +2252,7 @@ TEST_CASE("Circuit compressor: low input settings, and ratio 2 near full scale (
     // A steady 440 Hz sine at -24.08 dBFS RMS, output 200, attack and release 100, as in fx7 and
     // fx13. The reference's gain moves in 6.02 dB steps at the lowest input settings (its input
     // level is held to steps of 1/16384), and at ratio 2 with input 200 its output is squashed to a
-    // peak of 0.810 without reaching full scale (tolerances proposed: 0.1 dB, 0.3 dB and 0.02).
+    // peak of 0.810 without reaching full scale (tolerances 0.1 dB, 0.3 dB and 0.02, accepted).
     using namespace oscairn_fx::dynamics;
     auto render = [](int inl, int ratio) {
         Plugin pl(dynamicsId);
@@ -2309,7 +2309,7 @@ TEST_CASE("Hall A swaps its loop filters without clicks")
     // A new design replaces the loop filters with a 2 ms crossfade from the previous ones. The
     // click is the largest output above 8 kHz (a fourth-order high-pass) in the 50 ms after a high
     // ratio or reverb time change, for a 220 Hz + 1 kHz input with nothing up there; it must stay
-    // below -60 dBFS (proposed). Offline, so the design lands at the same block every run.
+    // below -60 dBFS (accepted). Offline, so the design lands at the same block every run.
     struct Change
     {
         const char *name;

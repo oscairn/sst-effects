@@ -576,11 +576,12 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     here, under the quarter block, so only CI's x86_64 runner (131 µs before) would catch that
     undo. A click test (offline, high ratio 1.0 to 0.1 and back, reverb time 18 to 0.3 s, 44.1 and
     192 kHz) gates the largest output above 8 kHz in the 50 ms after the change below -60 dBFS
-    (proposed after seeing the results): -62.7 to -77.1 dBFS; without the crossfade -22 to -28
+    (set after seeing the results; accepted by Jacob, 2026-11-06): -62.7 to -77.1 dBFS; without the crossfade -22 to -28
     dBFS, without the level ramp about -18 dBFS. Reverb plugin
     version 0.3.0 (memory per Hall A context 146,680 bytes at 44.1 kHz, the designer's exchange
     included). Not tested: that a result designed on the worker equals the in-process design
-    (both run the same function on the same request).
+    (both run the same function on the same request). Jacob accepted (2026-11-06) leaving CI's
+    macOS timing margin as it is (worst call 60.8 µs against the 83 µs gate in run 42172719359).
 
 ## 14. Risks and not verified
 
@@ -1324,7 +1325,8 @@ old peaks may have been the analysis. Windows are reported now.)
 
 Plugin tests: the steady gains (unchanged tolerances; now within 0.005 dB below threshold and 0.12 dB compressing), the
 low input steps (inputs 8-20 within 0.1 dB) and ratio 2 at input 200 (-3.29 dBFS RMS, peak 0.810;
-the test fails on the first version), and the rate test (worst 0.064 dB at 192 kHz, gate 0.1 dB;
+the test fails on the first version; these three tolerances, 0.1 dB, 0.3 dB and 0.02, accepted by
+Jacob 2026-11-06), and the rate test (worst 0.064 dB at 192 kHz, gate 0.1 dB;
 filters keep the 44.1 kHz design's bilinear corners, followers their time constants). Memory 1,096
 bytes per context, no buffers. Dynamics plugin version 0.2.0. Not built: the side-chain port (the
 reference's side-chain variant is a separate design; known difference 29).
