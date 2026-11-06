@@ -212,7 +212,7 @@ const std::vector<Category> &categories()
     static const std::vector<Category> all = [] {
         std::vector<Category> c;
         Category reverb{{CLAP_VERSION_INIT, "org.oscairn.effects.reverb", "Oscairn FX Reverb",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.0",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.3.0",
                          "Reverbs, one mode per algorithm", reverbFeatures},
                         {},
                         2,

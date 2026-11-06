@@ -2304,14 +2304,60 @@ TEST_CASE("Circuit compressor keeps its 44.1 kHz gain at 48, 88.2, 96 and 192 kH
     }
 }
 
-TEST_CASE("Hall A designs its coefficients in process well within a block")
+TEST_CASE("Hall A swaps its loop filters without clicks")
 {
-    // Decision 27: Hall A designs its loop filters at a parameter change, in process. Sweeping
-    // reverb time, room size and high ratio at 192 kHz with one change per 64-sample host block
-    // (333 us), the worst process call must fit in the block (unsanitized builds; the best of three
-    // runs, against preemption). The off-thread EQs meet a quarter of a block; Hall A does on Apple
-    // and ARM64 Linux (15-54 us) but not on the x86_64 CI runner (131 us), so a quarter block is
-    // printed, not gated, until the design moves off the audio thread.
+    // A new design replaces the loop filters with a 2 ms crossfade from the previous ones. The
+    // click is the largest output above 8 kHz (a fourth-order high-pass) in the 50 ms after a high
+    // ratio or reverb time change, for a 220 Hz + 1 kHz input with nothing up there; it must stay
+    // below -60 dBFS (proposed). Offline, so the design lands at the same block every run.
+    struct Change
+    {
+        const char *name;
+        double from, to;
+    };
+    for (auto c : {Change{"High Ratio", 1.0, 0.1}, Change{"High Ratio", 0.1, 1.0}, Change{"Reverb Time", 18, 0.3}})
+        for (double rate : {44100.0, 192000.0})
+        {
+            Plugin pl(reverbId);
+            setOffline(pl);
+            pl.set(1, 3);
+            pl.set(paramIdByName(pl.p, "Hall A", "LPF Cutoff"), 20000);
+            pl.set(paramIdByName(pl.p, "Hall A", c.name), c.from);
+            pl.activate(rate);
+            const size_t n = (size_t)(rate * 1.6), at = (size_t)(rate * 1.5) + 7;
+            std::vector<float> in(n), r;
+            for (size_t i = 0; i < n; ++i)
+                in[i] = 0.25f * (float)(std::sin(2 * M_PI * 220 * i / rate) + std::sin(2 * M_PI * 1000 * i / rate));
+            auto out = pl.render(in, in, r, {64}, {{(uint32_t)at, paramIdByName(pl.p, "Hall A", c.name), c.to}}, false);
+            double peak = 0, z[2][2]{};
+            const double K = std::tan(M_PI * 8000 / rate);
+            for (size_t i = 0; i < n; ++i)
+            {
+                double x = out[i];
+                for (int s = 0; s < 2; ++s)
+                {
+                    const double q = s ? 1.3065630 : 0.5411961, norm = 1 / (1 + K / q + K * K);
+                    const double b0 = norm, b1 = -2 * norm, a1 = 2 * (K * K - 1) * norm, a2 = (1 - K / q + K * K) * norm;
+                    const double y = b0 * x + z[s][0];
+                    z[s][0] = b1 * x - a1 * y + z[s][1];
+                    z[s][1] = b0 * x - a2 * y;
+                    x = y;
+                }
+                if (i >= at && i < at + (size_t)(0.05 * rate))
+                    peak = std::max(peak, std::abs(x));
+            }
+            const double db = 20 * std::log10(peak + 1e-12);
+            std::printf("Hall A click, %s %.1f to %.1f at %.0f Hz: %.1f dBFS\n", c.name, c.from, c.to, rate, db);
+            CHECK(db < -60);
+        }
+}
+
+TEST_CASE("Hall A designs its loop filters off the audio thread")
+{
+    // Decision 27: Hall A's loop filters are designed on the engine's worker. Sweeping reverb
+    // time, room size and high ratio at 192 kHz with one change per 64-sample host block (333 us),
+    // the worst process call must stay under a quarter of the block, as the off-thread EQs' does
+    // (unsanitized builds; the best of three runs, against preemption).
     const double rate = 192000;
     const uint32_t frames = 64;
     const double blockUs = 1e6 * frames / rate;
@@ -2337,10 +2383,9 @@ TEST_CASE("Hall A designs its coefficients in process well within a block")
             }
             bestWorst = std::min(bestWorst, d.worstUs);
         }
-        std::printf("Hall A %s sweep at 192 kHz: worst process call %.1f us (block %.1f us)%s\n", name, bestWorst, blockUs,
-                    bestWorst < blockUs / 4 ? "" : ", over a quarter block");
+        std::printf("Hall A %s sweep at 192 kHz: worst process call %.1f us (block %.1f us)\n", name, bestWorst, blockUs);
 #ifndef OSCAIRN_SANITIZED
-        REQUIRE(bestWorst < blockUs);
+        REQUIRE(bestWorst < blockUs / 4);
 #endif
     }
 }

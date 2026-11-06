@@ -13,6 +13,11 @@
  *    offsets for the time, diffusion and decay parameters (fx19).
  * Each line's loop filter is a seven-band graphic EQ giving that band's decay time; everything is
  * designed in seconds and hertz, so the statistics are the same at every rate.
+ * The loop filters' design (eight lines of seven sections and three 7 x 7 solves each) runs on the
+ * engine's worker thread (plan, decision 27), as the EQs' matching does: a change posts the
+ * settings, the previous filters keep playing until the design arrives, and it is swapped in at a
+ * block boundary with a 2 ms crossfade from the previous filters; a design is never applied over a
+ * newer one. Without a worker, or offline, and for the first design, it runs in process.
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_HALLREVERB_H
 #define OSCAIRN_CLAP_EFFECTS_HALLREVERB_H
@@ -20,9 +25,14 @@
 #include "sst/effects/EffectCore.h"
 #include "sst/basic-blocks/params/ParamMetadata.h"
 
+#include "../OffThread.h"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <memory>
+#include <thread>
 #include <vector>
 
 namespace oscairn_fx::hall
@@ -164,6 +174,143 @@ inline void bandSection(Section &s, int k, double g, double rate)
     s.b0 = b[0] / a[0], s.b1 = b[1] / a[0], s.b2 = b[2] / a[0], s.a1 = a[1] / a[0], s.a2 = a[2] / a[0];
 }
 
+struct LoopRequest
+{
+    double time{0}, size{0}, highRatio{0}, lowRatio{0};
+    uint64_t gen{0};
+};
+struct LoopDesign
+{
+    std::array<std::array<Section, bands>, lines> eq{};
+    std::array<double, bands> decay{};
+    uint64_t gen{0};
+};
+
+// Solves m * g = target (Gaussian elimination, partial pivoting).
+inline void solveBands(const double (&m)[bands][bands], const double *target, double *g)
+{
+    double M[bands][bands + 1];
+    for (int r = 0; r < bands; ++r)
+    {
+        for (int c = 0; c < bands; ++c)
+            M[r][c] = m[r][c];
+        M[r][bands] = target[r];
+    }
+    for (int c = 0; c < bands; ++c)
+    {
+        int p = c;
+        for (int r = c + 1; r < bands; ++r)
+            if (std::abs(M[r][c]) > std::abs(M[p][c]))
+                p = r;
+        for (int k = 0; k <= bands; ++k)
+            std::swap(M[c][k], M[p][k]);
+        for (int r = 0; r < bands; ++r)
+            if (r != c)
+            {
+                const double f = M[r][c] / M[c][c];
+                for (int k = c; k <= bands; ++k)
+                    M[r][k] -= f * M[c][k];
+            }
+    }
+    for (int r = 0; r < bands; ++r)
+        g[r] = M[r][bands] / M[r][r];
+}
+
+// The line length (samples) for line j at a room size.
+inline int lineSamples(int j, double size, double rate) { return std::max(1, (int)std::lround(lineSeconds[j] * lineScale(size) * rate)); }
+
+// Designs every line's graphic EQ for its band decay times (any thread; no allocation).
+inline void designLoops(const double (&interaction)[bands][bands], double rate, const LoopRequest &q, LoopDesign &out)
+{
+    out.decay = decayTimes(q.time, q.size, q.highRatio, q.lowRatio);
+    for (int j = 0; j < lines; ++j)
+    {
+        const double sec = lineSamples(j, q.size, rate) / rate;
+        double target[bands], g[bands], d[bands];
+        for (int b = 0; b < bands; ++b)
+            target[b] = -60 * sec / out.decay[b];
+        solveBands(interaction, target, g);
+        for (int it = 0; it < 2; ++it) // correct for the bands' interaction at these gains
+        {
+            for (int b = 0; b < bands; ++b)
+                bandSection(out.eq[j][b], b, g[b], rate);
+            for (int b = 0; b < bands; ++b)
+            {
+                double sum = 0;
+                for (int k = 0; k < bands; ++k)
+                    sum += out.eq[j][k].db(bandHz[b], rate);
+                d[b] = target[b] - sum;
+            }
+            double dg[bands];
+            solveBands(interaction, d, dg);
+            for (int b = 0; b < bands; ++b)
+                g[b] += dg[b];
+        }
+        for (int b = 0; b < bands; ++b)
+            bandSection(out.eq[j][b], b, g[b], rate);
+    }
+    out.gen = q.gen;
+}
+
+// The worker side: takes the newest request and publishes its design.
+class LoopDesigner final : public Job
+{
+  public:
+    LoopDesigner(const double (&m)[bands][bands], double r, Worker *w, const std::atomic<bool> *o) : rate(r), worker(w), offline(o)
+    {
+        for (int i = 0; i < bands; ++i)
+            for (int k = 0; k < bands; ++k)
+                interaction[i][k] = m[i][k];
+        if (worker)
+            worker->add(this); // main thread, at construction
+    }
+    ~LoopDesigner()
+    {
+        if (worker)
+            worker->remove(this);
+    }
+    bool service() noexcept override
+    {
+        if (!requests.fresh() || busy.exchange(true, std::memory_order_acquire))
+            return false;
+        bool did = false;
+        if (const LoopRequest *q = requests.read())
+        {
+            designLoops(interaction, rate, *q, results.writeSlot());
+            results.publish();
+            did = true;
+        }
+        busy.store(false, std::memory_order_release);
+        return did;
+    }
+    // Designs in this thread, waiting for the worker if it is designing.
+    void designHere(const LoopRequest &q)
+    {
+        while (busy.exchange(true, std::memory_order_acquire))
+            std::this_thread::yield();
+        designLoops(interaction, rate, q, results.writeSlot());
+        results.publish();
+        busy.store(false, std::memory_order_release);
+    }
+    bool async() const { return worker && !(offline && offline->load(std::memory_order_relaxed)); }
+    void post(const LoopRequest &q)
+    {
+        requests.writeSlot() = q;
+        requests.publish();
+        worker->wake();
+    }
+
+    TripleBuffer<LoopRequest> requests; // audio thread -> worker
+    TripleBuffer<LoopDesign> results;   // whoever holds busy -> audio thread
+    std::atomic<bool> busy{false};
+
+  private:
+    double interaction[bands][bands]{};
+    double rate;
+    Worker *worker;
+    const std::atomic<bool> *offline;
+};
+
 template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTemplateBase<FXConfig>
 {
     enum params
@@ -201,6 +348,11 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
             for (int j = 0; j < bands; ++j)
                 interaction[j][k] = s.db(bandHz[j], rate) / -3;
         }
+        fadeLen = std::max(1, (int)std::lround(0.002 * rate));
+        if constexpr (requires { s->worker; s->offline; })
+            designer = std::make_unique<LoopDesigner>(interaction, rate, s->worker, s->offline);
+        else
+            designer = std::make_unique<LoopDesigner>(interaction, rate, nullptr, nullptr);
     }
     static int samples(double s, double rate) { return (int)std::ceil(s * rate); }
     static size_t heapBytesAt(double rate)
@@ -210,7 +362,7 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
             n += (size_t)samples(l, rate) + 2;
         for (double a : allpassSeconds)
             n += (size_t)samples(a, rate) + 2;
-        return n * sizeof(float);
+        return n * sizeof(float) + sizeof(LoopDesigner);
     }
     size_t heapBytes() const
     {
@@ -219,7 +371,7 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
             n += l.size();
         for (auto &a : ap)
             n += a.size();
-        return n * sizeof(float);
+        return n * sizeof(float) + (designer ? sizeof(LoopDesigner) : 0);
     }
     double quietSeconds() const { return 0.1 + onset; }
 
@@ -233,6 +385,7 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
         for (auto &l : eq)
             for (auto &s : l)
                 s.z1 = s.z2 = 0;
+        fade = 0;
         hpState = lpState = hpX = lpX = 0;
         last.fill(NAN);
         update();
@@ -244,6 +397,9 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
+        if (fade == 0 && designer->results.fresh())
+            if (const LoopDesign *d = designer->results.read(); d && d->gen > applied)
+                apply(*d, true);
         const int preN = (int)pre.size();
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
@@ -287,12 +443,24 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
                 int r = lineW[j] - lineLen[j];
                 if (r < 0)
                     r += (int)b.size();
-                double s = b[(size_t)r];
+                const double in = b[(size_t)r];
+                double s = in;
                 for (auto &sec : eq[j])
                     s = sec.run(s);
+                if (fade > 0)
+                {
+                    double o = in;
+                    for (auto &sec : eqOld[j])
+                        o = sec.run(o);
+                    s += (double)fade / fadeLen * (o - s);
+                }
                 v[j] = s;
             }
+            if (fade > 0)
+                --fade;
             const double l = v[0] - v[2] + v[4] - v[6], r = v[1] - v[3] + v[5] - v[7];
+            if (gainLeft > 0)
+                gain += gainStep, --gainLeft;
             L[i] = (float)(gain * (l + early));
             R[i] = (float)(gain * (r + early));
             // eight-point Hadamard mixing, normalized
@@ -343,40 +511,37 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
     int preW{0}, lineW[lines]{}, apW[4]{}, lineLen[lines]{}, apLen[4]{};
     int earlyDelay{1}, netDelay{1};
     double interaction[bands][bands]{};
-    std::array<std::array<Section, bands>, lines> eq{};
+    std::array<std::array<Section, bands>, lines> eq{}, eqOld{};
+    std::unique_ptr<LoopDesigner> designer;
+    LoopRequest posted{};
+    bool have{false};
+    uint64_t applied{0};
+    int fade{0}, fadeLen{1}, gainLeft{0};
+    bool gainSet{false};
+    double gainStep{0};
     double apG{0.5}, gain{0}, onset{0};
     bool hpOn{false}, lpOn{false};
     double hpA{0}, hpR{0}, hpState{0}, hpX{0}, lpB{0}, lpA1{0}, lpState{0}, lpX{0};
     std::array<float, numParamsEnum> last{};
 
-    // Solves interaction * g = target (Gaussian elimination, partial pivoting).
-    void solve(const double *target, double *g) const
+    // A design's coefficients, keeping the sections' states; with a crossfade from the filters
+    // that played until now.
+    void apply(const LoopDesign &d, bool crossfade)
     {
-        double M[bands][bands + 1];
-        for (int r = 0; r < bands; ++r)
+        applied = d.gen;
+        if (crossfade)
         {
-            for (int c = 0; c < bands; ++c)
-                M[r][c] = interaction[r][c];
-            M[r][bands] = target[r];
+            eqOld = eq;
+            fade = fadeLen;
         }
-        for (int c = 0; c < bands; ++c)
-        {
-            int p = c;
-            for (int r = c + 1; r < bands; ++r)
-                if (std::abs(M[r][c]) > std::abs(M[p][c]))
-                    p = r;
-            for (int k = 0; k <= bands; ++k)
-                std::swap(M[c][k], M[p][k]);
-            for (int r = 0; r < bands; ++r)
-                if (r != c)
-                {
-                    const double m = M[r][c] / M[c][c];
-                    for (int k = c; k <= bands; ++k)
-                        M[r][k] -= m * M[c][k];
-                }
-        }
-        for (int r = 0; r < bands; ++r)
-            g[r] = M[r][bands] / M[r][r];
+        for (int j = 0; j < lines; ++j)
+            for (int b = 0; b < bands; ++b)
+            {
+                auto &x = eq[j][b];
+                const auto &y = d.eq[j][b];
+                x.b0 = y.b0, x.b1 = y.b1, x.b2 = y.b2, x.a1 = y.a1, x.a2 = y.a2;
+            }
+        designedDecay = d.decay;
     }
 
     void update()
@@ -392,34 +557,25 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
             return;
         const double rate = this->sampleRate();
         const double size = std::clamp((double)std::lround(last[roomSize]), 0.0, 31.0);
-        designedDecay = decayTimes(last[time], size, last[highRatio], last[lowRatio]);
-        const double scale = lineScale(size);
         for (int j = 0; j < lines; ++j)
+            lineLen[j] = lineSamples(j, size, rate);
+        LoopRequest q{last[time], size, last[highRatio], last[lowRatio], 0};
+        if (!have || q.time != posted.time || q.size != posted.size || q.highRatio != posted.highRatio || q.lowRatio != posted.lowRatio)
         {
-            lineLen[j] = std::max(1, (int)std::lround(lineSeconds[j] * scale * rate));
-            const double sec = lineLen[j] / rate;
-            double target[bands], g[bands], d[bands];
-            for (int b = 0; b < bands; ++b)
-                target[b] = -60 * sec / designedDecay[b];
-            solve(target, g);
-            for (int it = 0; it < 2; ++it) // correct for the bands' interaction at these gains
+            q.gen = posted.gen + 1;
+            posted = q;
+            if (!have)
             {
-                for (int b = 0; b < bands; ++b)
-                    bandSection(eq[j][b], b, g[b], rate);
-                for (int b = 0; b < bands; ++b)
-                {
-                    double sum = 0;
-                    for (int k = 0; k < bands; ++k)
-                        sum += eq[j][k].db(bandHz[b], rate);
-                    d[b] = target[b] - sum;
-                }
-                double dg[bands];
-                solve(d, dg);
-                for (int b = 0; b < bands; ++b)
-                    g[b] += dg[b];
+                // the first design: in process, applied at once without a crossfade
+                have = true;
+                designer->designHere(q);
+                if (const LoopDesign *d = designer->results.read())
+                    apply(*d, false);
             }
-            for (int b = 0; b < bands; ++b)
-                bandSection(eq[j][b], b, g[b], rate);
+            else if (designer->async())
+                designer->post(q);
+            else
+                designer->designHere(q); // applied by processBlock at this block boundary
         }
         for (int k = 0; k < 4; ++k)
             apLen[k] = std::max(1, (int)std::lround(allpassSeconds[k] * rate));
@@ -432,7 +588,11 @@ template <typename FXConfig> struct HallReverb : sst::effects::core::EffectTempl
                                interp(lowAt, lowLevel, 5, last[lowRatio]) +
                                interp(diffusionAt, diffusionLevel, 5, std::lround(last[diffusion])) +
                                interp(decayAt, decayLevel, 5, std::lround(last[decay])) + levelOffset;
-        gain = std::pow(10.0, levelDb / 20);
+        const double g = std::pow(10.0, levelDb / 20);
+        if (!gainSet) // the first level is applied at once; later ones ramp over the crossfade's 2 ms
+            gain = g, gainSet = true;
+        gainStep = (g - gain) / fadeLen;
+        gainLeft = fadeLen;
         hpOn = last[hpf] > 20.5f;
         lpOn = last[lpf] < 19999.5f;
         const double kh = std::tan(M_PI * std::min((double)last[hpf], 0.45 * rate) / rate);
