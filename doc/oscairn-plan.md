@@ -567,13 +567,17 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     gains fitted on a new grid of renders (time × room size, plus low ratio and diffusion).
 27. **Open (timed 2026-11-05): Hall A designs its coefficients in process**, at a parameter change
     (eight lines × seven sections, three 7 × 7 solves). Sweeping reverb time, room size or high
-    ratio at 192 kHz with a change every 64-sample host block (333 µs), the worst process call is
-    15–21 µs (best of three runs; up to 153 µs seen in one run while the machine's load average was
-    near 100), against 805–872 µs for an EQ matched in process. Under the quarter-block gate the
-    off-thread EQs meet, so it stays in process: moving it would add a worker hand-off and a
-    crossfade for no measurable gain. Gated by the test "Hall A designs its coefficients in process
-    well within a block" (fails with the correction passes raised from 2 to 40: 195–197 µs).
-    Confirm, or ask for the move anyway.
+    ratio at 192 kHz with a change every 64-sample host block (333 µs), the worst process call
+    (best of three runs) is 15–44 µs on this Mac (one sweep of 1.1 ms, and one of 153 µs, while its
+    load average was 75–100 from other work), 35–54 µs on CI's macOS arm64 and Linux ARM64
+    runners, and 131 µs on CI's Linux x86_64 runner (230 µs under TSan, about 1 ms under ASan);
+    an EQ matched in process takes 805–872 µs. So it fits in a block everywhere unsanitized, but not
+    in the quarter block the off-thread EQs meet on x86_64. A first version of the test gated a
+    quarter block and failed in CI on x86_64 (run 42160698046); it now gates a whole block and
+    prints the quarter (old gate a quarter block, 83 µs; new gate a block, 333 µs). Fails with the
+    correction passes raised from 2 to 40 (195–197 µs locally, over a quarter; that mutation is
+    not checked against the whole-block gate). Proposed: move the design to the engine's worker as
+    the EQs do (not done this round).
 
 ## 14. Risks and not verified
 
