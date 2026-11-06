@@ -3,21 +3,22 @@
  *
  * A hall reverb on the reference's structure (plan, section 15, "Hall A rebuilt"). Written for
  * Oscairn; follows the sst-effects effect contract. Per side:
- *  - the input passes a first-order HPF and a first-order low shelf at 800 Hz whose gain is
- *    10 x low ratio - 10 dB, held at +2 dB;
+ *  - the input passes a first-order HPF, a first-order low shelf (corner 800 Hz) whose gain is
+ *    10 x low ratio - 10 dB, held at +2 dB, and a first-order low-pass set by the high ratio, so both
+ *    ratios filter every part of the reverb once, early reflections included;
  *  - three all-passes diffuse it, and diffusion only crossfades the diffused and the plain signal;
  *  - one long line holds the initial delay, four early-reflection taps (moved by room size and the
  *    decay parameter, the later two raised by decay, the first absent at the shortest reverb time)
  *    and three taps after the first reflection that feed the tank;
- *  - the tank is a loop through both sides: an all-pass, a first-order low-pass set by the high
- *    ratio, a line, a nested all-pass, a low shelf set by the low ratio, a line, then the other
- *    side times the loop gain;
+ *  - the tank is a loop through both sides: an all-pass, a line, a nested all-pass, a line, then
+ *    the other side through a low shelf set by the low ratio and a first-order low-pass set by the
+ *    high ratio, times the loop gain (so those two act once per pass on what recirculates);
  *  - the output is the early reflections plus taps of the tank's lines, through the LPF (0.4 + 0.6
  *    times a first-order low-pass), times a level.
  * Room size changes only delays (three fitted scales), reverb time only gains (the loop gain, the
  * level, the first reflection's gain); nothing is modulated. The delays below are this design's
  * own; the scales, the gains per reverb time, the high-ratio cutoffs, the loop shelf and the
- * early-reflection laws are fitted to reference renders (fx19, fx24, fx27).
+ * early-reflection laws are fitted to reference renders (fx19, fx24, fx27, fx28, fx29).
  * A parameter change costs a few first-order designs, so it is made in process, and every gain
  * and filter coefficient then ramps over 2 ms.
  */
@@ -46,7 +47,7 @@ struct Fit
     double levelDb[10];   // output level
     double sizeAt[6];
     double sizeScale[6];  // delay scale (1 = the delays below)
-    double highHz[10];    // high ratio 0.1 ... 1.0: the loop low-pass's cutoff (0: off)
+    double highHz[10];    // high ratio 0.1 ... 1.0: the loop low-pass's cutoff, per pass (0: off)
     double lowAt[5];
     double loopShelfDb[5]; // low ratio: the loop shelf's gain per pass
     double apGain[4];     // diffusers, the tank's first all-pass, nested outer, nested inner
@@ -60,17 +61,18 @@ struct Fit
     double firstTap[10];    // the first early reflection's gain, by reverb time
     double lineScale[6];    // the tank lines' delay scale, by room size (sizeAt)
     double tankApScale[6];  // the tank's all-passes' delay scale, by room size
+    double inHighHz[10];    // high ratio 0.1 ... 1.0: the input's low-pass, ahead of everything (0: off)
 };
 
 inline constexpr Fit fitted{
     {0.3, 1.1, 1.9, 2.7, 3.5, 4.3, 5.5, 9.5, 13.5, 18},
-    {0, 0, 0.3701, 0.5008, 0.5368, 0.6556, 0.6677, 0.7229, 0.746, 0.8263},
-    {-9.1, -8.63, -8.44, -8.46, -7.94, -8.13, -7.86, -7.6, -7.11, -7.24},
+    {0.02559, 0.04984, 0.3713, 0.4773, 0.5417, 0.6404, 0.6723, 0.7168, 0.7374, 0.8252},
+    {-7.299, -6.857, -6.599, -6.47, -6.039, -6.035, -5.871, -5.477, -4.933, -4.99},
     {0, 8, 15, 22, 29, 31},
-    {0.2021, 0.408, 0.5778, 0.7879, 0.9687, 1.0085},
-    {2326, 2743, 3234, 3814, 4497, 5303, 6253, 7373, 19744, 0},
+    {0.2021, 0.408, 0.5778, 0.7879, 0.9687, 1.012},
+    {2051, 2681, 4582, 3505, 4800, 5600, 6848, 5989, 20000, 0},
     {0.1, 0.4, 0.7, 1, 1.4},
-    {-0.67, -0.57, 0, 0.76, 1.57},
+    {-0.481, -0.5139, 0.2611, 0.6266, 1.17},
     {0.62, 0.6103, 0.572, 0.485},
     {{-0.6, 1, -1, 1}, {0.6, 0.8, -0.8, 1}},
     {{17.33, 11.8, 23.5, 21.8}, {19.96, 19.5, 16.7, 21.7}},
@@ -80,8 +82,9 @@ inline constexpr Fit fitted{
     {-20, -20, -20, 0, 4.96},
     0.5394,
     {0, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-    {0.3069, 0.4696, 0.6178, 0.7185, 0.7593, 1.012},
-    {0.2309, 0.3924, 0.5762, 0.7302, 1.2083, 0.8804}};
+    {0.3069, 0.4696, 0.6178, 0.7185, 0.7593, 1.029},
+    {0.2309, 0.3924, 0.5762, 0.7302, 1.208, 1.08},
+    {1000, 1402, 1803, 2201, 2806, 3208, 3611, 4013, 10088, 0}};
 
 // This design's delays (s) at size scale 1, per side.
 constexpr double diffuserS[2][3] = {{0.0033, 0.0051, 0.0079}, {0.0037, 0.0057, 0.0089}};
@@ -222,7 +225,7 @@ struct Core
     double rate{44100};
     int fadeLen{1};
     Line input[2], diff[2][3], erAp[2], tankAp[2], line1[2], outer[2], inner[2], line2[2];
-    FirstOrder hp[2], shelf[2], lp1[2], loopShelf[2], outLp[2];
+    FirstOrder hp[2], shelf[2], pre[2], lp1[2], loopShelf[2], outLp[2];
     Ramp loopGain, level, erGain[2][4], mix;
     int dDiff[2][3]{}, dEr[2][4]{}, dFeed[2][3]{}, dErAp[2]{}, dTankAp[2]{}, dLine1[2]{}, dOuter[2]{}, dInner[2]{}, dLine2[2]{},
         dOut[2][4]{};
@@ -300,7 +303,7 @@ struct Core
                 l->clear();
             for (auto &d : diff[s])
                 d.clear();
-            for (FirstOrder *f : {&hp[s], &shelf[s], &lp1[s], &loopShelf[s], &outLp[s]})
+            for (FirstOrder *f : {&hp[s], &shelf[s], &pre[s], &lp1[s], &loopShelf[s], &outLp[s]})
                 f->clear();
         }
     }
@@ -361,6 +364,7 @@ struct Core
             hp[s].highPass(q.hpf, rate, n, now);
             // 800 Hz is the shelf's corner nearer DC, for a cut and a boost alike
             shelf[s].lowShelf(800 * std::pow(10.0, std::abs(inShelf) / 40), inShelf, rate, n, now);
+            pre[s].lowPass(f.inHighHz[h], rate, n, now);
             lp1[s].lowPass(f.highHz[h], rate, n, now);
             loopShelf[s].lowShelf(800, loopShelfDb, rate, n, now);
             outLp[s].lowPass(q.lpf, rate, n, now);
@@ -394,7 +398,7 @@ struct Core
                 x = hp[s].run(x);
                 if (!hpOn)
                     x = in[s];
-                x = shelf[s].run(x);
+                x = pre[s].run(shelf[s].run(x));
                 double u = x;
                 for (int k = 0; k < 3; ++k)
                     u = allpass(diff[s][k], f.apGain[0], u, diff[s][k].read(dDiff[s][k]));
@@ -406,16 +410,14 @@ struct Core
                     feed += feedShape[k] * input[s].read(dFeed[s][k]);
                 input[s].push(v);
                 er = allpass(erAp[s], 0.5, er, erAp[s].read(dErAp[s]));
-                // the tank: this side's half of the loop
-                double a = feed + fb * back[1 - s];
+                // the tank: this side's half of the loop; its filters act on what recirculates only
+                double a = feed + fb * lp1[s].run(loopShelf[s].run(back[1 - s]));
                 a = allpass(tankAp[s], f.apGain[1], a, tankAp[s].read(dTankAp[s]));
-                a = lp1[s].run(a);
                 const double b = line1[s].read(dLine1[s]);
                 line1[s].push(a);
                 const double zi = inner[s].read(dInner[s]);
                 const double zo = allpass(inner[s], f.apGain[3], outer[s].read(dOuter[s]), zi);
-                double c = allpass(outer[s], f.apGain[2], b, zo);
-                c = loopShelf[s].run(c);
+                const double c = allpass(outer[s], f.apGain[2], b, zo);
                 line2[s].push(c);
                 out[s] = er + outSign[0] * line1[s].read(dOut[s][0]) + outSign[1] * line1[s].read(dOut[s][1]) +
                          outSign[2] * line2[s].read(dOut[s][2]) + outSign[3] * line2[1 - s].read(dOut[s][3]);
