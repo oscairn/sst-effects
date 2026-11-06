@@ -742,8 +742,9 @@ const oscairn_plugin_memory_t memory{
         return true;
     }};
 
-// oscairn.ui: Mode first, then the selected mode's parameters in their order; a parameter named
-// "Mix" is the effect's mix (its knob in the Effects bank). Other modes' parameters get no hint.
+// oscairn.ui: Mode first, then the selected mode's parameters in their order; the effect's main
+// control (its knob in the Effects bank) is the parameter named "Mix", or "Output Level" in a mode
+// without a Mix. Other modes' parameters get no hint.
 const oscairn_plugin_ui_t ui{[](const clap_plugin_t *plugin, clap_id id, oscairn_param_hint_t *h) -> bool {
     auto &s = self(plugin);
     const int p = s.cat.paramIndex(id);
@@ -756,7 +757,11 @@ const oscairn_plugin_ui_t ui{[](const clap_plugin_t *plugin, clap_id id, oscairn
     if (s.cat.modes[par.mode].id != s.wanted.load())
         return true;
     h->priority = 2 + (uint32_t)par.index;
-    if (s.cat.meta(par).name == "Mix")
+    const auto &name = s.cat.meta(par).name;
+    bool modeHasMix = false;
+    for (size_t q = 1; q < s.cat.params.size(); ++q)
+        modeHasMix |= s.cat.params[q].mode == par.mode && s.cat.meta(s.cat.params[q]).name == "Mix";
+    if (name == "Mix" || (name == "Output Level" && !modeHasMix))
         h->role = OSCAIRN_ROLE_MIX;
     return true;
 }};

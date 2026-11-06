@@ -400,6 +400,13 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
             REQUIRE(h.priority == 1);
             std::set<uint32_t> priorities;
             int shown = 0, mixes = 0;
+            bool hasMix = false; // the main control is Mix, or Output Level in a mode without one
+            for (uint32_t i = 1; i < params->count(pl.p); ++i)
+            {
+                clap_param_info_t info;
+                REQUIRE(params->get_info(pl.p, i, &info));
+                hasMix |= info.id >> 8 == selected && !std::strcmp(info.name, "Mix");
+            }
             for (uint32_t i = 1; i < params->count(pl.p); ++i)
             {
                 clap_param_info_t info;
@@ -414,7 +421,8 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
                     REQUIRE(priorities.insert(h.priority).second);
                     ++shown;
                     mixes += h.role == OSCAIRN_ROLE_MIX;
-                    REQUIRE((h.role == OSCAIRN_ROLE_MIX) == !std::strcmp(info.name, "Mix"));
+                    REQUIRE((h.role == OSCAIRN_ROLE_MIX) ==
+                            (!std::strcmp(info.name, hasMix ? "Mix" : "Output Level")));
                 }
                 else
                     REQUIRE(h.role == OSCAIRN_ROLE_NONE);
@@ -441,8 +449,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
         pl.p->on_main_thread(pl.p);
         REQUIRE(pl.host.infoRescans == 2);
         const int mixes = check(first);
-        if (!std::strcmp(id, reverbId))
-            REQUIRE(mixes == 1); // Reverb 2's Mix
+        REQUIRE(mixes == 1); // Reverb 2's Mix; the five-band EQ's Output Level
         // a state load that selects another mode rescans too
         Buffer buf;
         pl.set(1, other); // in flush while active: reported at the next callback
