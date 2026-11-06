@@ -2030,3 +2030,154 @@ TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
     std::printf("three-band conversion: table %.2f ns, formula %.2f ns\n", bench(sc::threeBandTableHz),
                 bench(sc::threeBandFormulaHz));
 }
+
+#include "effects/HallReverb.h"
+namespace
+{
+// Hall A's response to an impulse in both inputs, with its latency removed; L and R.
+std::pair<std::vector<float>, std::vector<float>> hallImpulse(double rate, const std::vector<std::pair<const char *, double>> &set,
+                                                              double seconds)
+{
+    Plugin pl(reverbId);
+    pl.set(1, 3);
+    for (auto [n, v] : set)
+        pl.set(paramIdByName(pl.p, "Hall A", n), v);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + oscairn_fx::latencySamples;
+    std::vector<float> in(n, 0), r;
+    in[0] = 1;
+    auto l = pl.render(in, in, r, {64}, {}, false);
+    l.erase(l.begin(), l.begin() + oscairn_fx::latencySamples);
+    r.erase(r.begin(), r.begin() + oscairn_fx::latencySamples);
+    return {l, r};
+}
+// Decay time (s) in the octave band at fc: band-pass (two cookbook band-pass sections, Q 1.4),
+// backward-integrated energy, slope between -5 and -25 dB, as the measurement repository's
+// fx/dynamics.py decay_times does.
+double bandDecay(const std::vector<float> &x, double rate, double fc, double *bandEnergy = nullptr)
+{
+    oscairn_fx::hall::Section s[2];
+    const double w = 2 * M_PI * fc / rate, al = std::sin(w) / (2 * 1.4), a0 = 1 + al;
+    for (auto &q : s)
+        q.b0 = al / a0, q.b1 = 0, q.b2 = -al / a0, q.a1 = -2 * std::cos(w) / a0, q.a2 = (1 - al) / a0;
+    std::vector<double> e(x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const double y = s[1].run(s[0].run(x[i]));
+        e[i] = y * y;
+    }
+    for (size_t i = e.size() - 1; i-- > 0;)
+        e[i] += e[i + 1];
+    if (bandEnergy)
+        *bandEnergy = e[0];
+    size_t i0 = 0, i1 = 0;
+    while (i0 < e.size() && 10 * std::log10(e[i0] / e[0]) > -5)
+        ++i0;
+    for (i1 = i0; i1 < e.size() && 10 * std::log10(e[i1] / e[0]) > -25; ++i1)
+        ;
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    const double n = (double)(i1 - i0);
+    for (size_t i = i0; i < i1; ++i)
+    {
+        const double t = i / rate, v = 10 * std::log10(e[i] / e[0]);
+        sx += t, sy += v, sxx += t * t, sxy += t * v;
+    }
+    return -60 / ((n * sxy - sx * sy) / (n * sxx - sx * sx));
+}
+double firstAbove(const std::vector<float> &x, double rate, float thr = 1e-6f)
+{
+    for (size_t i = 0; i < x.size(); ++i)
+        if (std::abs(x[i]) > thr)
+            return i / rate;
+    return -1;
+}
+} // namespace
+
+TEST_CASE("Hall A: the fitted decay times, onset and filters")
+{
+    using namespace oscairn_fx::hall;
+    // Measured points of the model (fx19): at a table point the decay time is the table's, and
+    // high and low ratio add their decay rates (scaled from size 29).
+    auto t = decayTimes(3.5, 29, 1.0, 0.7);
+    REQUIRE(t[3] == Approx(1 / (1 / 3.057 - 0.004)).epsilon(1e-6));
+    t = decayTimes(9.5, 8, 0.1, 0.7);
+    REQUIRE(t[6] == Approx(1 / (1 / 2.399 + 0.363 * std::sqrt(lineScale(29) / lineScale(8)))).epsilon(1e-6));
+    REQUIRE(onsetSeconds(67.8, 29, 55) == Approx(0.1162).epsilon(1e-9));
+    REQUIRE(onsetSeconds(0.1, 0, 0) == 0); // clamped: the decay setting moves the onset earlier
+    SECTION("The network decays as designed, per octave band, within 6%")
+    {
+        for (auto set : std::vector<std::vector<std::pair<const char *, double>>>{
+                 {{"HPF Cutoff", 20}, {"LPF Cutoff", 20000}},
+                 {{"Reverb Time", 9.5}, {"Room Size", 31}, {"High Ratio", 0.3}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000}},
+                 {{"Reverb Time", 1.9}, {"Room Size", 15}, {"Low Ratio", 1.4}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000}}})
+        {
+            double tm = 3.5, size = 29, hr = 0.8, lr = 0.7;
+            for (auto [n, v] : set)
+                (!std::strcmp(n, "Reverb Time") ? tm : !std::strcmp(n, "Room Size") ? size : !std::strcmp(n, "High Ratio") ? hr : !std::strcmp(n, "Low Ratio") ? lr : v) = v;
+            const auto want = decayTimes(tm, size, hr, lr);
+            auto [l, r] = hallImpulse(44100, set, 1.6 * want[0] + 0.5);
+            for (int b = 1; b < bands; ++b) // 125 Hz has too few modes in these lengths
+            {
+                const double got = bandDecay(l, 44100, bandHz[b]);
+                INFO("time " << tm << " size " << size << " band " << bandHz[b] << " want " << want[b] << " got " << got);
+                REQUIRE(std::abs(got / want[b] - 1) < 0.06);
+            }
+        }
+    }
+    SECTION("The reverb starts at the initial delay plus the size's onset")
+    {
+        for (auto [id, size] : std::vector<std::pair<double, double>>{{0.1, 0}, {67.8, 29}, {200, 31}})
+        {
+            auto [l, r] = hallImpulse(44100, {{"Initial Delay", id}, {"Room Size", size}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000}}, 0.4);
+            REQUIRE(std::abs(firstAbove(l, 44100) - onsetSeconds(id, size, 55)) <= 1.0 / 44100);
+        }
+    }
+    SECTION("The LPF is 0.4 + 0.6 times a first-order low-pass: -2.37 dB at its cutoff")
+    {
+        auto [a, ar] = hallImpulse(44100, {{"HPF Cutoff", 20}, {"LPF Cutoff", 20000}}, 1.0);
+        auto [b, br] = hallImpulse(44100, {{"HPF Cutoff", 20}, {"LPF Cutoff", 1000}}, 1.0);
+        auto at = [&](const std::vector<float> &x, double f) {
+            std::complex<double> s = 0;
+            for (size_t i = 0; i < x.size(); ++i)
+                s += (double)x[i] * std::polar(1.0, -2 * M_PI * f * i / 44100);
+            return std::abs(s);
+        };
+        // the same network both times, so the ratio of the spectra is the filter
+        REQUIRE(20 * std::log10(at(b, 1000) / at(a, 1000)) == Approx(-2.37).margin(0.05));
+        REQUIRE(20 * std::log10(at(b, 8000) / at(a, 8000)) == Approx(20 * std::log10(std::abs(0.4 + 0.6 / std::complex<double>(1, std::tan(M_PI * 8000 / 44100) / std::tan(M_PI * 1000 / 44100))))).margin(0.05));
+    }
+}
+
+TEST_CASE("Hall A keeps its 44.1 kHz decay, onset and level at 48, 88.2, 96 and 192 kHz")
+{
+    // Decision 13 for a statistical design: per octave band (250 Hz to 8 kHz) the decay time
+    // within 5% of the 44.1 kHz render's and its energy within 1.5 dB (the plan's M3 energy
+    // tolerance; the 8 kHz band reaches about 1 dB, the bilinear filters' warping near 22 kHz at
+    // 44.1 kHz, known difference 25), and the onset within 0.1 ms (tolerances proposed). Filters
+    // at their defaults (HPF 80 Hz, LPF 5.6 kHz).
+    using namespace oscairn_fx::hall;
+    for (auto set : std::vector<std::vector<std::pair<const char *, double>>>{
+             {}, {{"Reverb Time", 1.1}, {"Room Size", 8}, {"High Ratio", 0.4}}, {{"Reverb Time", 9.5}, {"Room Size", 31}, {"Initial Delay", 150}}})
+    {
+        const double secs = set.empty() ? 5 : (set.size() == 3 && set[0].second > 5 ? 12 : 3);
+        auto ref = hallImpulse(44100, set, secs).first;
+        for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
+        {
+            auto got = hallImpulse(rate, set, secs).first;
+            INFO("rate " << rate << " setting " << set.size());
+            REQUIRE(std::abs(firstAbove(got, rate) - firstAbove(ref, 44100)) < 1e-4);
+            std::printf("Hall A at %.0f Hz, setting %zu, band: decay, energy:", rate, set.size());
+            for (int b = 1; b < bands; ++b)
+            {
+                // a unit impulse carries 44100/rate of 44.1 kHz's energy per hertz
+                double ea = 0, ec = 0;
+                const double a = bandDecay(ref, 44100, bandHz[b], &ea), c = bandDecay(got, rate, bandHz[b], &ec);
+                const double de = 10 * std::log10(ec * rate / ea / 44100);
+                std::printf(" %.0f: %+.1f%% %+.2f dB", bandHz[b], 100 * (c / a - 1), de);
+                REQUIRE(std::abs(c / a - 1) < 0.05);
+                REQUIRE(std::abs(de) < 1.5);
+            }
+            std::printf("\n");
+        }
+    }
+}

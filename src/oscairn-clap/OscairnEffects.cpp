@@ -26,6 +26,7 @@
 #include "effects/TwoBandEq.h"
 #include "effects/PartAndMasterEq.h"
 #include "effects/TempoCrossDelay.h"
+#include "effects/HallReverb.h"
 
 #include <algorithm>
 #include <array>
@@ -207,7 +208,7 @@ const std::vector<Category> &categories()
     static const std::vector<Category> all = [] {
         std::vector<Category> c;
         Category reverb{{CLAP_VERSION_INIT, "org.oscairn.effects.reverb", "Oscairn FX Reverb",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.0",
                          "Reverbs, one mode per algorithm", reverbFeatures},
                         {},
                         2,
@@ -215,6 +216,7 @@ const std::vector<Category> &categories()
         // Stock sst-effects reverbs, unchanged. Mode IDs are never reused or renumbered.
         reverb.modes.push_back(mode<sst::effects::reverb1::Reverb1>(1, "Reverb 1"));
         reverb.modes.push_back(mode<sst::effects::reverb2::Reverb2>(2, "Reverb 2"));
+        reverb.modes.push_back(mode<oscairn_fx::hall::HallReverb>(3, "Hall A"));
         reverb.finish();
         c.push_back(std::move(reverb));
 
