@@ -277,6 +277,7 @@ struct Context
     uint32_t quietBlocks{0}, quietLimit{1};
     std::atomic<bool> tail{false};
     std::atomic<bool> offline{false}; // clap.render: the host renders offline
+    bool renderFixed{false};          // main thread: the render mode was set, or the plugin activated
 
     Context(const clap_host_t *h, const Category &c, std::shared_ptr<Engine> e)
         : host(h), cat(c), engine(std::move(e)), values(c.params.size()), wanted(c.defaultMode),
@@ -517,13 +518,19 @@ const clap_plugin_latency_t latency{[](const clap_plugin_t *) -> uint32_t {
 }};
 
 // Offline, effects do in process what they otherwise hand to the worker thread, so an offline
-// render does not depend on timing.
+// render does not depend on timing. Oscairn sets the mode once, after init and before state load
+// and activation; it then stays for the instance's lifetime, and a later set may only repeat it.
 const clap_plugin_render_t renderExt{
     [](const clap_plugin_t *) { return false; },
     [](const clap_plugin_t *plugin, clap_plugin_render_mode mode) {
         if (mode != CLAP_RENDER_REALTIME && mode != CLAP_RENDER_OFFLINE)
             return false;
-        self(plugin).offline.store(mode == CLAP_RENDER_OFFLINE);
+        auto &s = self(plugin);
+        const bool off = mode == CLAP_RENDER_OFFLINE;
+        if (s.renderFixed)
+            return s.offline.load() == off;
+        s.offline.store(off);
+        s.renderFixed = true;
         return true;
     }};
 
@@ -782,6 +789,7 @@ bool activate(const clap_plugin_t *plugin, double rate, uint32_t, uint32_t)
     auto &s = self(plugin);
     if (!std::isfinite(rate) || rate < 8000 || rate > 768000)
         return false;
+    s.renderFixed = true; // never set: real time from here on
     if (!s.engine || s.engine->sampleRate != rate)
     {
         if (s.engine && s.engine->contexts.load() > 1)

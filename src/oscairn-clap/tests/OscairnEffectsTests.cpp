@@ -1625,6 +1625,33 @@ std::vector<float> settledImpulse(Plugin &pl, double rate)
 }
 } // namespace
 
+TEST_CASE("The render mode is set once and kept for the instance's lifetime")
+{
+    // Oscairn (9bfc302) sets clap.render after init, before state load and activation, and never
+    // changes it while the plugin is loaded; a later set may repeat the mode but not change it.
+    auto rx = [](Plugin &pl) { return ext<clap_plugin_render_t>(pl.p, CLAP_EXT_RENDER); };
+    Plugin off(eqId);
+    REQUIRE(rx(off)->set(off.p, CLAP_RENDER_OFFLINE));
+    REQUIRE(!rx(off)->set(off.p, CLAP_RENDER_REALTIME));
+    REQUIRE(rx(off)->set(off.p, CLAP_RENDER_OFFLINE));
+    off.activate(48000);
+    REQUIRE(!rx(off)->set(off.p, CLAP_RENDER_REALTIME));
+    // never set: real time once activated
+    Plugin rt(eqId);
+    rt.activate(48000);
+    REQUIRE(!rx(rt)->set(rt.p, CLAP_RENDER_OFFLINE));
+    REQUIRE(rx(rt)->set(rt.p, CLAP_RENDER_REALTIME));
+    // the offline instance still matches in process: a change lands before the next block
+    const clap_id g = paramIdByName(off.p, "Five-band EQ", "Band 2 Gain");
+    std::vector<float> z(64, 0), o;
+    off.render(z, z, o, {64}, {{0, g, -6.0}}, false);
+    Plugin twin(eqId); // the same history, offline throughout
+    REQUIRE(rx(twin)->set(twin.p, CLAP_RENDER_OFFLINE));
+    twin.activate(48000);
+    twin.render(z, z, o, {64}, {{0, g, -6.0}}, false);
+    REQUIRE(impulseAfterReset(off, 48000) == impulseAfterReset(twin, 48000));
+}
+
 TEST_CASE("Rate matching runs off the audio thread")
 {
     // A parameter sweep at 192 kHz with 64-sample host blocks (0.33 ms): one change per block.
