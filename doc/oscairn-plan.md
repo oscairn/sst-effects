@@ -558,13 +558,12 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     sources, never used for fitting) is within 0.154 dB RMS per render, every 5 ms window within
     0.29 dB, so the ±1 dB gate is met everywhere it was missed (ratio 2, saw, near full scale, low
     inputs). The side-chain port is still not built (known difference 29).
-26. **Open: Hall A ships with a hold-out that fails its decay gate** (section 15, "Hall reverb"):
-    level and onset hold, decay times per band do not generalise to random settings. The
-    reference's hall structure is now known well enough to say why (section 15, "Hall A: what the
-    hold-out failures point to"): it is not a feedback delay network, and low ratio, diffusion and
-    the HPF act where the statistical model cannot put them. Not changed this round; no new hall
-    hold-out was recorded. Proposed: rebuild Hall A on that structure, with its reverb-time-dependent
-    gains fitted on a new grid of renders (time × room size, plus low ratio and diffusion).
+26. **Decided (Jacob, 2026-11-05): rebuild Hall A on the reference's structure. Not done
+    (2026-11-06):** this round went to the compressor (decision 25) and to moving the current Hall
+    A's design off the audio thread (decision 27). No new hall grid or hold-out was recorded; the
+    shipped Hall A still fails its decay gate (known difference 23). The rebuild needs the
+    structure's delays and per-time tap gains turned into a fitted model, then the grid and a
+    fresh hold-out; the 42-53 ms burst stays unexplained (known difference 24).
 27. **Decided (Jacob, 2026-11-05): Hall A's coefficients are designed off the audio thread. Done
     (2026-11-06):** the loop filters' design runs on the engine's worker with the EQs' exchange
     (newest request only, generation-tagged result taken at a block boundary, never over a newer
