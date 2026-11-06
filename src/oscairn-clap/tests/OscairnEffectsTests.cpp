@@ -385,7 +385,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 {
     // plugin-porting.md: a mode is best a stepped parameter first by priority; when it changes
     // which controls matter, the others are hidden and the host is told to rescan their info.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
     {
         Plugin pl(id);
         auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
@@ -466,7 +466,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 TEST_CASE("Audio ports stay the same whatever the mode or state")
 {
     // The host refuses a plugin whose audio port layout changes while it is loaded.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
     {
         Plugin pl(id);
         auto *ports = ext<clap_plugin_audio_ports_t>(pl.p, CLAP_EXT_AUDIO_PORTS);
@@ -2032,6 +2032,7 @@ TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
 }
 
 #include "effects/HallReverb.h"
+#include "effects/CircuitCompressor.h"
 namespace
 {
 // Hall A's response to an impulse in both inputs, with its latency removed; L and R.
@@ -2178,6 +2179,89 @@ TEST_CASE("Hall A keeps its 44.1 kHz decay, onset and level at 48, 88.2, 96 and 
                 REQUIRE(std::abs(de) < 1.5);
             }
             std::printf("\n");
+        }
+    }
+}
+
+namespace
+{
+const char *dynamicsId = "org.oscairn.effects.dynamics";
+// A 440 Hz sine at -22.1 dBFS RMS stepping 13 dB down for the second of every two seconds, the
+// reference probes' source (fx21 to fx23), through the circuit compressor with the platform's
+// raw values (input, output, ratio, attack, release, each 0..200 or 0..4).
+std::vector<float> compRender(double rate, int inl, int outl, int ratio, int atk, int rel, double seconds = 4)
+{
+    using namespace oscairn_fx::dynamics;
+    Plugin pl(dynamicsId);
+    auto set = [&](const char *n, double v) { pl.set(paramIdByName(pl.p, "Circuit Compressor", n), v); };
+    set("Input Level", 60 * std::log10(inl / 200.0));
+    set("Output Level", 60 * std::log10(outl / 200.0));
+    set("Ratio", ratio);
+    set("Attack", attackSeconds(atk) * 1000);
+    set("Release", releaseSeconds(rel) * 1000);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + oscairn_fx::latencySamples;
+    std::vector<float> in(n, 0), r;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double t = i / rate;
+        in[i] = (float)(0.0786 * M_SQRT2 * (std::fmod(t, 2.0) < 1 ? 1 : std::pow(10.0, -13 / 20.0)) * std::sin(2 * M_PI * 440 * t));
+    }
+    auto l = pl.render(in, in, r, {64}, {}, false);
+    l.erase(l.begin(), l.begin() + oscairn_fx::latencySamples);
+    return l;
+}
+// Gain (dB) over [t0, t1) s against the source.
+double compGain(const std::vector<float> &y, double rate, double t0, double t1)
+{
+    double ey = 0, ex = 0;
+    for (size_t i = (size_t)(t0 * rate); i < (size_t)(t1 * rate); ++i)
+    {
+        const double t = i / rate;
+        const double x = 0.0786 * M_SQRT2 * (std::fmod(t, 2.0) < 1 ? 1 : std::pow(10.0, -13 / 20.0)) * std::sin(2 * M_PI * 440 * t);
+        ey += (double)y[i] * y[i], ex += x * x;
+    }
+    return 10 * std::log10(ey / ex);
+}
+} // namespace
+
+TEST_CASE("Circuit compressor: the measured steady gains at 44.1 kHz")
+{
+    // Gains measured on reference renders (fx21, fx22): below threshold (the quiet second) the
+    // gain depends on the settings, not on the signal, within 0.15 dB; compressing (the loud
+    // second at input 160 or 200) within 0.5 dB (tolerances proposed).
+    struct Case { int in, out, q, a, r; double quiet, loud; };
+    for (auto c : std::vector<Case>{{100, 100, 1, 0, 0, 7.75, NAN}, {100, 100, 1, 200, 0, 4.77, NAN},
+                                    {100, 100, 1, 0, 200, 8.66, NAN}, {60, 100, 1, 10, 100, -1.35, NAN},
+                                    {60, 100, 1, 175, 100, 2.26, NAN}, {90, 100, 1, 100, 100, 4.77, NAN},
+                                    {200, 60, 1, 100, 0, NAN, -8.84}, {200, 60, 1, 100, 200, NAN, -7.47},
+                                    {160, 60, 0, 100, 100, NAN, -9.31}, {160, 60, 4, 100, 100, NAN, -6.57}})
+    {
+        auto y = compRender(44100, c.in, c.out, c.q, c.a, c.r);
+        const double quiet = compGain(y, 44100, 1.5, 2.0), loud = compGain(y, 44100, 2.5, 3.0);
+        INFO("input " << c.in << " ratio " << c.q << " attack " << c.a << " release " << c.r << ": quiet " << quiet << " loud " << loud);
+        if (!std::isnan(c.quiet))
+            REQUIRE(std::abs(quiet - c.quiet) < 0.15);
+        if (!std::isnan(c.loud))
+            REQUIRE(std::abs(loud - c.loud) < 0.5);
+    }
+}
+
+TEST_CASE("Circuit compressor keeps its 44.1 kHz gain at 48, 88.2, 96 and 192 kHz")
+{
+    // The gain in 5 ms windows over a step down and back, compressing, within 0.1 dB of the
+    // 44.1 kHz render's (tolerance proposed); slow and fast settings.
+    for (auto s : std::vector<std::array<int, 5>>{{200, 60, 1, 100, 100}, {160, 100, 3, 20, 10}, {120, 60, 0, 0, 200}})
+    {
+        auto ref = compRender(44100, s[0], s[1], s[2], s[3], s[4]);
+        for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
+        {
+            auto got = compRender(rate, s[0], s[1], s[2], s[3], s[4]);
+            double worst = 0;
+            for (double t = 0.2; t < 3.9; t += 0.005)
+                worst = std::max(worst, std::abs(compGain(got, rate, t, t + 0.005) - compGain(ref, 44100, t, t + 0.005)));
+            std::printf("Circuit compressor at %.0f Hz, input %d attack %d release %d: worst %.3f dB\n", rate, s[0], s[3], s[4], worst);
+            REQUIRE(worst < 0.1);
         }
     }
 }
