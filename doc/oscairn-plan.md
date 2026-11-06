@@ -552,18 +552,28 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     published build should get a new version, and be signed (`oscairn-sign`) with a key of Jacob's.
     Since 2026-11-05 a plugin's version is bumped when its sound or memory changes (Reverb 0.2.0
     with Hall A); signing is still open.
-25. **Open: the circuit-style compressor.** Its steps (fx21–fx23, section 15) show a gain that
-    depends on the input level, attack and release settings but not on the signal below a level,
-    which no detector-and-gain-law model fitted here reproduces. Options: read the reference's
-    implementation for the structure (allowed, not copied), or probe further (input level 100–200
-    in fine steps, a slow amplitude ramp instead of steps, a burst after silence). Nothing is built.
+25. **Done (2026-11-05): the circuit-style compressor** is built (section 15, "Circuit-style
+    compressor"). The steps' puzzle was a makeup gain set by the input level, ratio, attack and
+    release settings. It ships as a first version: a fresh hold-out (fx25) holds below threshold
+    and at ratios 4–20 with a sine, and misses by up to 1.9 dB at ratio 2 and with a saw (known
+    difference 26). Open: whether that is enough for now, or the gain law and detector input are
+    refined first.
 26. **Open: Hall A ships with a hold-out that fails its decay gate** (section 15, "Hall reverb"):
-    level and onset hold, decay times per band do not generalise to random settings. Keep it as a
-    first version (the alternative is to hold it back until a further grid over low ratio,
-    diffusion and HPF is measured).
-27. **Open: Hall A designs its coefficients in process**, at a parameter change (eight lines × seven
-    sections, three 7 × 7 solves), as the delay designs its damping filter, rather than on the
-    engine's worker as the EQs do. Not timed yet; moving it to the worker is the alternative.
+    level and onset hold, decay times per band do not generalise to random settings. The
+    reference's hall structure is now known well enough to say why (section 15, "Hall A: what the
+    hold-out failures point to"): it is not a feedback delay network, and low ratio, diffusion and
+    the HPF act where the statistical model cannot put them. Not changed this round; no new hall
+    hold-out was recorded. Proposed: rebuild Hall A on that structure, with its reverb-time-dependent
+    gains fitted on a new grid of renders (time × room size, plus low ratio and diffusion).
+27. **Open (timed 2026-11-05): Hall A designs its coefficients in process**, at a parameter change
+    (eight lines × seven sections, three 7 × 7 solves). Sweeping reverb time, room size or high
+    ratio at 192 kHz with a change every 64-sample host block (333 µs), the worst process call is
+    15–21 µs (best of three runs; up to 153 µs seen in one run while the machine's load average was
+    near 100), against 805–872 µs for an EQ matched in process. Under the quarter-block gate the
+    off-thread EQs meet, so it stays in process: moving it would add a worker hand-off and a
+    crossfade for no measurable gain. Gated by the test "Hall A designs its coefficients in process
+    well within a block" (fails with the correction passes raised from 2 to 40: 195–197 µs).
+    Confirm, or ask for the move anyway.
 
 ## 14. Risks and not verified
 
@@ -669,6 +679,7 @@ Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
 | Three-band EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,368 | 1,152 / 60,192 | 0 | not measured |
 | Master EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,992 | 1,344 / 62,568 | 0 | not measured |
 | Tempo Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 527,944 / 574,312 / 1,144,960 | 0 | not measured |
+| Circuit Compressor | any | 120 | (new) | 792 | 0 | not measured |
 
 "Context" is the context's own storage plus its effect (`sizeof`, arm64 macOS build), the same
 figure `resources` reports; since decision 20 it includes the effect's own heap allocations (the
@@ -1233,6 +1244,74 @@ sections and three 7 × 7 solves), not on the worker; not timed. Memory per cont
 139,652 / 279,184 / 558,240 bytes of lines at 44.1 / 48 / 96 / 192 kHz plus the effect itself (the
 memory tests cover the mode at every rate). Reverb plugin version 0.2.0 (decision 24).
 
+### Circuit-style compressor (built 2026-11-05)
+
+Mode "Circuit Compressor" (id 1) of a new plugin, Oscairn FX Dynamics
+(`org.oscairn.effects.dynamics`, version 0.1.0), `effects/CircuitCompressor.h`: written. Its
+parameters are the platform's in physical units: Input Level and Output Level in dB (the
+converter's law is 60 log10(v / 200); the bottom of the range, −139 dB, is the platform's 0, off),
+Ratio (2, 4, 8, 12, 20), Attack and Release in ms (the displayed laws, fx7). Output Level carries
+the `mix` role.
+
+What the steps of fx21–fx23 showed is a makeup gain that depends on the settings and never on
+the signal. Below threshold the gain is the input level plus the output level plus a fixed 42.03 dB
+plus that makeup; the attack term's sign follows log L, which is why the attack setting raised
+the gain at input 60 and lowered it at input 100. Laws, each constant fitted to renders:
+
+| Law | Fitted on | Against renders |
+| --- | --- | --- |
+| Makeup = 3.01 dB + 20 log10 L × (−e − 0.6667 s ka + 0.2025 s kr), capped at 23.73 dB: L the input gain raised by 24.08 dB, s = 1 − 1/R, e = 0.7552 / R above L = 1 and 0.4997 below (with L held at 0.005 or more in that term), ka = min(1, log10(attack / 1 ms) / 1.4996) above 1 ms, kr = min(1, log10(release / 40.7 ms)) above 40.7 ms; R = 1.992, 3.890, 7.554, 11.00, 17.19 for the five ratio settings | 70 renders with no compression (fx13 AN-X sine; fx21–fx23 AWM2 square-LFO sine) | rms 0.16 dB, worst 0.66 dB (input 13, known difference 27); the free fit lands on these values (for example 1.0 ms, 1.4996 decades, 40.7 ms) |
+| Detector: the larger of \|L\| and \|R\| of the scaled input through two cascaded followers with the same coefficients, 1 / (0.4367 τa fs) rising and 1 / (0.4843 τr fs) falling at 44.1 kHz, τ the displayed times | 99 renders: the compressing fx21–fx23 steps and the fx7 statics | per-render envelope rms (5 ms windows) median 0.15 dB over all 172 fitting renders, 11 over 1 dB (ratio 2, fx7's full-scale renders, low inputs) |
+| Gain law: soft knee 8.40 dB wide at −36.06 dB of the scaled input, slope 1 − 1/K, K = 3.218, 4.044, 4.698, 4.982, 5.227 (it flattens at high ratio settings, as fx7/fx13 suggested) | same | same |
+| Output clipped at full scale (fx7's loud renders peak at exactly 1.000) | fx7 | |
+
+Fresh hold-out fx25 (18 random settings, seed 2525; three sources: the square-LFO sine at 13 dB
+and 6 dB steps and a saw; recorded after the model was fixed; the plugin's own output compared):
+median 0.32 dB rms, worst 1.88 dB; 15 of 18 within 1 dB rms. The seven sine settings that stay
+below threshold match within 0.08 dB rms, the two such saw settings within 0.26 dB. The misses are compressing at ratio 2 (cho02, cho11: 1.88 and 1.13 dB)
+and with the saw (cho13, cho14, cho16: 0.82, 1.52, 0.71 dB, peaks up to 7.4 dB at the steps),
+known difference 26. The M2 static gate (±1 dB) is therefore not met for those cases; the time
+constants are fitted inside the envelope fit, not gated on their own.
+
+Plugin tests: the measured steady gains at 44.1 kHz (six settings below threshold within 0.15 dB,
+four compressing within 0.5 dB; fails with the attack term removed), and at 48, 88.2, 96 and 192
+kHz the gain in 5 ms windows over a step within 0.1 dB of 44.1 kHz's (worst seen 0.069 dB; fails
+with the 44.1 kHz follower coefficients used at every rate). Memory 792 bytes per context, no
+buffers. Not built: the side-chain port (known difference 29).
+
+Measurement fix found on the way: the analyses aligned dry and wet on the first 20,000 samples,
+which for a steady sine can land whole periods off and put errors of up to 12 dB at the steps; the
+measurement repository's `fx/dynamics.py` now aligns on the whole signal (`f348568`). fx21–fx23's
+earlier conclusions were steady-state levels and are unaffected.
+
+### Hall A: what the hold-out failures point to (2026-11-05)
+
+Reference behaviour of the hall (its structure; only partly checked against renders, as noted):
+
+- per side, the input passes a first-order HPF (input only) and a first-order low shelf at 800 Hz
+  whose gain is 10 × low ratio − 10 dB, held at +2 dB above 1.2;
+- two diffuser stages, then a crossfade of the diffused and undiffused signal by diffusion / 10:
+  diffusion changes no coefficient in any loop;
+- an early-reflection line with four taps, placed by initial delay, room size and the decay
+  parameter (which moves the block, as the onsets measured in fx19 show, and raises the later two
+  taps' gains);
+- no feedback delay network: one long line per side with one feedback tap and many output taps
+  whose gains follow the reverb time, then a loop of nested lossy all-passes holding the
+  high-ratio low-pass (first order; about 1.0 to 4.0 kHz for 0.1 to 0.8, 10 kHz at 0.9, off at 1.0)
+  and the low-ratio shelf again;
+- room size scales the delays and never a gain; reverb time sets gains and never a delay; the
+  output is 0.6 × a first-order low-pass (the LPF) plus 0.4 × unfiltered, as fx19 measured; no
+  modulation.
+
+What that explains in fx24: low ratio acts per pass of a loop whose length follows the room, and
+reaches 1 kHz (an 800 Hz shelf), while the model's low-ratio rates were measured at room size 29
+only and scaled by the square root of the line length; diffusion cannot change the decay, so the
+low-diffusion misses come from how the model and the decay estimate treat the early part; the HPF
+is on the input only, so the reference's 125–250 Hz decay survives a high HPF, and the model's
+collapse there needs a look at the model, not a new law. Nothing in the structure is random, so
+the burst at 42–53 ms (present in some renders, absent in others of the same setting) is still
+unexplained. Not built this round (decision 26).
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -1255,8 +1334,8 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
 | 13 | (Superseded by 23 for the built Hall A.) Hall reverb measurements; displayed time against measured decay; level and onset now measured (fx17: wet −2.89 / −3.23 dB re the dry click at factory settings, onset = initial delay + 48.4 ms) | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
-| 14 | Types not built | 101 of the 104 types (the five-band EQ, the tempo cross delay and the hall reverb are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
-| 15 | Compressor type not built; steps now measured (fx21–fx23, AWM2 square-LFO source) but not explained (decision 25). Earlier: fx16–fx18 steps failed (the probes' velocity sensitivity silenced the quieter note) | Static curve measured (fx7, fx13): a fixed +65.9 dB gain after the input-level law, output-level law exact, digital silence at the two lowest input levels, compression from about −14 dBFS RMS with a soft knee and effective ratios of about 3.2 / 3.7 / 4.6 for settings 2 / 4 / 20. fx16: at a fixed input the output level moves 9.2 dB with the attack setting (−11.95 dB at attack 0 to −2.71 dB at 150–200, release 0): the detector is an asymmetric follower on the rectified signal, not RMS. Time constants still not measured (the fx16 steps went to silence) | Probe design | fx21–fx23: below a level the gain does not move within a render (a 13 dB step changes it by under 0.2 dB) yet depends across renders on input level, attack and release, with the attack's effect changing sign between input 60 and 100; above it the steps compress, slower attack settings more. Unresolved (decision 25) | fx7, fx13, fx16 `c_*`, fx21 `w_*`, fx22 `l_*`/`c_*`, fx23 `s_*`; `cfit.py` | none yet |
+| 14 | Types not built | 100 of the 104 types (the five-band EQ, the tempo cross delay, the hall reverb and the circuit-style compressor are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 15 | (Superseded by 26–29 for the built Circuit Compressor.) Compressor measurements fx7–fx23 | Static curve (fx7, fx13), steps (fx21–fx23): explained by a makeup gain set by the settings (section 15) | Reference behaviour | Built 2026-11-05 | fx7, fx13, fx21–fx23 | `effects/CircuitCompressor.h` |
 | 16 | Tempo cross delay at tempos other than 120 BPM | Not measured | The recorder's host is fixed at 120 BPM | The plugin follows the transport tempo by the note values (assumed) | — | `effects/TempoCrossDelay.h` |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
 | 18 | Fitted EQs below 44.1 kHz | Not gated; the matcher fits up to 0.45 of the rate | Not covered, by Jacob's decision (decision 21) | Deliberate | — | `effects/RateMatch.h` |
@@ -1266,7 +1345,11 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 22 | Tempo cross delay L&R input: mixed or one line per side | Indistinguishable with a centred source | Panned probes are panned after the insertion | Shipped as one line per side; needs a stereo source before the effect | fx17 `d_panL_*` | `TempoCrossDelay::processBlock` |
 | 23 | Hall A decay times on settings away from the measured grid | Fresh hold-out fx24 (12 random settings): only 25–58% of renders within 10% per band; mid bands mostly 10–30% short where the low ratio is 1.0 or more or the diffusion low; 125–250 Hz far off where the HPF removes those bands. On the fitting grid fx19: 88–97% within 10% from 250 Hz to 8 kHz. At other rates the band energies at 8 kHz differ from 44.1 kHz's by up to 1.34 dB (the bilinear filters' warping) | The model adds per-setting tables and treats low ratio, diffusion and HPF as not changing the decay, which the hold-out contradicts; room size 0 and the shortest times are a different regime | Unresolved; next: a grid over low ratio × diffusion × reverb time, and the HPF's effect on the low bands | fx19 `r_*`, fx24 `rho*`; `gate_rev.py`, `rsum.py` | `effects/HallReverb.h` |
 | 24 | Hall reverb: a burst at 42–53 ms in some reference renders only | Up to −7 dB of the tail's peak (fx19 `r_h1`), absent from renders of identical settings (`r_h8` against `r_base2`) | Unknown: not repeatable, so possibly the recorder | Not modelled; onsets are measured outside 42–58 ms | fx19, fx24; `fx/reverb.py` `main_onset_ms` | — |
-| 25 | Hall A's early reflections, echo density and modulation | Not measured; the mode matches decay times, level and onset only | A statistical design | Deliberate for the first version | — | `effects/HallReverb.h` |
+| 25 | Hall A's early reflections, echo density and modulation | Not measured; the mode matches decay times, level and onset only. The reference has four early-reflection taps and no modulation (section 15, "Hall A: what the hold-out failures point to") | A statistical design | Deliberate for the first version | — | `effects/HallReverb.h` |
+| 26 | Circuit compressor compressing at ratio 2, and with harmonic-rich sources | Fresh hold-out fx25: ratio 2 1.13 and 1.88 dB rms; saw 0.71–1.52 dB rms, peaks up to 7.4 dB at the level steps; fitting renders fx22 `c_q0_*` up to 1.2 dB | The gain law is fitted as one soft knee per ratio setting; the reference's curve shape at ratio 2 and anything filtering its detector input are not modelled | Unresolved; next: static curves at ratio 2 in fine input steps, and a two-tone source for the detector input | fx25 `cho02`, `cho11`, `cho13`, `cho14`, `cho16`; `gate25.py`, `ours25.py` | `effects/CircuitCompressor.h` |
+| 27 | Circuit compressor at input settings of 25 or less | The reference's gain moves in 6.02 dB steps there (fx13 inputs 10, 13, 20, 25: −12.14, −6.12, +5.92, +11.94 dB); up to 0.66 dB off (input 13) | The reference's low input gains look quantized; not modelled | Unresolved | fx13 `st_*_in10`–`in25` | `CircuitCompressor::update` |
+| 28 | Circuit compressor near full scale at ratio 2 | fx7 ratio 2 at input 180–200, output 200: the reference's sine is squashed to a crest of 1.47 dB without reaching full scale; the model is up to 3.2 dB louder | An output stage not found | Unresolved | fx7 `st_r0_in180`–`in200` | `CircuitCompressor::processBlock` |
+| 29 | Circuit compressor has no side-chain input | The reference takes a side-chain source (parts, A/D, master); its side-chain level changed nothing without a source (fx23) | Not built in the first version; the plugin's port layout will change when it is | Deliberate for now | fx23 `s_sc127` | `OscairnEffects.cpp` (ports) |
 
 ## 17. Oscairn porting checklist (decision 22)
 
@@ -1275,6 +1358,10 @@ effect, with its status and what proves it. "Host check" is Oscairn's `oscairn-p
 from a clone of Oscairn (`fbc8e12`) outside both repositories, run on this branch's
 `oscairn-effects.clap` at 48 kHz for Reverb (both modes), every EQ mode with a gain set, and the
 delay with feedback, in the engine and with `OSCAIRN_PLUGIN_WORKER` set: all passed (2026-11-02).
+Again on 2026-11-05, built from a clone of the local Oscairn checkout at `72afff2` (pulling from
+GitHub failed): Dynamics (the circuit compressor compressing), Reverb (Hall A, Reverb 1, and Reverb 2
+by default), the five-band and three-band EQs with a gain set, and the delay, in the engine and in
+`oscairn-plugin-worker`: all passed.
 
 | Item (plugin-porting.md) | Status | Proof |
 | --- | --- | --- |
@@ -1297,7 +1384,7 @@ delay with feedback, in the engine and with `OSCAIRN_PLUGIN_WORKER` set: all pas
 | `CLAP_PROCESS_SLEEP` when idle | Met; a delay sleeps only after its longest gap | "The tail ends, and the plugin then sleeps"; "Tempo cross delay keeps playing between its echoes" |
 | `NOTE_CHOKE`, per-note volume, pitch bend, CLAP notes | Not applicable (no note input) | — |
 | Effect contexts with tails (RFC 0007) | Met: up to 64 contexts per engine, `resources` with tail activity | "Effect contexts are independent and share one engine" |
-| Side-chain inputs where types need them | Not yet needed: no built type takes a side-chain (the compressor is not built) | — |
+| Side-chain inputs where types need them | Not yet: the circuit compressor is built without its side-chain port (known difference 29) | — |
 | Presets (CLAP preset discovery) | Not implemented: no factory presets of these modes exist yet | — |
 | Transport and tempo | Met: tempo from the transport at every `process`, 120 BPM without one | "Tempo cross delay: the measured routing…" (a quarter at 90 BPM from the transport) |
 | Steady cost; honest version | CPU: matching off the audio thread, so a change no longer costs a block (the worker's CPU is outside the host's per-block measurement). Version: 0.1.0 whatever changes (decision 24) | Timing test above |
