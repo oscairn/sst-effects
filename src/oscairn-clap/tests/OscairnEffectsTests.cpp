@@ -1023,7 +1023,7 @@ TEST_CASE("Per-context memory by mode and sample rate")
 {
     // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB), and
     // the EQs at 44.1 kHz below 4 KB: they hold the rate matcher's 58 KB only at other rates.
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
     {
         Plugin probe(id);
         double lo, hi;
@@ -1081,7 +1081,7 @@ TEST_CASE("Declared memory equals what activation holds and what effect contexts
 {
     // For every plugin and mode at 44.1 to 192 kHz: estimate (after state load, before
     // activate) == current (after activate) == the effect contexts' resources.
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
     {
         Plugin probe(id);
         clap_param_info_t info;
