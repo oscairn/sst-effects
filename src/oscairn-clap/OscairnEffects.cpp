@@ -383,12 +383,14 @@ void runBlock(Context &s)
     if (auto *p = s.pending.load(std::memory_order_acquire);
         p && !s.retired.load(std::memory_order_acquire))
     {
-        // Swap in the mode built on the main thread; the old effect is freed there.
+        // Swap in the mode built on the main thread; the old effect is freed there. The new
+        // mode is published before pending clears, so the main thread never sees no pending
+        // effect beside the old mode and builds the new one again.
+        s.fxBytes.store(p->bytes());
+        s.fxMode.store(p->mode);
         s.pending.store(nullptr, std::memory_order_release);
         s.retired.store(s.fx.release(), std::memory_order_release);
         s.fx.reset(p);
-        s.fxBytes.store(p->bytes());
-        s.fxMode.store(p->mode);
         requestCallback(s);
     }
     s.quietLimit = std::max<uint32_t>(1, (uint32_t)std::ceil(s.fx->quietSeconds() * s.engine->sampleRate / block));
