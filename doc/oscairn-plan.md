@@ -1495,7 +1495,9 @@ delay with feedback, in the engine and with `OSCAIRN_PLUGIN_WORKER` set: all pas
 Again on 2026-11-05, built from a clone of the local Oscairn checkout at `72afff2` (pulling from
 GitHub failed): Dynamics (the circuit compressor compressing), Reverb (Hall A, Reverb 1, and Reverb 2
 by default), the five-band and three-band EQs with a gain set, and the delay, in the engine and in
-`oscairn-plugin-worker`: all passed.
+`oscairn-plugin-worker`: all passed. On 2026-11-06, built from a clone of the local Oscairn checkout at
+`2c74d3e` (its main; fetching GitHub failed again): Reverb with Hall A rebuilt (0.4.0) in the engine
+and in `oscairn-plugin-worker`, and Dynamics: all passed.
 
 | Item (plugin-porting.md) | Status | Proof |
 | --- | --- | --- |
