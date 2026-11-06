@@ -2153,7 +2153,7 @@ TEST_CASE("Hall A keeps its 44.1 kHz decay, onset and level at 48, 88.2, 96 and 
     // Decision 13 for a statistical design: per octave band (250 Hz to 8 kHz) the decay time
     // within 5% of the 44.1 kHz render's and its energy within 1.5 dB (the plan's M3 energy
     // tolerance; the 8 kHz band reaches about 1 dB, the bilinear filters' warping near 22 kHz at
-    // 44.1 kHz, known difference 25), and the onset within 0.1 ms (tolerances proposed). Filters
+    // 44.1 kHz, known difference 23), and the onset within 0.1 ms (tolerances proposed). Filters
     // at their defaults (HPF 80 Hz, LPF 5.6 kHz).
     using namespace oscairn_fx::hall;
     for (auto set : std::vector<std::vector<std::pair<const char *, double>>>{
