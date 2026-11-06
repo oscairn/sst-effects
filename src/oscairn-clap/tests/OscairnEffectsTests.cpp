@@ -2265,3 +2265,41 @@ TEST_CASE("Circuit compressor keeps its 44.1 kHz gain at 48, 88.2, 96 and 192 kH
         }
     }
 }
+
+TEST_CASE("Hall A designs its coefficients in process well within a block")
+{
+    // Decision 27: Hall A designs its loop filters at a parameter change, in process. Sweeping
+    // reverb time, room size and high ratio at 192 kHz with one change per 64-sample host block
+    // (333 us), the worst process call must stay under a quarter of a block, the gate the
+    // off-thread EQs meet (unsanitized builds; the best of three runs, against preemption).
+    const double rate = 192000;
+    const uint32_t frames = 64;
+    const double blockUs = 1e6 * frames / rate;
+    auto tone = [rate](size_t i) { return 0.25f * (float)std::sin(2 * M_PI * 440.0 * (double)i / rate); };
+    for (const char *name : {"Reverb Time", "Room Size", "High Ratio"})
+    {
+        double bestWorst = 1e300;
+        for (int run = 0; run < 3; ++run)
+        {
+            Plugin pl(reverbId);
+            pl.set(1, 3);
+            pl.activate(rate);
+            const clap_id id = paramIdByName(pl.p, "Hall A", name);
+            Driver d(pl, frames);
+            size_t at = 0;
+            for (int k = 0; k < 20; ++k, at += frames)
+                d.block(at, tone);
+            d.worstUs = 0;
+            for (int k = 0; k <= 300; ++k, at += frames)
+            {
+                const double v = !std::strcmp(name, "Room Size") ? k % 32 : !std::strcmp(name, "High Ratio") ? 0.1 + 0.1 * (k % 10) : 0.3 + 17.7 * k / 300.0;
+                d.block(at, tone, id, v);
+            }
+            bestWorst = std::min(bestWorst, d.worstUs);
+        }
+        std::printf("Hall A %s sweep at 192 kHz: worst process call %.1f us (block %.1f us)\n", name, bestWorst, blockUs);
+#ifndef OSCAIRN_SANITIZED
+        REQUIRE(bestWorst < blockUs / 4);
+#endif
+    }
+}
