@@ -225,7 +225,7 @@ const std::vector<Category> &categories()
     static const std::vector<Category> all = [] {
         std::vector<Category> c;
         Category reverb{{CLAP_VERSION_INIT, "org.oscairn.effects.reverb", "Oscairn FX Reverb",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.5.0",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.5.1",
                          "Reverbs, one mode per algorithm", reverbFeatures},
                         {},
                         2,
@@ -238,7 +238,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(reverb));
 
         Category eq{{CLAP_VERSION_INIT, "org.oscairn.effects.eq", "Oscairn FX EQ", "Oscairn",
-                     "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                     "https://github.com/oscairn/sst-effects", "", "", "0.1.1",
                      "Equalizers, one mode per design", eqFeatures},
                     {},
                     1,
@@ -251,7 +251,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(eq));
 
         Category delay{{CLAP_VERSION_INIT, "org.oscairn.effects.delay", "Oscairn FX Delay", "Oscairn",
-                        "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                        "https://github.com/oscairn/sst-effects", "", "", "0.1.1",
                         "Delays, one mode per design", delayFeatures},
                        {},
                        1,
@@ -261,7 +261,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(delay));
 
         Category dynamics{{CLAP_VERSION_INIT, "org.oscairn.effects.dynamics", "Oscairn FX Dynamics",
-                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.0",
+                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.1",
                            "Compressors and other dynamics, one mode per design", dynamicsFeatures},
                           {},
                           1,
