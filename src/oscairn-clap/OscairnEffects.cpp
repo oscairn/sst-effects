@@ -56,6 +56,9 @@ struct Effect
     virtual ~Effect() = default;
     virtual float *params() = 0;
     virtual void initialize() = 0;
+    // As constructed, without allocating (CLAP reset); the caller sets the parameters and
+    // initializes it again, as after building it.
+    virtual void reset() = 0;
     virtual void process(float *L, float *R) = 0;
     virtual int ringoutBlocks() const = 0;
     virtual size_t bytes() const = 0;
@@ -84,6 +87,16 @@ template <typename FX> struct EffectOf final : Effect
     }
     float *params() override { return fx.paramStorage; }
     void initialize() override { fx.initialize(); }
+    void reset() override
+    {
+        // An effect without allocations is constructed again in place; one with allocations (the
+        // Oscairn modes) clears everything in its initialize.
+        if constexpr (!requires { fx.heapBytes(); })
+        {
+            std::destroy_at(&fx);
+            std::construct_at(&fx, &gs, &es, nullptr);
+        }
+    }
     void process(float *L, float *R) override { fx.processBlock(L, R); }
     int ringoutBlocks() const override { return fx.getRingoutDecay(); }
     void setTempo(double bpm) override { gs.tempo = bpm; }
@@ -292,6 +305,10 @@ struct Context
     uint32_t pos{0};
     uint32_t quietBlocks{0}, quietLimit{1};
     std::atomic<bool> tail{false};
+    // No block has run since activation or reset: a state loaded now gets an effect built for it,
+    // which plays from the first block as on a fresh instance (an EQ's rate-matched coefficients
+    // included, which a change otherwise brings from the worker later).
+    std::atomic<bool> unheard{false};
     std::atomic<bool> offline{false}; // clap.render: the host renders offline
     bool renderFixed{false};          // main thread: the render mode was set, or the plugin activated
 
@@ -330,15 +347,21 @@ size_t contextHeldBytes(const Context &s)
     return held;
 }
 
-std::unique_ptr<Effect> build(Context &s, uint32_t modeId)
+// The parameter values of the effect's mode into its storage.
+void loadValues(Context &s, Effect &fx)
 {
-    const int m = s.cat.modeIndex(modeId);
-    auto fx = s.cat.modes[m].make(s.engine->sampleRate, &s.engine->worker, &s.offline);
-    fx->mode = modeId;
-    float *store = fx->params();
+    const int m = s.cat.modeIndex(fx.mode);
+    float *store = fx.params();
     for (size_t p = 1; p < s.cat.params.size(); ++p)
         if (s.cat.params[p].mode == m)
             store[s.cat.params[p].index] = s.values[p].load(std::memory_order_relaxed);
+}
+
+std::unique_ptr<Effect> build(Context &s, uint32_t modeId)
+{
+    auto fx = s.cat.modes[s.cat.modeIndex(modeId)].make(s.engine->sampleRate, &s.engine->worker, &s.offline);
+    fx->mode = modeId;
+    loadValues(s, *fx);
     fx->initialize();
     return fx;
 }
@@ -397,14 +420,12 @@ void runBlock(Context &s)
     if (s.fx->mode != s.wanted.load(std::memory_order_relaxed))
         requestCallback(s);
 
+    s.unheard.store(false, std::memory_order_relaxed);
+
     float inPeak = 0, outPeak = 0;
     for (int i = 0; i < block; ++i)
         inPeak = std::max({inPeak, std::abs(s.inL[i]), std::abs(s.inR[i])});
-    const int m = s.cat.modeIndex(s.fx->mode);
-    float *store = s.fx->params();
-    for (size_t p = 1; p < s.cat.params.size(); ++p)
-        if (s.cat.params[p].mode == m)
-            store[s.cat.params[p].index] = s.values[p].load(std::memory_order_relaxed);
+    loadValues(s, *s.fx);
     std::memcpy(s.outL, s.inL, sizeof(s.outL));
     std::memcpy(s.outR, s.inR, sizeof(s.outR));
     s.fx->process(s.outL, s.outR);
@@ -490,7 +511,8 @@ void rescanIfModeChanged(Context &s)
 }
 
 // The main-thread work; false if the wanted mode could not be built, and the current effect stays.
-bool mainThreadWork(Context &s)
+// rebuild: build the effect again even in the current mode (a state load before the first block).
+bool mainThreadWork(Context &s, bool rebuild = false)
 {
     s.callbackRequested.store(false);
     delete s.retired.exchange(nullptr, std::memory_order_acq_rel);
@@ -500,7 +522,7 @@ bool mainThreadWork(Context &s)
     const uint32_t want = s.wanted.load();
     auto *p = s.pending.load(std::memory_order_acquire);
     const uint32_t current = p ? p->mode : s.fxMode.load();
-    if (current == want)
+    if (current == want && !(rebuild && !p))
         return true;
     if (!p)
     {
@@ -746,7 +768,7 @@ bool stateLoad(const clap_plugin_t *plugin, const clap_istream_t *stream)
             setValue(s, id, v);
     if (!s.active)
         rescanIfModeChanged(s);
-    else if (!mainThreadWork(s)) // build the loaded mode now, so memory has settled when this returns
+    else if (!mainThreadWork(s, s.unheard.load())) // build the loaded mode now, so memory has settled when this returns
     {
         // The loaded mode could not be built: put back the state the host had.
         for (size_t p = 1; p < s.cat.params.size(); ++p)
@@ -857,6 +879,7 @@ bool activate(const clap_plugin_t *plugin, double rate, uint32_t, uint32_t)
     s.fxMode.store(s.fx->mode);
     s.quietLimit = std::max<uint32_t>(1, (uint32_t)std::ceil(s.fx->quietSeconds() * rate / block));
     clear(s);
+    s.unheard.store(true);
     s.active = true;
     return true;
 }
@@ -883,11 +906,17 @@ const clap_plugin_t *create(const clap_host_t *host, const Category &cat,
     s->plugin.deactivate = deactivate;
     s->plugin.start_processing = [](const clap_plugin_t *) { return true; };
     s->plugin.stop_processing = [](const clap_plugin_t *) {};
+    // At once, as a fresh instance: the effect as built, the block buffers empty.
     s->plugin.reset = [](const clap_plugin_t *p) {
         auto &s = self(p);
         if (s.fx)
+        {
+            s.fx->reset();
+            loadValues(s, *s.fx);
             s.fx->initialize();
+        }
         clear(s);
+        s.unheard.store(true);
     };
     s->plugin.process = process;
     s->plugin.get_extension = [](const clap_plugin_t *, const char *id) -> const void * {

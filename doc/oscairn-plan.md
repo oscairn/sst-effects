@@ -1518,6 +1518,35 @@ kHz (gate 83 µs). Lines of 229,512 / 249,792 / 499,388 bytes at 44.1 / 48 / 96 
 248,728 / 497,276 before; the memory tests cover every rate). Parameters unchanged (names, units,
 ranges, defaults), so the converter needs no change. Reverb plugin version 0.5.0.
 
+### Reset as a fresh instance (2026-11-06)
+
+Oscairn resets a used instance before giving it another Performance's state, or before playing it
+again with its own, and it must then render sample for sample as a fresh instance given that state
+(plugin-porting.md, "Expect a second life"). Reset re-initialized the effect, which left Reverb 2's
+tail and delay lines as they were, and an EQ change loaded after it was matched on the worker and
+crossfaded in later. Now:
+
+- Reset puts the effect back as built, in place and without allocating: a stock mode (no
+  allocations of its own) is constructed again where it is; an Oscairn mode clears everything in
+  its `initialize`; then the parameters are set and it is initialized, as after building it.
+- Until the first block after activation or a reset nothing has been heard, so a state loaded then
+  gets an effect built for it on the main thread (its EQ coefficients matched there), swapped in at
+  the first block; both effects are held until then, and the memory extensions say so, as in a mode
+  change. A load once the effect has played keeps it, and its tail, as before.
+- An EQ result the worker has matched but not yet applied is applied at the reset, without a
+  crossfade.
+
+What reset keeps: the parameters, the mode, the host's tempo and the render mode. One case is not
+as a fresh instance: an EQ change made within the few milliseconds before a reset with no state
+load after it, still being matched on the worker, arrives with its 2 ms crossfade a few blocks
+later, as any change does (a fresh instance matches at once). The plugin test "Reset leaves a fresh
+instance at once in every mode" compares every mode at 44.1 and 48 kHz with a fresh instance (the
+same state again, another state, no load with every parameter moved a block before the reset, and a
+load while deactivated) and runs reset under the allocation counter; it fails without the change
+and with each of the in-place construction, the parameters set before initializing, the build for
+a load before the first block (from activation, and from reset), its end at the first block, the
+buffers' clear and the EQ's applied result left out.
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -1591,6 +1620,7 @@ and in `oscairn-plugin-worker`, and Dynamics: all passed.
 | Render mode (`clap.render`, Oscairn `9bfc302`) | Met: set once after init, before state load and activation; the first set, or activation without one, fixes the mode for the instance's lifetime; offline matches EQs in process | "The render mode is set once and kept for the instance's lifetime" (fails when a later set may change the mode) |
 | A mode that changes which controls matter hides the others and rescans info | Met | "Editor hints…" |
 | Real-time safety: no allocation, lock, file access or waiting in `process` | Met; the EQs' matching (decision 19) runs off the audio thread; Hall A's changes are a few first-order designs, made in process (decision 27, revised; worst call 3.7-5.6 µs at 192 kHz) | "Processing never allocates" (including EQ changes at 48 kHz); "Rate matching runs off the audio thread" (worst call 1.8–5.2 µs at 192 kHz in the runs seen); ASan/UBSan and TSan in CI |
+| A second life: after `reset` (and a state load, or none) it renders as a fresh instance given that state, at once; reset allocates nothing | Met, but an EQ change still being matched when a reset comes without a load (section 15, "Reset as a fresh instance") | "Reset leaves a fresh instance at once in every mode" |
 | `CLAP_PROCESS_SLEEP` when idle | Met; a delay sleeps only after its longest gap | "The tail ends, and the plugin then sleeps"; "Tempo cross delay keeps playing between its echoes" |
 | `NOTE_CHOKE`, per-note volume, pitch bend, CLAP notes | Not applicable (no note input) | — |
 | Effect contexts with tails (RFC 0007) | Met: up to 64 contexts per engine, `resources` with tail activity | "Effect contexts are independent and share one engine" |

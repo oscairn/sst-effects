@@ -106,14 +106,18 @@ template <int N> class MatchedCascade final : public Job
     static size_t heapBytesAt(double rate) { return rate == designRate ? 0 : sizeof(State); }
     size_t heapBytes() const { return st ? sizeof(State) : 0; }
 
-    // Clears the filters' states; the coefficients stay.
+    // Clears the filters' states; the coefficients stay, but a result the worker has matched and
+    // not yet applied is applied now, without a crossfade (nothing is heard yet after a CLAP reset).
     void reset()
     {
         if (!st)
             return;
-        st->cur.reset();
-        st->old.reset();
-        st->fade = 0;
+        auto &S = *st;
+        S.cur.reset();
+        S.old.reset();
+        S.fade = 0;
+        if (const Result *r = S.results.fresh() ? S.results.read() : nullptr; r && r->gen > S.applied)
+            apply(*r, false);
     }
 
     // The 44.1 kHz design, one entry per slot, nullptr for a section left out (identity).

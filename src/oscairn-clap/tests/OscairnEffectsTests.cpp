@@ -2566,3 +2566,101 @@ TEST_CASE("Hall A's parameter changes stay cheap on the audio thread")
 #endif
     }
 }
+
+TEST_CASE("Reset leaves a fresh instance at once in every mode")
+{
+    constexpr double fresh_tempo = 100;
+    // Oscairn resets a used effect before giving it a state, or before playing it again with its
+    // own: it must then render sample for sample as a fresh instance (activated, then given the
+    // state), from the first block. Cases: the same state loaded again, another state, no load,
+    // and a load while deactivated. At 48 kHz the EQs' coefficients come rate-matched. Reset
+    // allocates nothing.
+    // A state in mode m with every parameter of that mode at fraction f of its range.
+    auto setAll = [](Plugin &a, int m, double f) {
+        auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+        for (uint32_t i = 1; i < params->count(a.p); ++i)
+        {
+            clap_param_info_t info;
+            REQUIRE(params->get_info(a.p, i, &info));
+            if ((info.id >> 8) != (clap_id)m)
+                continue;
+            double v = info.min_value + f * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            a.set(info.id, v);
+        }
+    };
+    auto stateAt = [&](const char *id, int m, double f) {
+        Plugin a(id);
+        a.set(1, m);
+        setAll(a, m, f);
+        Buffer buf;
+        REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+        return buf.data;
+    };
+    auto load = [](Plugin &pl, const std::string &data) {
+        Buffer buf;
+        buf.data = data;
+        return ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in);
+    };
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
+    {
+        Plugin probe(id);
+        clap_param_info_t info;
+        ext<clap_plugin_params_t>(probe.p, CLAP_EXT_PARAMS)->get_info(probe.p, 0, &info);
+        for (int m = (int)info.min_value; m <= (int)info.max_value; ++m)
+            for (double rate : {44100.0, 48000.0})
+            {
+                const std::string stateA = stateAt(id, m, 0.37), stateB = stateAt(id, m, 0.71);
+                std::vector<float> inL, inR, r1, r2;
+                signal((size_t)(rate / 2), inL, inR);
+                for (int c = 0; c < 4; ++c)
+                {
+                    INFO(id << " mode " << m << " at " << rate << ", case " << c);
+                    Plugin used(id);
+                    used.tempo = fresh_tempo;
+                    REQUIRE(load(used, stateA));
+                    used.activate(rate);
+                    used.render(inL, inR, r1, {64});
+                    // Every parameter moved a block before the reset: smoothers are mid-way.
+                    setAll(used, m, 0.55);
+                    std::vector<float> z(64, 0);
+                    used.render(z, z, r1, {64});
+                    if (!std::strcmp(id, eqId) && rate != 44100) // time for the worker to match the change
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    Buffer before;
+                    REQUIRE(ext<clap_plugin_state_t>(used.p, CLAP_EXT_STATE)->save(used.p, &before.out));
+                    const std::string next = c == 0 ? stateA : c == 2 ? before.data : stateB;
+                    allocations = 0;
+                    countAllocations = true;
+                    used.p->reset(used.p);
+                    countAllocations = false;
+                    REQUIRE(allocations == 0);
+                    if (c == 3)
+                        used.p->deactivate(used.p);
+                    if (c != 2)
+                        REQUIRE(load(used, next));
+                    if (c == 3)
+                        used.activate(rate);
+                    Plugin fresh(id);
+                    fresh.tempo = fresh_tempo;
+                    fresh.activate(rate);
+                    REQUIRE(load(fresh, next));
+                    const auto a = used.render(inL, inR, r1, {64}), b = fresh.render(inL, inR, r2, {64});
+                    REQUIRE(a == b);
+                    REQUIRE(r1 == r2);
+                }
+            }
+    }
+    // Once it has played, a state load keeps the effect (and its tail): nothing is built for it.
+    Plugin pl;
+    pl.activate();
+    std::vector<float> inL, inR, r;
+    signal(4800, inL, inR);
+    pl.render(inL, inR, r, {64});
+    oscairn_memory_t before{}, after{};
+    REQUIRE(memoryExt(pl.p)->current(pl.p, &before));
+    REQUIRE(load(pl, stateAt(reverbId, 2, 0.71)));
+    REQUIRE(memoryExt(pl.p)->current(pl.p, &after));
+    REQUIRE(after.context_bytes == before.context_bytes);
+}
