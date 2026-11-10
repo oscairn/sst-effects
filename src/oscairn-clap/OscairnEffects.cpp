@@ -225,7 +225,7 @@ const std::vector<Category> &categories()
     static const std::vector<Category> all = [] {
         std::vector<Category> c;
         Category reverb{{CLAP_VERSION_INIT, "org.oscairn.effects.reverb", "Oscairn FX Reverb",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.5.1",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.5.2",
                          "Reverbs, one mode per algorithm", reverbFeatures},
                         {},
                         2,
@@ -238,7 +238,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(reverb));
 
         Category eq{{CLAP_VERSION_INIT, "org.oscairn.effects.eq", "Oscairn FX EQ", "Oscairn",
-                     "https://github.com/oscairn/sst-effects", "", "", "0.1.1",
+                     "https://github.com/oscairn/sst-effects", "", "", "0.1.2",
                      "Equalizers, one mode per design", eqFeatures},
                     {},
                     1,
@@ -251,7 +251,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(eq));
 
         Category delay{{CLAP_VERSION_INIT, "org.oscairn.effects.delay", "Oscairn FX Delay", "Oscairn",
-                        "https://github.com/oscairn/sst-effects", "", "", "0.1.1",
+                        "https://github.com/oscairn/sst-effects", "", "", "0.1.2",
                         "Delays, one mode per design", delayFeatures},
                        {},
                        1,
@@ -261,7 +261,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(delay));
 
         Category dynamics{{CLAP_VERSION_INIT, "org.oscairn.effects.dynamics", "Oscairn FX Dynamics",
-                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.1",
+                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.2",
                            "Compressors and other dynamics, one mode per design", dynamicsFeatures},
                           {},
                           1,
@@ -804,9 +804,10 @@ const oscairn_plugin_memory_t memory{
         return true;
     }};
 
-// oscairn.ui: Mode first, then the selected mode's parameters in their order; the effect's main
-// control (its knob in the Effects bank) is the parameter named "Mix", or "Output Level" in a mode
-// without a Mix. Other modes' parameters get no hint.
+// oscairn.ui (draft 5): Mode first, then the selected mode's parameters in their order; the effect's
+// main control (its knob in the Effects bank) is the parameter named "Mix", or "Output Level" in a
+// mode without a Mix. Other modes' parameters get no hint. No rich views (algorithm) and no time
+// information (seconds): these are effects, with no envelope or map to draw.
 const oscairn_plugin_ui_t ui{[](const clap_plugin_t *plugin, clap_id id, oscairn_param_hint_t *h) -> bool {
     auto &s = self(plugin);
     const int p = s.cat.paramIndex(id);
@@ -826,7 +827,7 @@ const oscairn_plugin_ui_t ui{[](const clap_plugin_t *plugin, clap_id id, oscairn
     if (name == "Mix" || (name == "Output Level" && !modeHasMix))
         h->role = OSCAIRN_ROLE_MIX;
     return true;
-}};
+}, nullptr, nullptr};
 
 const oscairn_plugin_effect_contexts_t contexts{
     [](const clap_plugin_t *p, const clap_host_t *host) -> const clap_plugin_t * {

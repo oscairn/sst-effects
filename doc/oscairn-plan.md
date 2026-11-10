@@ -102,7 +102,7 @@ so a borrowed block must be GPL-3.0-compatible.
 | Rubber Band | GPL-2.0 text in `COPYING`; headers "version 2 of the License, or (at your option) any later version" (or commercial) | Yes, as GPL-3.0 | Not planned; Signalsmith Stretch covers pitch change |
 | Mutable Instruments eurorack (Surge fork, used by Nimbus) | README: "Code (STM32F projects): MIT license", AVR projects GPL-3.0 | Yes | Upstream dependency, unchanged |
 | CLAP SDK | MIT (`LICENSE`) | Yes | Plugin API, pinned at 1.2.7 |
-| Oscairn extension headers (`core/clap-ext/include/oscairn-clap/`) | MIT (SPDX headers) | Yes | Vendored unchanged in `libs/oscairn-clap/` |
+| Oscairn extension headers (`include/oscairn-clap/` in oscairn/oscairn-clap) | MIT (SPDX headers) | Yes | Vendored unchanged in `libs/oscairn-clap/` |
 
 Each borrowed file keeps its header and notice, is pinned to a commit in `libs/` or copied with
 its origin recorded in `src/oscairn-clap/CREDITS.md`, and is credited in Oscairn's CREDITS when
@@ -369,7 +369,7 @@ tests are not changed.
 | Side-chain | Plugins with side-chain types declare a second, non-main stereo input port, "Side-chain", on every context. A mode without side-chain ignores it; a side-chain mode with nothing connected uses the main input, as the reference does when its source is Off |
 | Tempo | From the CLAP transport at every `process` call; 120 BPM when absent (built with the tempo cross delay) |
 | Work off the audio thread | Each engine owns a worker thread, started with the first context that needs it (decision 19): the EQs' rate matching runs there and comes back through lock-free triple buffers; the audio thread only posts and wakes. Offline (`clap.render`), the same work runs in process so renders do not depend on timing |
-| Editor hints | `oscairn.ui/draft-3`: Mode first by priority, then the selected mode's parameters in their order; a parameter named Mix carries the `mix` role |
+| Editor hints | `oscairn.ui/draft-5`: Mode first by priority, then the selected mode's parameters in their order; a parameter named Mix carries the `mix` role; the draft 4 view fields and the draft 5 `algorithm` and `seconds` callbacks are null (effects have no envelope or map views) |
 | Sample rates | Oscairn runs mostly at 48 kHz; any rate from 8 kHz to 768 kHz activates. Fitted behaviour is written in seconds and hertz, never in samples at 44.1 kHz, and every fitted-behaviour gate runs at 44.1, 48 and 96 kHz |
 | Real-time safety | No allocation, lock or file access in `process`; parameter values cross threads as atomics. Tests count allocations during `process` and run under ASan/UBSan and TSan |
 | Platforms | macOS (arm64) for the desktop, Linux ARM64 for the device, Linux x86_64 in CI |
@@ -515,7 +515,7 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     become modes, the wrapper will reseed them from a fixed seed in a new file (stock DSP
     unchanged), and the uninitialized reads go upstream as bug reports. Section 15, M0.
 16. **Memory declaration.** The plugins implement Oscairn's draft `oscairn.memory` extension
-    (`memory.h`, vendored from Oscairn `17c43f6`, refreshed from `d7ac261`): `estimate(rate, max_frames)` after state
+    (`memory.h`, vendored from Oscairn `17c43f6`, refreshed from `d7ac261`, and from oscairn/oscairn-clap `7b5c4e0`): `estimate(rate, max_frames)` after state
     load and before activation, `current` after activation, as shared, per-context and asset
     bytes, the same shared and context bytes as `oscairn.effect-contexts`. Oscairn's host does
     not read it yet, so it is tested only through this repository's test host. Until the host
@@ -1609,7 +1609,7 @@ and in `oscairn-plugin-worker`, and Dynamics: all passed.
 | Note ports | Not applicable (effects) | — |
 | Params extension complete; unique IDs; finite ranges; defaults in range; at most 32,768 | Met | Load-checks test |
 | State and audio-ports extensions complete | Met | Load-checks test |
-| `oscairn.memory` complete; the declaration fits the budget | Met (draft vendored from Oscairn `d7ac261`) | "Declared memory equals what activation holds…", "The memory estimate follows another state load…" for every plugin and mode at 44.1–192 kHz |
+| `oscairn.memory` complete; the declaration fits the budget | Met (draft vendored from oscairn/oscairn-clap `7b5c4e0`) | "Declared memory equals what activation holds…", "The memory estimate follows another state load…" for every plugin and mode at 44.1–192 kHz |
 | Activates at the host's rate and maximum block | Met: 8–768 kHz, any block | "Output does not depend on the host's block size", the rate tests; host check at 48 kHz, 256-frame blocks |
 | Audio port layout constant while loaded | Met | "Audio ports stay the same whatever the mode or state" (fails with a mode-dependent port count) |
 | Build for macOS arm64 and Linux arm64 | Met in CI (macOS arm64, Linux ARM64, Linux x86_64); no packaged bundle yet | CI jobs |
