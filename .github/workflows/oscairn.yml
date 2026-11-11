@@ -53,7 +53,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}" -DCMAKE_MODULE_LINKER_FLAGS="${{ matrix.flags }}"
       - name: Build
-        run: cmake --build build --target oscairn-effects oscairn-effects-tests sst-effects-test
+        run: cmake --build build --target oscairn-effects oscairn-effects-tests sst-effects-test oscairn-effects-privacy-host
       - name: Upstream tests
         env:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -64,6 +64,12 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           TSAN_OPTIONS: halt_on_error=1
         run: ./build/src/oscairn-clap/oscairn-effects-tests
+      - name: Privacy
+        run: |
+          for id in reverb eq delay dynamics; do
+            src/oscairn-clap/tests/privacy-check.sh build/src/oscairn-clap/oscairn-effects-privacy-host \
+              build/src/oscairn-clap/oscairn-effects.clap org.oscairn.effects.$id
+          done
       - name: Stock-vs-fork gate
         if: matrix.gate
         run: ./src/oscairn-clap/scripts/stock-gate.sh build-stock-gate

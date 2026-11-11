@@ -21,6 +21,11 @@ add_executable(oscairn-effects-tests tests/OscairnEffectsTests.cpp)
 target_link_libraries(oscairn-effects-tests PRIVATE oscairn-effects-core)
 target_include_directories(oscairn-effects-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/catch2)
 
+# Opens a plugin as Oscairn does, for tests/privacy-check.sh: nothing may touch the user's
+# Documents, Desktop or Downloads, or create anything under HOME.
+add_executable(oscairn-effects-privacy-host tests/privacy-host.cpp)
+target_link_libraries(oscairn-effects-privacy-host PRIVATE clap ${CMAKE_DL_LIBS})
+
 # Runs a WAV file through a plugin, for measurements against reference renders (plan, section 11).
 add_executable(oscairn-effects-render tools/OscairnEffectsRender.cpp)
 target_link_libraries(oscairn-effects-render PRIVATE oscairn-effects-core)
