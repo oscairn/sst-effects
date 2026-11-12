@@ -26,24 +26,40 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-24.04
+            compiler: gcc
+            sanitizer: none
             flags: ""
             gate: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
+            compiler: gcc
+            sanitizer: none
             flags: ""
             gate: true
           - name: macOS arm64
             os: macos-15
+            compiler: appleclang
+            sanitizer: none
             flags: ""
             gate: true
           - name: Linux ARM64 ASan UBSan
             os: ubuntu-24.04-arm
+            compiler: gcc
+            sanitizer: asan-ubsan
             flags: "-fsanitize=address,undefined -fno-omit-frame-pointer"
             gate: false
           - name: Linux ARM64 TSan
             os: ubuntu-24.04-arm
+            compiler: gcc
+            sanitizer: tsan
             flags: "-fsanitize=thread"
             gate: false
+    env:
+      # the CPM packages, downloaded once and kept in the cache below; and ccache for every
+      # cmake build in the job, the stock gate's included
+      CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -51,6 +67,15 @@ jobs:
       - name: Install Ninja
         run: |
           if [[ "$RUNNER_OS" == "Linux" ]]; then sudo apt-get update && sudo apt-get install -y ninja-build; else brew install ninja; fi
+      - uses: actions/cache@v4
+        with:
+          path: .cpm-cache
+          key: cpm-${{ hashFiles('CMakeLists.txt', 'cmake/*.cmake') }}
+      - uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: oscairn-effects-${{ matrix.os }}-${{ matrix.compiler }}-RelWithDebInfo-${{ matrix.sanitizer }}
+          max-size: 1000M
+          evict-old-files: job
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSST_EFFECTS_BUILD_OSCAIRN=ON \
