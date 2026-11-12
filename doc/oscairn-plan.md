@@ -219,7 +219,7 @@ reverb DSP:
 | Chorus | 6 | 4 | 1 | 1 | |
 | Flanger | 5 | 4 | 0 | 1 | yes |
 | Phaser | 5 | 3 | 0 | 2 | yes |
-| Tremolo & Rotary | 7 | 4 | 3 | 0 | |
+| Tremolo & Rotary | 7 | 3 | 3 | 1 | |
 | Distortion & Amp | 12 | 1 | 11 | 0 | |
 | Dynamics | 7 | 5 | 0 | 2 | yes |
 | Wah | 3 | 0 | 0 | 3 | |
@@ -227,7 +227,7 @@ reverb DSP:
 | Tech | 18 | 4 | 1 | 13 | yes |
 | EQ | VCM EQ 501 + Part 3-band, Part 2-band, Master 5-band | 0 (+3 EQs on sst-filters biquads) | 0 | 1 | |
 | Misc | 11 | 3 | 3 | 5 | yes |
-| **All 104 types** | | **41** | **23** | **40** | |
+| **All 104 types** | | **40** | **23** | **41** | |
 
 **Base** means an sst-effects effect (bus or voice) with a parameter mapping and, where the
 reference differs, a reference-matching mode. **Borrowed** means a block from another project
@@ -284,7 +284,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | CONTROL PHASER | 05 18 | Var,InsA/B,A/D |  | 4 | 0 | Phaser | base | sst Phaser, manual sweep + mapping |
 | AUTO PAN | 06 00 | Var,InsA/B,A/D |  | 311 | 132 | Tremolo & Rotary | base | sst voice Tremolo (pan mode) + mapping |
 | TREMOLO | 06 10 | Var,InsA/B,A/D |  | 205 | 69 | Tremolo & Rotary | base | sst voice Tremolo + mapping |
-| ROTARY SPEAKER 1 | 06 20 | Var,InsA/B,A/D |  | 223 | 440 | Tremolo & Rotary | base | sst RotarySpeaker + mapping |
+| ROTARY SPEAKER 1 | 06 20 | Var,InsA/B,A/D |  | 223 | 440 | Tremolo & Rotary | written | own two-rotor model fitted to renders, mode "Rotary A" (built; section 15, decision 28) |
 | ROTARY SPEAKER 2 | 06 30 | Var,InsA/B,A/D |  | 42 | 2 | Tremolo & Rotary | base | sst RotarySpeaker (separate horn/rotor speeds, mic angle) + mapping |
 | VCM ROTARY SPEAKER CLASSIC | 06 40 | Rot |  | 0 | 0 | Tremolo & Rotary | borrowed | setBfree `b_whirl` (GPL-2.0+) + own preamp |
 | VCM ROTARY SPEAKER OVERDRIVE | 06 41 | Rot |  | 0 | 0 | Tremolo & Rotary | borrowed | setBfree `b_whirl` (GPL-2.0+) + own overdrive preamp |
@@ -587,6 +587,18 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     set after seeing -62.7 to -77.1 dBFS and accepted by Jacob (2026-11-06), who also accepted
     leaving CI's macOS timing margin as it was (worst call 60.8 µs against the 83 µs gate in run
     42172719359).
+28. **Decided (Jacob, 2026-11-11): the two-rotor rotary type (ROTARY SPEAKER 1) is an own model**,
+    a dedicated mode in this repository ("Rotary A" of a new plugin, Oscairn FX Tremolo & Rotary),
+    not sst RotarySpeaker and not the setBfree rotary model (`b_whirl`). Built (section 15, "Rotary A"). Open points
+    from building it, for Jacob:
+    - **The effect's main control.** The mode has no Mix and no Output Level (the reference has
+      neither), so no parameter carries the `mix` role and Oscairn puts the first parameter by
+      priority (Mode) on the Effects knob. The editor-hints test now expects no role for it. A
+      `mix` role on Speed, or Balance, would be a choice.
+    - **CI's privacy step lists the plugin IDs** (`.github/workflows/oscairn.yml`) and does not name
+      `org.oscairn.effects.tremolo-rotary`; the workflow was left unchanged in this round. The
+      check passes for it locally.
+    - **The shelves miss the rate gate** (known difference 35) and **their law is not found** (34).
 
 ## 14. Risks and not verified
 
@@ -693,6 +705,7 @@ Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
 | Master EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,992 | 1,344 / 62,568 | 0 | not measured |
 | Tempo Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 527,944 / 574,312 / 1,144,960 | 0 | not measured |
 | Circuit Compressor | any | 120 | (new) | 792 | 0 | not measured |
+| Rotary A | any | 120 | (new) | 34,112 | 0 | not measured |
 
 "Context" is the context's own storage plus its effect (`sizeof`, arm64 macOS build), the same
 figure `resources` reports; since decision 20 it includes the effect's own heap allocations (the
@@ -1547,6 +1560,132 @@ and with each of the in-place construction, the parameters set before initializi
 a load before the first block (from activation, and from reset), its end at the first block, the
 buffers' clear and the EQ's applied result left out.
 
+### Rotary A: the two-rotor rotary speaker (built 2026-11-11)
+
+Decision 28. Mode "Rotary A" (id 1) of a new plugin, Oscairn FX Tremolo & Rotary
+(`org.oscairn.effects.tremolo-rotary`, version 0.1.0), `effects/RotarySpeaker.h`: written. The
+plugin will also hold the tremolo, auto-pan and other rotary types (section 6); none of them is
+built. Measurements: the first rotary batch (`rotary-2026-11-11`: steady per-note probes, rates,
+mic 0/30/60, ramps, statics, drive 16-127) and batch b (`rotary-2026-11-11b`, recorded for this
+mode: 25 renders and 42 sequences, then all 61 mic angle values; every job written, no gaps in the
+held tones), both in the shared measurements folder, never committed. Analysis drivers are kept
+outside the repositories (`make_probes3.py`, `make_probes4.py`, `suite.py`, `cmp_ramp.py`,
+`cmp_steady.py`, `cmp_static.py`, `fit3.py`, `fitx.py`, built on the first batch's `rot.py`); the
+plugin is run on synthetic sines (the probes' sources) by a scratch copy of
+`tools/OscairnEffectsRender.cpp` that also switches parameters at given times.
+
+Structure, as the measurements show it:
+
+- A crossover on the mono sum: the rotor takes a second-order low-pass, the horn a second-order
+  high-pass, inverted. Fitted with modulation off (depth 0, rotors stopped; c_bal1, c_bal127,
+  c_bal64): rotor 619.5 Hz, horn 999.2 Hz, Q 0.70 both, gains 9.18 and 6.81 dB; rms 0.024 dB, worst
+  0.25 dB. With the horn not inverted the best fit is 3.7 dB off.
+- Each rotor reads its band from a delay line through modulated taps: one per output channel,
+  whose delay swings sinusoidally with the rotor's angle and whose gain dips by an AM depth 90
+  degrees ahead; the rotor also has a centre tap shared by both channels. The pitch deviation in
+  cents is the same at every frequency (a pure delay swing): the horn's delay is a clean sinusoid of
+  0.745 ms peak at the default setting at 2.6 and 7 kHz alike. The rotor's two taps were found by
+  fitting the complex envelope of r_slow_n36/48/55 (fast likewise): channel tap at half the mic
+  angle each side, centre tap weight 0.83 at angle offset 0.1 degrees, both with the same swing,
+  AM 90 degrees ahead of the swing, centre AM 1.42 times the channel tap's; residual 2.3% of the
+  envelope. The horn has a second path that this model leaves out (known difference 32).
+- With depth 0 the static response is flat (c_flat within 0.8 dB from 33 Hz to 18 kHz), so the taps
+  share their centre: their delays differ only by the swing.
+
+| Law | Fitted on | Against the fitting renders |
+| --- | --- | --- |
+| Speeds in Hz as set; the fast and slow speeds are separate parameters | r_slow, r_fast, r_rate_* (0.42-9.76 Hz) | rotation rate within 0.09% (rotor) and 0.12% (horn) wherever the analysis tracks it |
+| Rotor ramp: linear in Hz, the whole slow-fast difference in the ramp time | r_ramp_def, t64, t127, jacob | slope within 0.6% (up) and 2.6% (down) except def down -7.4% (table below) |
+| Horn ramp: exponential with the time constant when slowing down, 0.925 times it when speeding up | same | time constant within 3.4% (up) and 5.2% (down) |
+| Delay swing (peak) at 100 % depth: rotor 2.13 ms slow, 1.72 ms fast; horn 1.69 ms slow, 1.21 ms fast; proportional to the depth | r_slow, r_fast, c_slow_d*, c_fast_d*, b_r_* | the reference's cents per hertz of rotation grow in proportion (rotor slow 0.120, 0.118, 0.118, 0.1166, 0.1145, 0.1095 per step at 4, 16, 32, 64, 96, 127; horn slow 0.1445 per step from 24 to 127) |
+| AM depth: rotor 0.73 slow / 0.74 fast, horn 0.45 / 0.71, full from 14.0 / 26.7 % (rotor) and 17.4 / 40.3 % (horn) depth, in proportion below | c_slow_d4-d40, c_fast_d8-d96, steady renders | the reference's AM stops growing between depths 12 and 20 (slow) and 24 and 40 (fast); AM fundamental within 0.32 dB median |
+| Swing and AM depth switch with the speed switch, gliding over 20 ms | rates at equal speed in both modes (r_rate_slow63 2.65 Hz against r_rate_fast64 2.69 Hz: 5.71 against 4.67 cents per hertz) | |
+| Mic angle in steps (table below), half the effective angle each side | d_mic0-60 (every value), r_mic*, c_mic* | L/R pitch phase within 1.4 degrees on the slow mic probes (rotor and horn); fast, the horn's is 25-56 degrees off (32) |
+| Balance: rotor cos, horn sin of (pi / 4)(1 + b / 100) | c_bal1-127 | within 0.05 dB at the six balances not used in the fit (c_bal16-112) |
+| Level with modulation: rotor +0.5 dB, horn -2.2 dB at full AM depth, in proportion below | r_slow, r_fast gains | per-note gain, 65 Hz-12.5 kHz, slow and fast: median 0.33 dB, worst 1.11 dB |
+| Shelves: the fork's shared slope-0.5 shelf (FiveBandEq) | none fitted | known difference 34 |
+| Latency: the tap centre is the larger of the two speeds' swings at the depth, plus a sample; the plugin reports its 16-sample block | c_lat_* (Variation slot beside the dry part) | the reference's output at depth 0 aligns with its dry path within 3 samples |
+
+Mic angle steps (the platform value v, angle 3v degrees): the rotor's taps take effective angles 0,
+30, 60, 90, 120, 150 and 180 degrees from v = 0, 10, 12, 26, 36, 50 and 52; the horn's 0, 31, 61,
+75, 88, 105, 121 and 180 from v = 0, 12, 14, 26, 28, 36, 38 and 52 (its L/R pitch phase in each step;
+d_mic*). The plugin takes degrees and applies the steps at the midpoints between values.
+
+**Mapping law for the converter** (raw value to plugin parameter; parameter 10 is unused):
+
+| Raw parameter | Plugin parameter | Law |
+| --- | --- | --- |
+| 16 Speed Control | Speed | 0 Slow, 1 Fast |
+| 1, 2 Rotor / Horn Speed Slow (0-63) | Rotor / Horn Slow Speed, Hz | 2.65 i / 63 (the Data List's table 1 prints this rounded to 0.01 Hz) |
+| 3, 4 Rotor / Horn Speed Fast (64-127) | Rotor / Horn Fast Speed, Hz | the Data List's table 1 value at i (measured 2.692, 4.374, 6.729, 7.402, 9.757 Hz at 64, 80, 91, 93, 100) |
+| 5 Rotor Slow/Fast Time | Rotor Ramp Time, s | 0.0964 v |
+| 6 Horn Slow/Fast Time | Horn Time Constant, s | -0.0964 / ln(1 - 2.4 / v) for v >= 3, 0 for v <= 2 |
+| 7, 8 Drive Rotor / Horn | Rotor / Horn Depth, % | 100 v / 127 |
+| 9 Rotor/Horn Balance (1-127) | Balance, % | 100 (v - 64) / 63 |
+| 11, 13 EQ Low / High Frequency | Low / High Shelf Frequency, Hz | the Data List's table 3 value at i |
+| 12, 14 EQ Low / High Gain (52-76) | Low / High Shelf Gain, dB | v - 64 |
+| 15 Mic L-R Angle (0-60) | Mic Angle, degrees | 3 v |
+
+Ramps, the reference against the plugin on the same timeline (wheel at 6 and 18 s), each analysed
+with the first batch's rate tracker and fit (`ramps.py`): the rotor's linear slope and the horn's
+time constant, error of the plugin's against the reference's. The fitting set is def, t64, t127
+and jacob (Jacob's setting); hold, ho0 and ho1 are hold-outs (b_r_ramp_hold from the first batch,
+c_ramp_ho0/1 from batch b, never fitted). M5 asks for speeds and acceleration within 5%.
+
+| Ramp | Rotor up | Rotor down | Horn up | Horn down |
+| --- | --- | --- | --- | --- |
+| def (fit) | -0.5% | -7.4% | +3.4% | -0.1% |
+| t127 (fit) | -0.0% | -2.6% | -2.7% | +0.5% |
+| t64 (fit) | +0.6% | +2.0% | +1.2% | +5.2% |
+| jacob (fit) | +1.7% | +0.6% | -1.5% | -1.3% |
+| hold (hold-out) | +1.0% | -5.4% | -1.0% | -0.5% |
+| ho0 (hold-out) | +1.1% | -5.7% | -1.7% | -2.3% |
+| ho1 (hold-out) | +2.6% | +7.9% | -2.0% | -1.7% |
+
+So the speeds meet M5 everywhere and the horn's acceleration meets it except t64 down (+5.2%);
+the rotor's slowing slope misses it in four of seven ramps, by -7.4 to +7.9% with both signs. The
+plugin's ramps are symmetric and its up slopes match within 2.6%, so these are most likely the
+tracker's fit of the reference's slowing ramp (its median track deviation there is 2-7%); not
+verified (known difference 37).
+
+Steady modulation, two-note probes (196 and 2637 Hz), the plugin against the reference
+(`suite.py`): absolute errors, median / worst. Rows where the reference shows no modulation at
+the note (depth 0, speed 0 or the analysis' limit at 39.7 Hz) are left out.
+
+| Set | Rotor rate | Rotor AM fundamental | Rotor pitch deviation | Rotor L/R pitch phase | Horn rate | Horn AM | Horn pitch | Horn L/R pitch phase |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Fitting (42 / 41 probes) | 0.02 / 0.09% | 0.32 / 2.01 dB | 2.1 / 13.5% | 2 / 20 deg | 0.03 / 0.12% (one tracker failure at 45%) | 0.31 / 1.36 dB | 0.9 / 66% | 2 / 96 deg |
+| Hold-out c_ho0-5 (12 / 9) | 0.03 / 0.22% | 1.09 / 3.41 dB | 10.2 / 19.6% | 2 / 3 deg | 0.08 / 0.32% (two anomalies, below, left out of every horn column) | 0.24 / 1.38 dB | 16.6 / 76% | 15 / 20 deg |
+| Jacob's setting, slow / fast | +0.02 / -0.03% | +0.45 / +0.40 dB | -2.5 / -4.6% | +1 / +1 deg | +0.01 / -0.02% | +0.06 / -0.99 dB | -0.5 / -13.0% | -2 / -2 deg |
+
+The worst cases: the rotor at high depth (96-124) with a small mic angle, where the reference's
+pitch deviation grows less than in proportion and its AM less (hold-outs ho3-ho5: +13 to +20%,
++1.7 to +3.4 dB; known difference 33); the horn in fast mode, whose pitch measure is 13-22% low at
+depths 16-40 and whose L/R phase the reference's second path moves (32, 36). Two hold-out horn rows
+are not understood: ho3 slow (horn at 0.17 Hz, balance strongly toward the rotor; the reference
+reads 0.73 Hz with almost no modulation) and ho4 slow (reference 1.095 Hz with 3.8 cents against a
+set 0.967 Hz and depth 93%); both look like the analysis picking up another component, unverified.
+
+Statics (modulation off, saw at note 24, 33 Hz-16 kHz where the reference is above -30 dB): flat
+0.01 dB, the crossover's rotor-only and horn-only 0.14 / 0.00 dB, the six balances not fitted
+within 0.05 dB; shelves 0.05-3.16 dB (34).
+
+Plugin tests ("Rotary A: ..."), each checked to fail with its law broken: steady speeds at 44.1,
+48 and 96 kHz within 0.3% (fails with the phase step at 44.1 kHz at every rate: 8.7% off); ramps,
+every rotation within 0.05 turns of the law at 44.1, 48 and 96 kHz (worst seen 0.032; fails with the
+horn's up ratio removed, 0.23 turns, and with an exponential rotor ramp, 5.0 turns); the horn's swing
+and AM depth by depth setting and the rotor's swing doubling (fails with the AM in proportion to
+the depth, 0.11 off, and with the swing as the square root, 870%); the crossover and balance against
+19 reference levels within 0.15 dB, and at 48 and 96 kHz within the rate gate (fails with the horn
+not inverted, 7.4 dB, and with a linear balance, 3.2 dB; it does not fail with the crossover designed
+at the running rate instead of keeping the 44.1 kHz corners, whose difference at the tested points is
+within the gate); the horn's L/R phase at twelve mic angles within 2 degrees (fails with a continuous
+angle, 33 degrees); linearity: twice the input gives twice the output to 1e-5 and harmonics stay
+below -100 dB (fails with a saturating output). "Processing never allocates" switches speed, depth and
+a shelf while playing. The generic tests (load checks, editor hints, ports, memory, reset) include
+the new plugin. Memory: 34,112 bytes per context at every rate (two 4,096-sample lines; no heap
+allocation).
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -1569,7 +1708,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
 | 13 | (Superseded by 23 for the built Hall A.) Hall reverb measurements; displayed time against measured decay; level and onset now measured (fx17: wet −2.89 / −3.23 dB re the dry click at factory settings, onset = initial delay + 48.4 ms) | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
-| 14 | Types not built | 100 of the 104 types (the five-band EQ, the tempo cross delay, the hall reverb and the circuit-style compressor are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 14 | Types not built | 99 of the 104 types (the five-band EQ, the tempo cross delay, the hall reverb, the circuit-style compressor and the two-rotor rotary are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
 | 15 | (Superseded by 26–29 for the built Circuit Compressor.) Compressor measurements fx7–fx23 | Static curve (fx7, fx13), steps (fx21–fx23): explained by a makeup gain set by the settings (section 15) | Reference behaviour | Built 2026-11-05 | fx7, fx13, fx21–fx23 | `effects/CircuitCompressor.h` |
 | 16 | Tempo cross delay at tempos other than 120 BPM | Not measured | The recorder's host is fixed at 120 BPM | The plugin follows the transport tempo by the note values (assumed) | — | `effects/TempoCrossDelay.h` |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
@@ -1587,6 +1726,15 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 29 | Circuit compressor has no side-chain input | The reference takes a side-chain source (parts, A/D, master); its side-chain level changed nothing without a source (fx23) | Not built in the first version; the plugin's port layout will change when it is | Deliberate for now | fx23 `s_sc127` | `OscairnEffects.cpp` (ports) |
 | 30 | (Mostly resolved 2026-11-06.) Hall A level at low and high ratios | Was too loud by 4.6-5.0 dB at high ratio 0.1 (fx19 `r_h1`, fx27 `g_h1_*`). Now the 26 high-ratio renders of fx19 and fx27 are within 1.5 dB (sd 0.29 dB), and fx30's energy is 12 of 16 within 1.5 dB (fx28 was 7 of 16). Left: this design's tank recirculates within the first 300 ms, so its per-pass loss begins earlier than the reference's: over 12-300 ms after the onset it takes 0.3-0.6 dB more than the reference off 1-4 kHz at high ratio 0.1 (12-150 ms: within 0.52 dB) | The reference low-passes the whole input once by the high ratio (cutoffs fitted to the renders' first 300 ms) and shelves it once by the low ratio, corner 800 Hz nearest DC; the model's in-loop filters only acted inside the tank. The rest: this design's shorter loop | Fixed filters resolved; the earlier per-pass loss deliberate for now (needs the reference's loop lengths) | fx19 `r_h*`, `r_l*`, fx27 `g_h*`; scratch `win.py`, `hrpre.py`, `lrpre.py`, `refnb.py`; plugin test "the ratios' fixed filters act on the whole reverb from its first reflection on" | `effects/HallReverb.h` (`pre`, `inHighHz`, `shelf`) |
 | 31 | Tempo cross delay at its shortest times at rates other than 44.1 kHz | A time that rounds below 33 samples at the running rate (a 1/32 triplet or a shorter value with a negative lag: below 0.69 ms at 48 kHz, 0.17 ms at 192 kHz) plays at 33 samples; at 44.1 kHz every length down to one sample is exact | The damping filter's 32-sample delay comes off the line, which is held at a sample so the fractional all-pass stays stable (before 2026-11-06 it was not: a line below a sample put the all-pass's pole outside the unit circle and the output grew without bound) | Deliberate | Plugin test "Tempo cross delay stays stable at its shortest time at every rate" | `Line::setLength` |
+| 32 | Rotary A: the horn's second path | At a mic angle above 0 the reference's horn amplitude dips by up to 17 dB within a rotation, more often at higher notes, and its static (stopped) response has a comb; in fast mode its L/R pitch phase is 108-150 degrees at the default angle (180 in the plugin), and its AM keeps growing with depth past the slow-mode saturation | A second horn path whose delay differs from the main tap's by the swing (at angle 0 the comb vanishes, as the taps coincide); two-tap fits with a shared or a crossed second tap reached 0.34-0.53 of the envelope and were dropped | Unresolved; the horn is one tap per channel | first batch r_slow_n88-127, r_fast_*; batch b c_fast_d*; scratch `fit2.py`-`fit5.py`, `suite.py` | `effects/RotarySpeaker.h` (`centreTap` for the horn is 0) |
+| 33 | Rotary A: the rotor at high depth and small mic angles | Hold-outs ho3-ho5 (depth 97-124, angle 27-96 degrees): pitch deviation +13 to +20%, AM fundamental +1.7 to +3.4 dB; at the default depth the mic sweep is within 0.5 dB (180 degrees) to 2.0 dB (0 degrees) | The reference's pitch deviation grows less than in proportion above about 64 (0.1095 cents per hertz per step at 127 against 0.120 at 4) and its AM interacts with the swing; the centre tap's AM ratio (1.42) is the envelope fit's, which keeps the default angle's phases (a lower ratio, 1.1-1.3, trades 0.5-1.5 dB at angle 0 for 4-15 degrees of phase at 180) | Unresolved | c_ho3-5, b_r_slow_dr96/127, d_mic*; `suite.py` | `fitted.pitchMsFull`, `centreAmRatio` |
+| 34 | Rotary A: shelves | Batch b, modulation off: 0.05 dB (16 kHz, +6), 0.20 (80 Hz, -6), 1.23 (315 Hz, +6), 1.43 (4 kHz, -12), 1.90 (1.2 kHz, -6), 3.16 dB (315 Hz, -12). The reference's +12 dB probes clip inside the reference (a saw at velocity 90), so they are not usable | Neither the shared slope-0.5 shelf (corner on the flat side), the cookbook shelf with a free corner and slope, nor a first-order shelf fits every probe; fitted corners and slopes move with the setting | Unresolved; the fork's shared shelf ships | batch b c_eq_*; scratch `fiteq.py` | `eq::shelf` in `effects/FiveBandEq.h` |
+| 35 | Rotary A: shelves at other rates | Against the plugin's own 44.1 kHz response, modulation off: high shelf 16 kHz +6 dB 0.14 / 0.52 dB at 48 / 96 kHz below 16 kHz (1.47 dB at 20 kHz at 96 kHz); low shelf 2 kHz +12 dB 0.09 / 0.47 dB; flat and the crossover within 0.008 dB | The shared shelf keeps its half-gain frequency at other rates but is not rate-matched; the rate gate (decision 18) is not met for the shelves | Unresolved; not gated (the crossover is) | scratch impulse comparison through the render copy | `eq::shelf` |
+| 36 | Rotary A: the horn's pitch deviation in fast mode by depth | -22 to -12% at depths 16-40, +17% at 96 (c_fast_d*), against the reference's measure | The reference's horn deviation is not proportional to depth in fast mode as measured (its second path, 32, and the analysis' bandwidth at large deviations); the plugin is calibrated at the default depth | Unresolved | c_fast_d*; `suite.py` | `fitted.pitchMsFull` |
+| 37 | Rotary A: ramps' fine structure | Rotor slowing slope -7.4 to +7.9% in four of seven ramps (both signs; speeding up within 2.6%); horn t64 slowing +5.2% | The plugin ramps continuously per block; whether the reference changes speed in steps within a ramp is not resolved by the tracker, whose fit of a slowing ramp scatters | Unresolved | first batch r_ramp_*, b_r_ramp_hold; batch b c_ramp_ho*; `cmp_ramp.py` | `RotarySpeaker::processBlock` |
+| 38 | Rotary A: stereo input | The plugin sums its input to mono before the crossover | Every probe's source is centred (the part's pan comes after its insertions), so a stereo input was never measured | Unmeasured | — | `RotarySpeaker::processBlock` |
+| 39 | Rotary A: delay against the dry path | The reference's output at depth 0 aligns with its dry path within 3 samples (c_lat_rot, rotors stopped); the plugin's taps sit at the larger swing plus a sample (0.82 ms at the default depth, up to 2.1 ms at 100 %) on top of its reported 16-sample block | The reference's tap centre with modulation on is not measured | Unresolved | batch b c_lat_* | `centreTarget` |
+| 40 | Rotary A: rotor angles at activation | The plugin starts both rotors at angle 0; with a speed of 0 the stopped angle sets the static response | Not measured | Unmeasured | first batch r_static* (stopped from the start) | `RotarySpeaker::initialize` |
 
 ## 17. Oscairn porting checklist (decision 22)
 
@@ -1600,7 +1748,8 @@ GitHub failed): Dynamics (the circuit compressor compressing), Reverb (Hall A, R
 by default), the five-band and three-band EQs with a gain set, and the delay, in the engine and in
 `oscairn-plugin-worker`: all passed. On 2026-11-06, built from a clone of the local Oscairn checkout at
 `2c74d3e` (its main; fetching GitHub failed again): Reverb with Hall A rebuilt (0.4.0) in the engine
-and in `oscairn-plugin-worker`, and Dynamics: all passed.
+and in `oscairn-plugin-worker`, and Dynamics: all passed. Oscairn FX Tremolo & Rotary (2026-11-11) has not been through the host check; its own tests and
+the privacy check pass.
 
 | Item (plugin-porting.md) | Status | Proof |
 | --- | --- | --- |
