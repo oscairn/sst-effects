@@ -389,7 +389,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 {
     // plugin-porting.md: a mode is best a stepped parameter first by priority; when it changes
     // which controls matter, the others are hidden and the host is told to rescan their info.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
     {
         Plugin pl(id);
         auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
@@ -437,7 +437,9 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
         const auto first = (uint32_t)mode.default_value, other = first == (uint32_t)mode.min_value ? (uint32_t)mode.max_value : (uint32_t)mode.min_value;
         if (first == other)
         {
-            REQUIRE(check(first) == 1); // one mode: the delay, whose Mix is its mix
+            // One mode: the delay, whose Mix is its mix; the compressor's Output Level; the rotary
+            // has neither, so no role (check() requires the role exactly on those names).
+            REQUIRE(check(first) == (std::strcmp(id, "org.oscairn.effects.tremolo-rotary") ? 1 : 0));
             continue;
         }
         check(first);
@@ -470,7 +472,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 TEST_CASE("Audio ports stay the same whatever the mode or state")
 {
     // The host refuses a plugin whose audio port layout changes while it is loaded.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
     {
         Plugin pl(id);
         auto *ports = ext<clap_plugin_audio_ports_t>(pl.p, CLAP_EXT_AUDIO_PORTS);
@@ -756,6 +758,16 @@ TEST_CASE("Processing never allocates")
         allocations = 0;
         eq.render(inL, inR, r, {1, 37, 512}, {{5, f, 2500.0}, {700, f, 9000.0}, {20000, f, 15000.0}});
         INFO(module);
+        REQUIRE(allocations == 0);
+    }
+    // Rotary A: the speed switch, a depth and a shelf change while playing.
+    {
+        Plugin rot("org.oscairn.effects.tremolo-rotary");
+        rot.activate(48000);
+        const clap_id sp = paramIdByName(rot.p, "Rotary A", "Speed"), dep = paramIdByName(rot.p, "Rotary A", "Horn Depth"),
+                      lg = paramIdByName(rot.p, "Rotary A", "Low Shelf Gain");
+        allocations = 0;
+        rot.render(inL, inR, r, {1, 37, 512}, {{5, sp, 1.0}, {700, dep, 90.0}, {9000, lg, -6.0}, {20000, sp, 0.0}});
         REQUIRE(allocations == 0);
     }
     // The counter works: an allocation while counting is seen.
@@ -1074,7 +1086,7 @@ TEST_CASE("Per-context memory by mode and sample rate")
 {
     // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB), and
     // the EQs at 44.1 kHz below 4 KB: they hold the rate matcher's 58 KB only at other rates.
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
     {
         Plugin probe(id);
         double lo, hi;
@@ -1132,7 +1144,7 @@ TEST_CASE("Declared memory equals what activation holds and what effect contexts
 {
     // For every plugin and mode at 44.1 to 192 kHz: estimate (after state load, before
     // activate) == current (after activate) == the effect contexts' resources.
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
     {
         Plugin probe(id);
         clap_param_info_t info;
@@ -2603,7 +2615,7 @@ TEST_CASE("Reset leaves a fresh instance at once in every mode")
         buf.data = data;
         return ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in);
     };
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
     {
         Plugin probe(id);
         clap_param_info_t info;
@@ -2663,4 +2675,307 @@ TEST_CASE("Reset leaves a fresh instance at once in every mode")
     REQUIRE(load(pl, stateAt(reverbId, 2, 0.71)));
     REQUIRE(memoryExt(pl.p)->current(pl.p, &after));
     REQUIRE(after.context_bytes == before.context_bytes);
+}
+
+// ---- Rotary A (plan, section 15, "Rotary A") ----
+namespace
+{
+constexpr const char *rotaryId = "org.oscairn.effects.tremolo-rotary";
+struct RotaryOut
+{
+    std::vector<float> l, r;
+    double rate;
+};
+// Sines at the given frequencies (each 0.25 peak) through Rotary A with parameters by name; the
+// Speed parameter switches at the given times (s). Latency removed.
+RotaryOut rotaryRender(double rate, std::vector<std::pair<const char *, double>> set, double seconds,
+                       std::vector<double> freqs, std::vector<std::pair<double, double>> speedAt = {})
+{
+    Plugin pl(rotaryId);
+    for (auto &[n, v] : set)
+        pl.set(paramIdByName(pl.p, "Rotary A", n), v);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + L;
+    std::vector<float> in(n, 0);
+    for (size_t i = 0; i < n; ++i)
+        for (double f : freqs)
+            in[i] += (float)(0.25 * std::sin(2 * M_PI * f * i / rate));
+    std::vector<Event> ev;
+    const clap_id sp = paramIdByName(pl.p, "Rotary A", "Speed");
+    for (auto [t, v] : speedAt)
+        ev.push_back({(uint32_t)(t * rate) + L, sp, v});
+    RotaryOut o;
+    o.rate = rate;
+    o.l = pl.render(in, in, o.r, {64}, ev, false);
+    o.l.erase(o.l.begin(), o.l.begin() + L);
+    o.r.erase(o.r.begin(), o.r.begin() + L);
+    return o;
+}
+// The complex envelope of y at carrier f, one value per millisecond (the mean over the 4 carrier
+// periods centred on it).
+std::vector<std::complex<double>> envelopeAt(const std::vector<float> &y, double rate, double f)
+{
+    const size_t w = (size_t)std::lround(4 * rate / f);
+    std::vector<std::complex<double>> z;
+    std::vector<std::complex<double>> acc(y.size() + 1);
+    for (size_t i = 0; i < y.size(); ++i)
+        acc[i + 1] = acc[i] + (double)y[i] * std::polar(1.0, -2 * M_PI * f * i / rate);
+    for (size_t k = 0;; ++k)
+    {
+        const size_t i = (size_t)std::lround(k * rate / 1000);
+        if (i + w >= y.size())
+            break;
+        z.push_back(i >= w / 2 ? (acc[i + w - w / 2] - acc[i - w / 2]) / (double)w : acc[i + w - w / 2] / (double)(i + w - w / 2));
+    }
+    return z;
+}
+// The delay (ms) the envelope's phase gives, per millisecond, unwrapped.
+std::vector<double> delayTrack(const std::vector<std::complex<double>> &z, double f)
+{
+    std::vector<double> d(z.size());
+    double prev = 0, unwrap = 0;
+    for (size_t i = 0; i < z.size(); ++i)
+    {
+        double a = std::arg(z[i]);
+        if (i)
+        {
+            while (a + unwrap - prev > M_PI)
+                unwrap -= 2 * M_PI;
+            while (a + unwrap - prev < -M_PI)
+                unwrap += 2 * M_PI;
+        }
+        prev = a + unwrap;
+        d[i] = -prev / (2 * M_PI * f) * 1000;
+    }
+    return d;
+}
+// Upward crossings (ms) of x through its mean over [from, end), with hysteresis of a quarter of its
+// range (a crossing counts once x has been below the low mark), linearly interpolated.
+std::vector<double> crossings(const std::vector<double> &x, size_t from = 0)
+{
+    double lo = 1e300, hi = -1e300, mean = 0;
+    for (size_t i = from; i < x.size(); ++i)
+        lo = std::min(lo, x[i]), hi = std::max(hi, x[i]), mean += x[i];
+    mean /= (double)(x.size() - from);
+    const double h = 0.25 * (hi - lo);
+    std::vector<double> c;
+    bool armed = false;
+    for (size_t i = from; i + 1 < x.size(); ++i)
+    {
+        armed = armed || x[i] < mean - h;
+        if (armed && x[i] < mean && x[i + 1] >= mean)
+        {
+            c.push_back(i + (mean - x[i]) / (x[i + 1] - x[i]));
+            armed = false;
+        }
+    }
+    return c;
+}
+// Rotation rate (Hz) from the mean period between crossings in [t0, t1) ms.
+double rotationHz(const std::vector<double> &c, double t0, double t1)
+{
+    std::vector<double> in;
+    for (double t : c)
+        if (t >= t0 && t < t1)
+            in.push_back(t);
+    REQUIRE(in.size() >= 2);
+    return 1000.0 * (in.size() - 1) / (in.back() - in.front());
+}
+double peakToPeak(const std::vector<double> &x, size_t a, size_t b)
+{
+    const auto [lo, hi] = std::minmax_element(x.begin() + a, x.begin() + b);
+    return *hi - *lo;
+}
+} // namespace
+
+TEST_CASE("Rotary A: steady speeds, and the speed switch first and live")
+{
+    // Rotation rates in Hz as set (the converter's speeds are the measured table values), within 0.3%.
+    auto *params = [] { static Plugin pl(rotaryId); return &pl; }();
+    clap_param_info_t first;
+    REQUIRE(ext<clap_plugin_params_t>(params->p, CLAP_EXT_PARAMS)->get_info(params->p, 1, &first));
+    REQUIRE(std::string(first.name) == "Speed");
+    for (double rate : {44100.0, 48000.0, 96000.0})
+        for (auto [speed, rotor, horn] : {std::tuple{0, 0.799, 1.0937}, std::tuple{1, 6.73, 7.40}})
+        {
+            auto o = rotaryRender(rate, {{"Speed", speed}}, 6, {150, 3000});
+            const auto zr = envelopeAt(o.l, rate, 150), zh = envelopeAt(o.l, rate, 3000);
+            const double fr = rotationHz(crossings(delayTrack(zr, 150), 1000), 1000, 6000);
+            const double fh = rotationHz(crossings(delayTrack(zh, 3000), 1000), 1000, 6000);
+            INFO(rate << " Hz, speed " << speed << ": rotor " << fr << " horn " << fh);
+            REQUIRE(std::abs(fr / rotor - 1) < 0.003);
+            REQUIRE(std::abs(fh / horn - 1) < 0.003);
+        }
+}
+
+TEST_CASE("Rotary A: ramps, the rotor linear in Hz and the horn exponential, at 44.1, 48 and 96 kHz")
+{
+    // Fitted to the reference's ramps (r_ramp_def, t64, t127, jacob): the rotor's speed moves
+    // linearly over the ramp time for the slow-fast difference, the horn's exponentially, its time
+    // constant 0.925 times as long when speeding up as when slowing down. Counted from the first
+    // crossing of the delay track, every later crossing must fall within 0.05 turns of a whole number
+    // of the law's turns (tolerance proposed).
+    const double ramp = 0.0964 * 77, tau = -0.0964 / std::log(1 - 2.4 / 14), up = 1, down = 13;
+    auto rotorLaw = [&](double t) {
+        const double a = 0.799, b = 6.73, s = (b - a) / ramp;
+        if (t < up)
+            return a;
+        if (t < down)
+            return std::min(b, a + s * (t - up));
+        const double from = std::min(b, a + s * (down - up));
+        return std::max(a, from - s * (t - down));
+    };
+    auto hornLaw = [&](double t) {
+        const double a = 1.0937, b = 7.40;
+        if (t < up)
+            return a;
+        const double atDown = b + (a - b) * std::exp(-(down - up) / (0.925 * tau));
+        if (t < down)
+            return b + (a - b) * std::exp(-(t - up) / (0.925 * tau));
+        return a + (atDown - a) * std::exp(-(t - down) / tau);
+    };
+    for (double rate : {44100.0, 48000.0, 96000.0})
+    {
+        auto o = rotaryRender(rate, {{"Rotor Ramp Time", ramp}, {"Horn Time Constant", tau}}, 22, {150, 3000},
+                              {{up, 1}, {down, 0}});
+        for (auto [f, law, name] : {std::tuple{150.0, std::function<double(double)>(rotorLaw), "rotor"},
+                                    std::tuple{3000.0, std::function<double(double)>(hornLaw), "horn"}})
+        {
+            const auto c = crossings(delayTrack(envelopeAt(o.l, rate, f), f), 300);
+            // The law's turns from the first crossing to each later one must be whole numbers.
+            double worst = 0, turns = 0, t = c[0] / 1000;
+            int n = 0;
+            for (size_t i = 1; i < c.size() && c[i] < 21500; ++i, ++n)
+            {
+                for (; t < c[i] / 1000; t += 1e-4)
+                    turns += law(t + 5e-5) * 1e-4;
+                worst = std::max(worst, std::abs(turns - (double)i));
+            }
+            std::printf("Rotary A ramps at %.0f Hz, %s: %d rotations, worst %.4f turns\n", rate, name, n, worst);
+            REQUIRE(n > 20);
+            REQUIRE(worst < 0.05);
+        }
+    }
+}
+
+TEST_CASE("Rotary A: depth sets the delay swing in proportion and the AM depth up to a low setting")
+{
+    // The reference's pitch deviation grows in proportion to its depth setting (b_r_slow_dr*,
+    // c_slow_d*, c_fast_d*: 0.118-0.120 cents per hertz of rotation per step up to 64) and its AM
+    // stops growing at a low setting (c_slow_d20 = d24 = d40). With the mic angle at 0 the horn is
+    // one tap: its delay swings 1.69 ms (slow) or 1.21 ms (fast) at 100 %, and its gain dips by the
+    // AM depth, 0.45 (slow) from 17.4 % up, 0.71 (fast) from 40.3 % up (tolerances proposed: 2 % of
+    // the swing, 0.02 of the depth).
+    for (auto [fast, swingFull, amFull, amFrom] : {std::tuple{0, 1.69, 0.45, 17.4}, std::tuple{1, 1.21, 0.71, 40.3}})
+        for (double depth : {5.0, 10.0, 25.0, 50.0, 100.0})
+        {
+            auto o = rotaryRender(44100, {{"Speed", fast}, {"Mic Angle", 0}, {"Horn Depth", depth}, {"Balance", 100}}, 4, {3000});
+            const auto z = envelopeAt(o.l, 44100, 3000);
+            const auto d = delayTrack(z, 3000);
+            std::vector<double> a(z.size());
+            for (size_t i = 0; i < z.size(); ++i)
+                a[i] = std::abs(z[i]);
+            const double swing = peakToPeak(d, 1000, 3900) / 2;
+            const auto [lo, hi] = std::minmax_element(a.begin() + 1000, a.begin() + 3900);
+            const double am = 1 - *lo / *hi, wantAm = amFull * std::min(1.0, depth / amFrom);
+            INFO((fast ? "fast" : "slow") << " depth " << depth << ": swing " << swing << " ms, AM depth " << am);
+            REQUIRE(std::abs(swing / (swingFull * depth / 100) - 1) < 0.02);
+            REQUIRE(std::abs(am - wantAm) < 0.02);
+        }
+    // The rotor's swing doubles with its depth.
+    double s[2];
+    for (int i = 0; i < 2; ++i)
+    {
+        auto o = rotaryRender(44100, {{"Mic Angle", 0}, {"Rotor Depth", 20.0 * (i + 1)}, {"Balance", -100}}, 5, {150});
+        s[i] = peakToPeak(delayTrack(envelopeAt(o.l, 44100, 150), 150), 1000, 4900);
+    }
+    INFO("rotor swing " << s[0] << " and " << s[1] << " ms");
+    REQUIRE(std::abs(s[1] / s[0] - 2) < 0.04);
+}
+
+TEST_CASE("Rotary A: the crossover and balance as measured, at 44.1, 48 and 96 kHz")
+{
+    // Rotors stopped, depth 0, flat shelves: the reference's levels against its dry input (c_bal1,
+    // c_bal127, c_flat at balance 73, c_bal32, c_bal96) at harmonics of note 24, within 0.15 dB at
+    // 44.1 kHz (tolerance proposed); at the other rates within the accepted rate gate of the 44.1 kHz
+    // levels (decision 18: 0.05 dB within 20 dB of the setting's peak, 0.5 dB further down).
+    struct Point { double balance, hz, db; };
+    const std::vector<Point> ref{{1, 65.41, 9.17}, {1, 654.06, 5.58}, {1, 850.28, 2.51}, {1, 1046.5, -0.51}, {1, 2093.0, -12.15},
+                                 {127, 654.06, -1.37}, {127, 850.28, 2.08}, {127, 1046.5, 4.09}, {127, 2093.0, 6.55}, {127, 8372.02, 6.80},
+                                 {73, 65.41, 5.10}, {73, 654.06, 4.96}, {73, 850.28, 4.77}, {73, 1046.5, 4.96}, {73, 4186.01, 4.83},
+                                 {32, 1046.5, 3.02}, {32, 4186.01, -1.13}, {96, 65.41, 0.76}, {96, 1046.5, 5.05}};
+    auto level = [](double rate, double balance, double hz) {
+        auto o = rotaryRender(rate, {{"Rotor Slow Speed", 0}, {"Horn Slow Speed", 0}, {"Rotor Depth", 0}, {"Horn Depth", 0},
+                                     {"High Shelf Gain", 0}, {"Balance", (balance - 64) / 0.63}}, 0.6, {hz});
+        double e = 0;
+        const size_t a = (size_t)(0.2 * rate), b = o.l.size();
+        for (size_t i = a; i < b; ++i)
+            e += (double)o.l[i] * o.l[i];
+        return 10 * std::log10(e / (b - a) / (0.25 * 0.25 / 2));
+    };
+    for (auto &p : ref)
+    {
+        const double at44 = level(44100, p.balance, p.hz);
+        INFO("balance " << p.balance << " at " << p.hz << " Hz: " << at44 << " dB, reference " << p.db);
+        REQUIRE(std::abs(at44 - p.db) < 0.15);
+        const double peak = p.balance == 1 ? 9.17 : 6.8;
+        for (double rate : {48000.0, 96000.0})
+            REQUIRE(std::abs(level(rate, p.balance, p.hz) - at44) < (p.db > peak - 20 ? 0.05 : 0.5));
+    }
+}
+
+TEST_CASE("Rotary A: the mic angle moves the horn's left and right in measured steps")
+{
+    // Every platform value 0-60 (batch b, d_mic*): the horn's L/R pitch phase is 0 up to 33 degrees
+    // (value 11), then 31, 61, 75, 88, 105, 121 and 180 degrees from 36, 42, 78, 84, 108, 114 and
+    // 156 degrees (values 12, 14, 26, 28, 36, 38, 52); within 2 degrees (tolerance proposed).
+    for (auto [deg, want] : {std::pair{0.0, 0.0}, {33.0, 0.0}, {36.0, 31.0}, {42.0, 61.0}, {75.0, 61.0}, {78.0, 75.0}, {84.0, 88.0},
+                             {108.0, 105.0}, {114.0, 121.0}, {153.0, 121.0}, {156.0, 180.0}, {180.0, 180.0}})
+    {
+        auto o = rotaryRender(44100, {{"Mic Angle", deg}, {"Balance", 100}}, 5, {3000});
+        const auto dl = delayTrack(envelopeAt(o.l, 44100, 3000), 3000), dr = delayTrack(envelopeAt(o.r, 44100, 3000), 3000);
+        // Phase of the rotation fundamental (1.0937 Hz) in each channel's delay.
+        auto phase = [](const std::vector<double> &d) {
+            std::complex<double> c;
+            const double f = 1.0937, n = std::floor(3.5 * f) / f * 1000;
+            for (size_t i = 1000; i < 1000 + (size_t)n; ++i)
+                c += d[i] * std::polar(1.0, -2 * M_PI * f * i / 1000);
+            return std::arg(c) * 180 / M_PI;
+        };
+        double got = std::remainder(phase(dr) - phase(dl), 360.0);
+        INFO("mic " << deg << " degrees: L/R " << got << ", reference " << want);
+        REQUIRE(std::abs(std::abs(got) - want) < 2);
+    }
+}
+
+TEST_CASE("Rotary A is linear: no harmonics, and twice the input gives twice the output")
+{
+    // The reference's drive adds no distortion (harmonics at or below -80 dB at every setting and
+    // level); the mode is linear (tolerance 1e-5 of full scale on the doubled render).
+    auto a = rotaryRender(44100, {{"Speed", 1}, {"Rotor Depth", 100}, {"Horn Depth", 100}}, 1, {440});
+    Plugin pl(rotaryId);
+    for (auto [n, v] : std::vector<std::pair<const char *, double>>{{"Speed", 1}, {"Rotor Depth", 100}, {"Horn Depth", 100}})
+        pl.set(paramIdByName(pl.p, "Rotary A", n), v);
+    pl.activate(44100);
+    const size_t n = 44100 + L;
+    std::vector<float> in(n), r;
+    for (size_t i = 0; i < n; ++i)
+        in[i] = (float)(0.5 * std::sin(2 * M_PI * 440 * i / 44100.0));
+    auto l = pl.render(in, in, r, {64}, {}, false);
+    double worst = 0;
+    for (size_t i = 0; i + L < n && i < a.l.size(); ++i)
+        worst = std::max(worst, (double)std::abs(l[i + L] - 2 * a.l[i]));
+    INFO("worst " << worst);
+    REQUIRE(worst < 1e-5);
+    // Stopped, depth 0: a 1 kHz sine keeps every harmonic below -100 dB.
+    auto s = rotaryRender(44100, {{"Rotor Slow Speed", 0}, {"Horn Slow Speed", 0}, {"Rotor Depth", 0}, {"Horn Depth", 0}}, 1, {1000});
+    auto amp = [&](double f) {
+        std::complex<double> c;
+        for (size_t i = 22050; i < 44100; ++i)
+            c += (double)s.l[i] * std::polar(1.0, -2 * M_PI * f * i / 44100);
+        return std::abs(c);
+    };
+    const double h = 20 * std::log10(std::max(amp(2000), amp(3000)) / amp(1000));
+    INFO("harmonics " << h << " dB");
+    REQUIRE(h < -100);
 }
