@@ -26,6 +26,7 @@
 #include "effects/TwoBandEq.h"
 #include "effects/PartAndMasterEq.h"
 #include "effects/TempoCrossDelay.h"
+#include "effects/CrossDelay.h"
 #include "effects/HallReverb.h"
 #include "effects/CircuitCompressor.h"
 #include "effects/RotarySpeaker.h"
@@ -255,12 +256,13 @@ const std::vector<Category> &categories()
         c.push_back(std::move(eq));
 
         Category delay{{CLAP_VERSION_INIT, "org.oscairn.effects.delay", "Oscairn FX Delay", "Oscairn",
-                        "https://github.com/oscairn/sst-effects", "", "", "0.1.2",
+                        "https://github.com/oscairn/sst-effects", "", "", "0.2.0",
                         "Delays, one mode per design", delayFeatures},
                        {},
                        1,
                        {}};
         delay.modes.push_back(mode<oscairn_fx::delay::TempoCrossDelay>(1, "Tempo Cross Delay"));
+        delay.modes.push_back(mode<oscairn_fx::delay::CrossDelay>(2, "Cross Delay"));
         delay.finish();
         c.push_back(std::move(delay));
 

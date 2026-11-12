@@ -17,6 +17,9 @@
  * At other rates the lines keep their length in seconds (an all-pass interpolator for the
  * fraction, so repeats keep their level) and the damping is a linear-phase filter fitted to the
  * 44.1 kHz filter's magnitude, its delay taken off the line.
+ *
+ * CrossCore is that signal path; a mode supplies its parameter table, the two line times and
+ * how long its buffers must be (effects/CrossDelay.h is the other mode).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_TEMPOCROSSDELAY_H
 #define OSCAIRN_CLAP_EFFECTS_TEMPOCROSSDELAY_H
@@ -36,6 +39,9 @@ namespace oscairn_fx::delay
 constexpr double designRate = 44100;
 constexpr int maxSamples44 = 65535;
 
+// The longest line either delay mode reaches: the cross delay's 1638.3 ms; buffers size for it.
+constexpr double maxLineMs{1638.3};
+
 // The note values of the time parameters, in quarter notes.
 constexpr double noteBeats[20] = {1. / 12, 3. / 32, 1. / 8, 1. / 6, 3. / 16, 1. / 4, 1. / 3, 3. / 8, 1. / 2, 2. / 3,
                                   3. / 4,  1.,      4. / 3, 3. / 2, 2.,      8. / 3, 3.,     4.,     5.,     6.};
@@ -50,6 +56,16 @@ inline double lineSeconds(int note, double tempo, double lagMs)
     const double t = noteBeats[std::clamp(note, 0, 19)] * 60 / std::clamp(tempo, 20.0, 999.0);
     const long n = std::lround(t * designRate) + std::lround(lagMs * designRate / 1000) - 1;
     return (double)std::clamp<long>(n, 1, maxSamples44) / designRate;
+}
+
+// A line's length in seconds from a time in ms: rounded to the same 44.1 kHz sample grid the
+// note lengths round on and one shorter (the 02 00 renders put every single-crossing echo at
+// round(ms * 44.1) - 1 samples: 500.0 ms gives 22,049, 700.0 gives 30,869, 300.0 gives 13,229),
+// kept in seconds at other rates.
+inline double msLineSeconds(double ms)
+{
+    const long n = std::lround(std::clamp(ms, 0.1, maxLineMs) * designRate / 1000) - 1;
+    return (double)std::max(1L, n) / designRate;
 }
 
 // A delay line read at a fractional length: integer part from the buffer, the fraction (kept in
@@ -190,44 +206,33 @@ struct Damping
     }
 };
 
-template <typename FXConfig> struct TempoCrossDelay : sst::effects::core::EffectTemplateBase<FXConfig>
+// The input select parameter's choices, shared by the delay modes.
+enum Input
 {
-    enum params
-    {
-        timeLR,
-        timeRL,
-        feedback,
-        input,
-        damping,
-        lag,
-        mix,
-        numParamsEnum
-    };
-    enum Input
-    {
-        inL,
-        inR,
-        inLR,
-        inLMode2,
-        inRMode2
-    };
-    static constexpr int numParams{numParamsEnum};
-    static constexpr const char *streamingName{"oscairn-tempo-cross-delay"};
-    static constexpr const char *displayName{"Tempo Cross Delay"};
+    inL,
+    inR,
+    inLR,
+    inLMode2,
+    inRMode2
+};
 
-    TempoCrossDelay(typename FXConfig::GlobalStorage *s, typename FXConfig::EffectStorage *e,
-                    typename FXConfig::ValueStorage *p)
+// The cross delay's signal path, shared by every mode. A mode (the CRTP argument) supplies its
+// parameter enum and table, `bufferSamples(rate)` and `setLines(tempo, rate)`, which sets secA
+// and secB, the two lines' lengths in seconds.
+template <typename FXConfig, template <typename> class Mode>
+struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
+{
+    using D = Mode<FXConfig>;
+    CrossCore(typename FXConfig::GlobalStorage *s, typename FXConfig::EffectStorage *e,
+              typename FXConfig::ValueStorage *p)
         : sst::effects::core::EffectTemplateBase<FXConfig>(s, e, p)
     {
-        const double rate = this->sampleRate();
-        const int n = (int)std::ceil(maxSamples44 / designRate * rate) + 2 * Damping::maxK + 8;
+        const int n = D::bufferSamples(this->sampleRate());
         a.resize(n);
         b.resize(n);
+        last.assign(D::numParams, NAN);
     }
-    static size_t heapBytesAt(double rate)
-    {
-        return 2 * sizeof(float) * (size_t)((int)std::ceil(maxSamples44 / designRate * rate) + 2 * Damping::maxK + 8);
-    }
+    static size_t heapBytesAt(double rate) { return 2 * sizeof(float) * (size_t)D::bufferSamples(rate); }
     size_t heapBytes() const { return (a.buf.size() + b.buf.size()) * sizeof(float); }
     // The longest silence between two echoes: the longer line, plus the wrapper's 100 ms.
     double quietSeconds() const { return std::max(secA, secB) + 0.1; }
@@ -240,7 +245,7 @@ template <typename FXConfig> struct TempoCrossDelay : sst::effects::core::Effect
         dampB.clear();
         inDelay.fill({0, 0});
         inAt = 0;
-        last.fill(NAN);
+        std::fill(last.begin(), last.end(), NAN);
         lastTempo = NAN;
         update();
     }
@@ -251,7 +256,7 @@ template <typename FXConfig> struct TempoCrossDelay : sst::effects::core::Effect
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
-        const int mode = (int)std::lround(last[input]);
+        const int mode = (int)std::lround(last[D::input]);
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             const double l = L[i], r = R[i];
@@ -278,6 +283,81 @@ template <typename FXConfig> struct TempoCrossDelay : sst::effects::core::Effect
             L[i] = (float)(dry * l + wet * oB);
             R[i] = (float)(dry * r + wet * oA);
         }
+    }
+
+  protected:
+    double tempo() const
+    {
+        if constexpr (requires { this->globalStorage->tempo; })
+            return this->globalStorage->tempo;
+        return 120;
+    }
+
+    void update()
+    {
+        bool changed = !(tempo() == lastTempo);
+        for (int i = 0; i < D::numParams; ++i)
+        {
+            const float v = this->floatValue(i);
+            changed = changed || !(v == last[i]);
+            last[i] = v;
+        }
+        if (!changed)
+            return;
+        lastTempo = tempo();
+        const double rate = this->sampleRate();
+        fb = std::lround(last[D::feedback]) / 63.5;
+        const double x = (std::lround(last[D::mix]) + 63) / 126.0;
+        dry = std::cos(M_PI / 2 * x);
+        wet = std::sin(M_PI / 2 * x);
+        const double g = dampingCoefficient(last[D::damping]);
+        if (!designed || g != dampA.g)
+        {
+            designed = true;
+            dampA.design(g, rate);
+            dampB.design(g, rate);
+        }
+        static_cast<D *>(this)->setLines(lastTempo, rate);
+        a.setLength(secA * rate - dampA.K);
+        b.setLength(secB * rate - dampA.K);
+    }
+
+    Line a, b;
+    Damping dampA, dampB;           // dampA filters A's output on its way into B, dampB the reverse
+    std::array<std::array<double, 2>, Damping::maxK + 1> inDelay{};
+    int inAt{0};
+    bool designed{false};
+    std::vector<float> last; // sized to D::numParams at construction
+    double lastTempo{NAN};
+    double fb{0}, dry{1}, wet{0}, secA{0}, secB{0};
+};
+
+template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoCrossDelay>
+{
+    enum params
+    {
+        timeLR,
+        timeRL,
+        feedback,
+        input,
+        damping,
+        lag,
+        mix,
+        numParamsEnum
+    };
+    static constexpr int numParams{numParamsEnum};
+    static constexpr const char *streamingName{"oscairn-tempo-cross-delay"};
+    static constexpr const char *displayName{"Tempo Cross Delay"};
+    using CrossCore<FXConfig, TempoCrossDelay>::CrossCore;
+
+    static int bufferSamples(double rate)
+    {
+        return (int)std::ceil(maxSamples44 / designRate * rate) + 2 * Damping::maxK + 8;
+    }
+    void setLines(double tempo, double)
+    {
+        this->secA = lineSeconds((int)std::lround(this->last[timeLR]), tempo, this->last[lag]);
+        this->secB = lineSeconds((int)std::lround(this->last[timeRL]), tempo, this->last[lag]);
     }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
@@ -309,53 +389,6 @@ template <typename FXConfig> struct TempoCrossDelay : sst::effects::core::Effect
         }
         }
         return pmd().withName("Unused").withType(pmd::NONE);
-    }
-
-  private:
-    Line a, b;
-    Damping dampA, dampB;           // dampA filters A's output on its way into B, dampB the reverse
-    std::array<std::array<double, 2>, Damping::maxK + 1> inDelay{};
-    int inAt{0};
-    bool designed{false};
-    std::array<float, numParamsEnum> last{};
-    double lastTempo{NAN};
-    double fb{0}, dry{1}, wet{0}, secA{0}, secB{0};
-
-    double tempo() const
-    {
-        if constexpr (requires { this->globalStorage->tempo; })
-            return this->globalStorage->tempo;
-        return 120;
-    }
-
-    void update()
-    {
-        bool changed = !(tempo() == lastTempo);
-        for (int i = 0; i < numParams; ++i)
-        {
-            const float v = this->floatValue(i);
-            changed = changed || !(v == last[i]);
-            last[i] = v;
-        }
-        if (!changed)
-            return;
-        lastTempo = tempo();
-        const double rate = this->sampleRate();
-        fb = std::lround(last[feedback]) / 63.5;
-        const double x = (std::lround(last[mix]) + 63) / 126.0;
-        dry = std::cos(M_PI / 2 * x);
-        wet = std::sin(M_PI / 2 * x);
-        const double g = dampingCoefficient(last[damping]);
-        if (!designed || g != dampA.g)
-        {
-            designed = true;
-            dampA.design(g, rate);
-            dampB.design(g, rate);
-        }
-        secA = lineSeconds((int)std::lround(last[timeLR]), lastTempo, last[lag]);
-        secB = lineSeconds((int)std::lround(last[timeRL]), lastTempo, last[lag]);
-        a.setLength(secA * rate - dampA.K);
-        b.setLength(secB * rate - dampA.K);
     }
 };
 } // namespace oscairn_fx::delay

@@ -1901,16 +1901,17 @@ struct Echo
     size_t at;
     double l, r;
 };
-// An impulse into the left input; the delay's settings by name; returns the output.
-std::vector<float> delayImpulse(double rate, const std::vector<std::pair<const char *, double>> &set, std::vector<float> &right,
+// An impulse into the left input; a delay mode's settings by name; returns the output.
+std::vector<float> delayImpulseMode(int mode, const char *module, double rate, const std::vector<std::pair<const char *, double>> &set, std::vector<float> &right,
                                 double seconds = 3, double tempo = 0, bool rightInput = false, Plugin **keep = nullptr)
 {
     static std::unique_ptr<Plugin> held;
     held = std::make_unique<Plugin>(delayId);
     Plugin &pl = *held;
     pl.tempo = tempo;
+    pl.set(1, mode);
     for (auto [n, v] : set)
-        pl.set(paramIdByName(pl.p, "Tempo Cross Delay", n), v);
+        pl.set(paramIdByName(pl.p, module, n), v);
     pl.activate(rate);
     const size_t n = (size_t)(rate * seconds);
     std::vector<float> inL(n, 0), inR(n, 0);
@@ -1919,6 +1920,11 @@ std::vector<float> delayImpulse(double rate, const std::vector<std::pair<const c
     if (keep)
         *keep = &pl;
     return out;
+}
+std::vector<float> delayImpulse(double rate, const std::vector<std::pair<const char *, double>> &set, std::vector<float> &right,
+                                double seconds = 3, double tempo = 0, bool rightInput = false, Plugin **keep = nullptr)
+{
+    return delayImpulseMode(1, "Tempo Cross Delay", rate, set, right, seconds, tempo, rightInput, keep);
 }
 } // namespace
 
@@ -2070,6 +2076,168 @@ TEST_CASE("Tempo cross delay stays stable at its shortest time at every rate")
         INFO("rate " << rate);
         REQUIRE(peak <= 1.0 + 1e-6);
         REQUIRE(energy == Approx(1.0).epsilon(1e-3)); // an all-pass: the echo keeps the impulse's energy
+    }
+}
+
+// ---- Cross delay (the tempo mode's laws, times in ms; plan, section 15) ----
+
+TEST_CASE("Cross delay: the impulse times and routing at 44.1 and 48 kHz")
+{
+    // CrossCore's laws (effects/CrossDelay.h), as measured against the 02 00 renders
+    // (results.md): the time in ms becomes a line of its 44.1 kHz sample count minus one
+    // (500.0 ms gave 22,049 samples there), kept in seconds at other rates; 250 ms is
+    // 11,025 - 1 = 11,024 samples at 44.1 kHz, 11,999.4 at 48 kHz (the all-pass for the
+    // fraction). Wet only, feedback at centre (zero), input L: the impulse returns once, on
+    // the right, and the left output stays silent.
+    for (auto [rate, q] : {std::pair{44100.0, 11024.0}, {48000.0, 11999.4}})
+    {
+        std::vector<float> r;
+        auto l = delayImpulseMode(2, "Cross Delay", rate, {{"Time L>R", 250}, {"Feedback", 0}, {"Mix", 63}, {"Input", 0}}, r, 1.0);
+        size_t peak = 0;
+        for (size_t i = 1; i < r.size(); ++i)
+            if (std::abs(r[i]) > std::abs(r[peak]))
+                peak = i;
+        INFO("rate " << rate);
+        REQUIRE(std::abs((double)(peak - L) - q) <= 1.0);
+        double energy = 0;
+        for (size_t i = 0; i < r.size(); ++i)
+            energy += (double)r[i] * r[i];
+        REQUIRE(energy == Approx(1.0).epsilon(1e-3)); // the whole echo, the all-pass holds level
+        if (rate == 44100.0)
+        {
+            REQUIRE(r[peak] == Approx(1.0).margin(1e-6)); // whole samples: one tap, no all-pass
+            for (size_t i = 0; i < r.size(); ++i)
+                if (i != peak)
+                    REQUIRE(std::abs(r[i]) <= 1e-4); // no pre-echo, no repeat (feedback zero)
+        }
+        else
+            for (size_t i = 0; i + 4 < peak; ++i) // nothing arrives before the line's length
+                REQUIRE(std::abs(r[i]) <= 1e-6);
+        for (size_t i = 0; i < l.size(); ++i)
+            REQUIRE(std::abs(l[i]) < 1e-12); // dry off: nothing returns on the left
+    }
+}
+
+TEST_CASE("Cross delay state round-trips")
+{
+    Plugin a(delayId);
+    a.set(1, 2);
+    for (auto [n, v] : {std::pair{"Time L>R", 123.4}, {"Time R>L", 77.7}, {"Feedback", 30}, {"Input", 2}, {"High Damping", 0.3}, {"Mix", -12}})
+        a.set(paramIdByName(a.p, "Cross Delay", n), v);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin b(delayId);
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
+    auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 0; i < params->count(a.p); ++i)
+    {
+        clap_param_info_t info;
+        params->get_info(a.p, i, &info);
+        REQUIRE(a.get(info.id) == b.get(info.id));
+    }
+    std::vector<float> inL, inR, ra, rb;
+    signal(24000, inL, inR);
+    a.activate();
+    b.activate();
+    REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+}
+
+TEST_CASE("Cross delay: every parameter's value text parses back")
+{
+    Plugin pl(delayId);
+    pl.set(1, 2);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    int checked = 0;
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if ((info.id >> 8) != 2)
+            continue;
+        for (double t : {0., .25, .5, .75, 1.})
+        {
+            double v = info.min_value + t * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            char text[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, v, text, sizeof(text)));
+            double back = NAN;
+            INFO(info.name << " at " << v << ": \"" << text << "\"");
+            REQUIRE(params->text_to_value(pl.p, info.id, text, &back));
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                REQUIRE(back == v); // a label must select the value it came from
+            char again[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, back, again, sizeof(again)));
+            REQUIRE(!std::strcmp(text, again));
+            ++checked;
+        }
+    }
+    REQUIRE(checked == 30); // five points on each of the mode's six parameters, no vacuous pass
+}
+
+TEST_CASE("Cross delay: the laws measured against the 02 00 renders")
+{
+    // measurements/qwen-cross-delay-2026-11-11/results.md: a 500.0 ms line is 22,049 samples
+    // (round(ms * 44.1) - 1, cd_500_t120), feedback v / 63.5 per crossing with inverted
+    // polarity at negative v (cd_fb_low -18.00 dB, cd_fb_neg alternates), a 300/700 ms pair
+    // routes L into line A (right after 13,229) and R into line B (left after 30,869) —
+    // split, not summed (cd_input_r, cd_input_lr) — and the two tempos of cd_500_t120/150
+    // give identical renders: this mode ignores the transport.
+    std::vector<float> r;
+    auto cross = [&](double tempo, double fb, std::vector<float> &right) {
+        return delayImpulseMode(2, "Cross Delay", 44100,
+                                {{"Time L>R", 500}, {"Time R>L", 500}, {"Feedback", fb}, {"High Damping", 1.0},
+                                 {"Mix", 63}, {"Input", 0}},
+                                right, 3.0, tempo);
+    };
+    auto l = cross(120, 8, r);
+    const double f8 = 8 / 63.5; // -18.06 dB per crossing; measured -18.00 ± 0.5
+    REQUIRE(r[L + 22049] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(l[L + 2 * 22049] == Approx(f8).epsilon(1e-6));
+    REQUIRE(r[L + 3 * 22049] == Approx(f8 * f8).epsilon(1e-6));
+    std::vector<float> r150;
+    REQUIRE(cross(150, 8, r150) == l); // tempo 150 renders bit-identically
+    REQUIRE(r == r150);
+
+    SECTION("Negative feedback decays like positive and flips the echo (cd_fb_neg)")
+    {
+        std::vector<float> rn;
+        auto ln = cross(120, -63, rn);
+        const double fn = -63 / 63.5; // -0.07 dB per crossing, measured -0.07
+        REQUIRE(rn[L + 22049] == Approx(1.0).epsilon(1e-6));
+        REQUIRE(ln[L + 2 * 22049] == Approx(fn).epsilon(1e-6)); // inverted
+        REQUIRE(rn[L + 3 * 22049] == Approx(fn * fn).epsilon(1e-6));
+    }
+    SECTION("The time ends are on the sample grid (cd_time_max, cd_time_swap)")
+    {
+        std::vector<float> rt;
+        delayImpulseMode(2, "Cross Delay", 44100,
+                         {{"Time L>R", 1638.3}, {"Time R>L", 0.1}, {"Feedback", 0}, {"Mix", 63}, {"Input", 0}},
+                         rt, 2.5);
+        size_t peak = 0;
+        for (size_t i = 1; i < rt.size(); ++i)
+            if (std::abs(rt[i]) > std::abs(rt[peak]))
+                peak = i;
+        REQUIRE(std::abs((double)(peak - L) - 72248.0) <= 1.0); // round(1638.3 * 44.1) - 1; the
+        // reference's echo measures one sample lower (0.023 ms, inside the 0.1 ms gate)
+    }
+    SECTION("Input L&R feeds the lines split, not summed (cd_input_lr)")
+    {
+        const std::vector<std::pair<const char *, double>> set{
+            {"Time L>R", 300}, {"Time R>L", 700}, {"Feedback", 0}, {"Mix", 63}, {"Input", 2}};
+        std::vector<float> rl;
+        auto ll = delayImpulseMode(2, "Cross Delay", 44100, set, rl, 1.5); // impulse left
+        REQUIRE(rl[L + 13229] == Approx(1.0).epsilon(1e-6));              // L -> A -> right at 300.0 - 1
+        for (size_t i = 1; i < 30000; ++i)
+            REQUIRE(ll[L + i] == 0); // a summed feed would answer on the left too
+        std::vector<float> rr;
+        auto lr = delayImpulseMode(2, "Cross Delay", 44100, set, rr, 1.5, 0, true); // impulse right
+        REQUIRE(lr[L + 30869] == Approx(1.0).epsilon(1e-6)); // R -> B -> left at 700.0 - 1
+        for (size_t i = 1; i < 40000; ++i)
+            REQUIRE(rr[L + i] == 0);
     }
 }
 
