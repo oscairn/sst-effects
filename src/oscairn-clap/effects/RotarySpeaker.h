@@ -4,7 +4,7 @@
  * A two-rotor speaker whose behaviour follows reference renders (plan, section 15, "Rotary A").
  * Written for Oscairn; follows the sst-effects effect contract. Signal flow:
  *  - the mono sum of the input is split by a crossover: a low-pass feeds the rotor, a high-pass
- *    the horn;
+ *    the horn; a first-order low shelf acts on the rotor's band only, a high shelf on the horn's;
  *  - each rotor turns at its slow or fast speed; on a switch the rotor's speed moves linearly in
  *    Hz, over its ramp time for the whole slow-fast difference, and the horn's exponentially with
  *    its time constant (0.925 times as long speeding up);
@@ -13,12 +13,12 @@
  *    in measured steps), whose delay swings by the depth times the sine of that angle around a
  *    fixed centre and whose gain dips by its AM depth, 90 degrees ahead; the rotor adds a centre tap
  *    (no mic offset) to both channels;
- *  - the rotor and horn (inverted) are mixed by the balance (cos and sin of a quarter turn), then a
- *    low and a high shelf.
+ *  - the rotor and horn (inverted) are mixed by the balance (cos and sin of a quarter turn).
  * Depths are in percent of the platform's full range; the swing is proportional to it, the AM depth
  * reaches its full value at a low setting; swing and AM depth differ between slow and fast and glide
  * over 20 ms on a switch. Everything is in seconds and hertz, so every sample rate behaves as
- * 44.1 kHz does; the crossover keeps the 44.1 kHz design's corners.
+ * 44.1 kHz does; the crossover keeps the 44.1 kHz design's corners, and at other rates the shelves
+ * run a rate-matched replacement of their 44.1 kHz design (FiveBandEq.h).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_ROTARYSPEAKER_H
 #define OSCAIRN_CLAP_EFFECTS_ROTARYSPEAKER_H
@@ -105,7 +105,15 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
                   typename FXConfig::ValueStorage *p)
         : sst::effects::core::EffectTemplateBase<FXConfig>(s, e, p)
     {
+        for (auto &c : shelfMatch)
+            if constexpr (requires { s->worker; s->offline; })
+                c.prepare(this->sampleRate(), s->worker, s->offline);
+            else
+                c.prepare(this->sampleRate(), nullptr, nullptr);
     }
+
+    static size_t heapBytesAt(double rate) { return 2 * eq::MatchedCascade<1>::heapBytesAt(rate); }
+    size_t heapBytes() const { return shelfMatch[0].heapBytes() + shelfMatch[1].heapBytes(); }
 
     void initialize()
     {
@@ -115,6 +123,8 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
             b.reset();
         for (auto &b : shelves)
             b.reset();
+        for (auto &c : shelfMatch)
+            c.reset();
         last[0] = NAN;
         update();
         // The rotors start at the speed the switch selects, without a ramp.
@@ -155,10 +165,25 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
             am[k] = r.am;
             level[k] = mix[k] * std::pow(10.0, fitted.levelDbAtFullAm[k] / 20 * r.am / fitted.amFull[k][fastNow]);
         }
-        for (int i = 0; i < FXConfig::blockSize; ++i)
+        // The bands of the mono sum, each through its shelf: the low shelf acts on the rotor only,
+        // the high shelf on the horn only.
+        constexpr int n = FXConfig::blockSize;
+        float bands[2][n], spare[n];
+        for (int i = 0; i < n; ++i)
         {
             const float m = 0.5f * (L[i] + R[i]);
-            const float band[2] = {xover[0].run(0, m), xover[1].run(0, m)};
+            bands[0][i] = xover[0].run(0, m);
+            bands[1][i] = xover[1].run(0, m);
+        }
+        for (int k = 0; k < 2; ++k)
+            if (matched)
+                shelfMatch[k].process(bands[k], spare, n, 1.0);
+            else
+                for (int i = 0; i < n; ++i)
+                    bands[k][i] = shelves[k].run(0, bands[k][i]);
+        for (int i = 0; i < n; ++i)
+        {
+            const float band[2] = {bands[0][i], bands[1][i]};
             double out[2] = {0, 0};
             for (int k = 0; k < 2; ++k)
             {
@@ -184,8 +209,8 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
                 if (r.angle >= 2 * M_PI)
                     r.angle -= 2 * M_PI;
             }
-            L[i] = shelves[1].run(0, shelves[0].run(0, (float)out[0]));
-            R[i] = shelves[1].run(1, shelves[0].run(1, (float)out[1]));
+            L[i] = (float)out[0];
+            R[i] = (float)out[1];
         }
     }
 
@@ -233,7 +258,9 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
         double angle{0}, hz{0}, pitch{0}, am{0}, centre{0};
     };
     Rotor rot[2];
-    eq::Biquad xover[2], shelves[2];
+    eq::Biquad xover[2], shelves[2]; // shelves: the 44.1 kHz design (low on the rotor, high on the horn)
+    eq::MatchedCascade<1> shelfMatch[2]; // their replacements at other rates (FiveBandEq.h)
+    bool matched{false};
     double target[2]{}, pitchTarget[2]{}, centreTarget[2]{}, amTarget[2]{}, rampSeconds[2]{}, slew{0}, mix[2]{1, 0}, mu[2]{},
         amLead[2]{};
     int fastNow{0};
@@ -265,8 +292,29 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
             else
                 xover[k].set(1, -2, 1, 1 + K / q + K * K, 2 * (K * K - 1), 1 - K / q + K * K);
         }
-        eq::shelf(shelves[0], fs, last[lowFreq], last[lowGain], false);
-        eq::shelf(shelves[1], fs, last[highFreq], last[highGain], true);
+        shelf(shelves[0], last[lowFreq], last[lowGain], false);
+        shelf(shelves[1], last[highFreq], last[highGain], true);
+        matched = fs != designRate;
+        if (matched)
+            for (int k = 0; k < 2; ++k)
+            {
+                const eq::Biquad *d[1] = {eq::isIdentity(shelves[k]) ? nullptr : &shelves[k]};
+                shelfMatch[k].set(d);
+            }
+    }
+    // First-order shelves, bilinear at 44.1 kHz with K = tan(pi f / 44100): a boost puts the pole at
+    // K and the zero at K x gain (low: towards DC; high: K / gain, towards Nyquist), a cut the zero
+    // at K and the pole beyond it.
+    static void shelf(eq::Biquad &b, double hz, double db, bool high)
+    {
+        const double K = std::tan(M_PI * std::min(hz, 0.49 * designRate) / designRate), A = std::pow(10.0, std::abs(db) / 20);
+        // As (c1 s + c0) / (d1 s + d0), s = (1 - 1/z) / (1 + 1/z).
+        double c1 = 1, c0 = K, d1 = 1, d0 = K;
+        if (!high)
+            (db >= 0 ? c0 : d0) = K * A;
+        else
+            (db >= 0 ? c1 : d1) = A;
+        b.set(c1 + c0, c0 - c1, 0, d1 + d0, d0 - d1, 0);
     }
 
     void update()

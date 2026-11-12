@@ -2638,7 +2638,8 @@ TEST_CASE("Reset leaves a fresh instance at once in every mode")
                     setAll(used, m, 0.55);
                     std::vector<float> z(64, 0);
                     used.render(z, z, r1, {64});
-                    if (!std::strcmp(id, eqId) && rate != 44100) // time for the worker to match the change
+                    // time for the worker to match the change (the EQs, and Rotary A's shelves)
+                    if ((!std::strcmp(id, eqId) || !std::strcmp(id, "org.oscairn.effects.tremolo-rotary")) && rate != 44100)
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     Buffer before;
                     REQUIRE(ext<clap_plugin_state_t>(used.p, CLAP_EXT_STATE)->save(used.p, &before.out));
@@ -2978,4 +2979,43 @@ TEST_CASE("Rotary A is linear: no harmonics, and twice the input gives twice the
     const double h = 20 * std::log10(std::max(amp(2000), amp(3000)) / amp(1000));
     INFO("harmonics " << h << " dB");
     REQUIRE(h < -100);
+}
+
+TEST_CASE("Rotary A: the low shelf acts on the rotor, the high shelf on the horn, as measured")
+{
+    // Shelves alone (rotors stopped, depth 0; batch c, a saw at velocity 40, nothing near full scale):
+    // the reference's levels against its dry input at Jacob's three most used settings and two
+    // hold-outs, within 0.15 dB at 44.1 kHz (tolerance proposed); at 48, 96 and 192 kHz within the
+    // rate gate of the 44.1 kHz levels (decision 18: 0.05 dB within 20 dB of the setting's peak).
+    struct Setting { double loHz, loDb, hiHz, hiDb, balance; std::vector<std::pair<double, double>> ref; };
+    const std::vector<Setting> settings{
+        {200, 9, 4500, 3, 14.29, {{65.41, 13.63}, {196.22, 11.65}, {392.44, 8.74}, {654.06, 5.58}, {1046.5, 4.78}, {2093.0, 5.71}, {4186.01, 6.43}, {8372.02, 7.25}}},
+        {450, -5, 1200, 2, 14.29, {{65.41, 0.17}, {196.22, 1.02}, {392.44, 2.72}, {654.06, 3.98}, {1046.5, 5.44}, {2093.0, 6.60}, {4186.01, 6.67}, {8372.02, 6.67}}},
+        {560, 2, 1800, 3, 14.29, {{65.41, 7.09}, {196.22, 7.09}, {392.44, 6.76}, {654.06, 5.39}, {1046.5, 5.44}, {2093.0, 6.94}, {4186.01, 7.44}, {8372.02, 7.61}}},
+        {450, 4, 700, 11, 88.89, {{65.41, -7.85}, {196.22, -6.74}, {392.44, -1.85}, {654.06, 6.85}, {1046.5, 13.67}, {2093.0, 17.12}, {4186.01, 17.65}, {8372.02, 17.75}}},
+        {250, 2, 1200, 11, -9.524, {{65.41, 8.62}, {196.22, 8.18}, {392.44, 7.38}, {654.06, 6.24}, {1046.5, 9.28}, {2093.0, 13.02}, {4186.01, 13.85}, {8372.02, 14.04}}}};
+    auto level = [](double rate, const Setting &s, double hz) {
+        auto o = rotaryRender(rate, {{"Rotor Slow Speed", 0}, {"Horn Slow Speed", 0}, {"Rotor Depth", 0}, {"Horn Depth", 0}, {"Balance", s.balance},
+                                     {"Low Shelf Frequency", s.loHz}, {"Low Shelf Gain", s.loDb}, {"High Shelf Frequency", s.hiHz}, {"High Shelf Gain", s.hiDb}},
+                              0.6, {hz});
+        double e = 0;
+        const size_t a = (size_t)(0.2 * rate), b = o.l.size();
+        for (size_t i = a; i < b; ++i)
+            e += (double)o.l[i] * o.l[i];
+        return 10 * std::log10(e / (b - a) / (0.25 * 0.25 / 2));
+    };
+    for (auto &s : settings)
+    {
+        double peak = -1e9;
+        for (auto [hz, db] : s.ref)
+            peak = std::max(peak, db);
+        for (auto [hz, db] : s.ref)
+        {
+            const double at44 = level(44100, s, hz);
+            INFO("low " << s.loHz << " Hz " << s.loDb << " dB, high " << s.hiHz << " Hz " << s.hiDb << " dB, at " << hz << " Hz: " << at44 << ", reference " << db);
+            REQUIRE(std::abs(at44 - db) < 0.15);
+            for (double rate : {48000.0, 96000.0, 192000.0})
+                REQUIRE(std::abs(level(rate, s, hz) - at44) < (db > peak - 20 ? 0.05 : 0.5));
+        }
+    }
 }
