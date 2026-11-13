@@ -1635,6 +1635,7 @@ struct Driver
     uint32_t frames;
     std::vector<float> l, r, ol, orr;
     double worstUs{0};
+    std::vector<double> callUs; // every timed call, in order
     explicit Driver(Plugin &p, uint32_t n) : pl(p), frames(n), l(n), r(n), ol(n), orr(n) {}
     // One block of `in` (a function of the sample index), with an optional parameter event at 0.
     void block(size_t at, const std::function<float(size_t)> &in, clap_id id = CLAP_INVALID_ID, double v = 0)
@@ -1656,7 +1657,8 @@ struct Driver
         pr.in_events = &ev.in;
         const auto t0 = std::chrono::steady_clock::now();
         REQUIRE(pl.p->process(pl.p, &pr) != CLAP_PROCESS_ERROR);
-        worstUs = std::max(worstUs, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+        callUs.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+        worstUs = std::max(worstUs, callUs.back());
     }
 };
 void setOffline(Plugin &pl)
@@ -2713,15 +2715,16 @@ TEST_CASE("Hall A's parameter changes stay cheap on the audio thread")
     // Decision 27, revised: the rebuilt Hall A's changes cost a few first-order designs, so they
     // are made in process. Sweeping reverb time, room size and high ratio at 192 kHz with one
     // change per 64-sample host block (333 us), the worst process call must stay under a quarter
-    // of the block, as the off-thread EQs' does (unsanitized builds; the best of three runs,
-    // against preemption).
+    // of the block, as the off-thread EQs' does (unsanitized builds). The sweep is the same in
+    // each of three runs, so each block is gated on its fastest run: a block the OS preempted in
+    // one run does not count, a change that is slow, or waits, is slow in every run.
     const double rate = 192000;
     const uint32_t frames = 64;
     const double blockUs = 1e6 * frames / rate;
     auto tone = [rate](size_t i) { return 0.25f * (float)std::sin(2 * M_PI * 440.0 * (double)i / rate); };
     for (const char *name : {"Reverb Time", "Room Size", "High Ratio"})
     {
-        double bestWorst = 1e300;
+        std::vector<double> best; // per block, its fastest of the three runs
         for (int run = 0; run < 3; ++run)
         {
             Plugin pl(reverbId);
@@ -2732,14 +2735,18 @@ TEST_CASE("Hall A's parameter changes stay cheap on the audio thread")
             size_t at = 0;
             for (int k = 0; k < 20; ++k, at += frames)
                 d.block(at, tone);
-            d.worstUs = 0;
+            d.callUs.clear();
             for (int k = 0; k <= 300; ++k, at += frames)
             {
                 const double v = !std::strcmp(name, "Room Size") ? k % 32 : !std::strcmp(name, "High Ratio") ? 0.1 + 0.1 * (k % 10) : 0.3 + 17.7 * k / 300.0;
                 d.block(at, tone, id, v);
             }
-            bestWorst = std::min(bestWorst, d.worstUs);
+            if (best.empty())
+                best = d.callUs;
+            for (size_t i = 0; i < best.size(); ++i)
+                best[i] = std::min(best[i], d.callUs[i]);
         }
+        const double bestWorst = *std::max_element(best.begin(), best.end());
         std::printf("Hall A %s sweep at 192 kHz: worst process call %.1f us (block %.1f us)\n", name, bestWorst, blockUs);
 #ifndef OSCAIRN_SANITIZED
         REQUIRE(bestWorst < blockUs / 4);
