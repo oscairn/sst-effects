@@ -404,12 +404,13 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
             REQUIRE(h.priority == 1);
             std::set<uint32_t> priorities;
             int shown = 0, mixes = 0;
-            bool hasMix = false; // the main control is Mix, or Output Level in a mode without one
+            bool hasMix = false; // the main control is Mix, a modulation mode's depth, or Output Level in a mode without either
             for (uint32_t i = 1; i < params->count(pl.p); ++i)
             {
                 clap_param_info_t info;
                 REQUIRE(params->get_info(pl.p, i, &info));
-                hasMix |= info.id >> 8 == selected && !std::strcmp(info.name, "Mix");
+                hasMix |= info.id >> 8 == selected && (!std::strcmp(info.name, "Mix") || !std::strcmp(info.name, "Horn Depth") ||
+                                                       !std::strcmp(info.name, "L/R Depth") || !std::strcmp(info.name, "AM Depth"));
             }
             for (uint32_t i = 1; i < params->count(pl.p); ++i)
             {
@@ -425,8 +426,10 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
                     REQUIRE(priorities.insert(h.priority).second);
                     ++shown;
                     mixes += h.role == OSCAIRN_ROLE_MIX;
-                    REQUIRE((h.role == OSCAIRN_ROLE_MIX) ==
-                            (!std::strcmp(info.name, hasMix ? "Mix" : "Output Level")));
+                    const bool main = hasMix ? !std::strcmp(info.name, "Mix") || !std::strcmp(info.name, "Horn Depth") ||
+                                                   !std::strcmp(info.name, "L/R Depth") || !std::strcmp(info.name, "AM Depth")
+                                             : !std::strcmp(info.name, "Output Level");
+                    REQUIRE((h.role == OSCAIRN_ROLE_MIX) == main);
                 }
                 else
                     REQUIRE(h.role == OSCAIRN_ROLE_NONE);
@@ -437,9 +440,9 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
         const auto first = (uint32_t)mode.default_value, other = first == (uint32_t)mode.min_value ? (uint32_t)mode.max_value : (uint32_t)mode.min_value;
         if (first == other)
         {
-            // One mode: the delay, whose Mix is its mix; the compressor's Output Level; the rotary
-            // has neither, so no role (check() requires the role exactly on those names).
-            REQUIRE(check(first) == (std::strcmp(id, "org.oscairn.effects.tremolo-rotary") ? 1 : 0));
+            // One mode: the delay, whose Mix is its mix; the compressor's Output Level (check()
+            // requires the role exactly on those names).
+            REQUIRE(check(first) == 1);
             continue;
         }
         check(first);
@@ -455,8 +458,8 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
         pl.p->on_main_thread(pl.p);
         REQUIRE(pl.host.infoRescans == 2);
         const int mixes = check(first);
-        REQUIRE(mixes == (std::strcmp(id, "org.oscairn.effects.tremolo-rotary") ? 1 : 0)); // Reverb 2's Mix; the five-band EQ's
-        // Output Level; neither rotary mode has one (the reference's types give no dry/wet control there)
+        REQUIRE(mixes == 1); // Reverb 2's Mix; the five-band EQ's Output Level; Rotary A's horn depth (the
+        // modulation modes have no dry/wet, so their depth takes the Effects knob: one parameter per mode)
         // a state load that selects another mode rescans too
         Buffer buf;
         pl.set(1, other); // in flush while active: reported at the next callback

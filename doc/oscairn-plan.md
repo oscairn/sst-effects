@@ -369,7 +369,7 @@ tests are not changed.
 | Side-chain | Plugins with side-chain types declare a second, non-main stereo input port, "Side-chain", on every context. A mode without side-chain ignores it; a side-chain mode with nothing connected uses the main input, as the reference does when its source is Off |
 | Tempo | From the CLAP transport at every `process` call; 120 BPM when absent (built with the tempo cross delay) |
 | Work off the audio thread | Each engine owns a worker thread, started with the first context that needs it (decision 19): the EQs' rate matching runs there and comes back through lock-free triple buffers; the audio thread only posts and wakes. Offline (`clap.render`), the same work runs in process so renders do not depend on timing |
-| Editor hints | `oscairn.ui/draft-5`: Mode first by priority, then the selected mode's parameters in their order; a parameter named Mix carries the `mix` role; the draft 4 view fields and the draft 5 `algorithm` and `seconds` callbacks are null (effects have no envelope or map views) |
+| Editor hints | `oscairn.ui/draft-5`: Mode first by priority, then the selected mode's parameters in their order; a parameter named Mix carries the `mix` role (in the modulation modes their depth: Rotary A's Horn Depth, Auto Pan's L/R Depth, Tremolo's AM Depth; decision 28); the draft 4 view fields and the draft 5 `algorithm` and `seconds` callbacks are null (effects have no envelope or map views) |
 | Sample rates | Oscairn runs mostly at 48 kHz; any rate from 8 kHz to 768 kHz activates. Fitted behaviour is written in seconds and hertz, never in samples at 44.1 kHz, and every fitted-behaviour gate runs at 44.1, 48 and 96 kHz |
 | Real-time safety | No allocation, lock or file access in `process`; parameter values cross threads as atomics. Tests count allocations during `process` and run under ASan/UBSan and TSan |
 | Platforms | macOS (arm64) for the desktop, Linux ARM64 for the device, Linux x86_64 in CI |
@@ -598,10 +598,14 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     a dedicated mode in this repository ("Rotary A" of a new plugin, Oscairn FX Tremolo & Rotary),
     not sst RotarySpeaker and not the setBfree rotary model (`b_whirl`). Built (section 15, "Rotary A"). Open points
     from building it, for Jacob:
-    - **The effect's main control.** The mode has no Mix and no Output Level (the reference has
-      neither), so no parameter carries the `mix` role and Oscairn puts the first parameter by
-      priority (Mode) on the Effects knob. The editor-hints test now expects no role for it. A
-      `mix` role on Speed, or Balance, would be a choice.
+    - **The effect's main control.** Decided (Jacob, 2026-11-12): the modes' depth takes the
+      `mix` role, so the Effects knob controls it: Tremolo's AM Depth and Rotary A's depth (and, by
+      the coordinator's reading of "the plugin as a whole", Auto Pan's L/R Depth; to confirm with
+      Jacob). Rotary A has two depths; Oscairn's physical controls put the first parameter that
+      carries the role on the knob, so one is marked: Horn Depth (the horn carries the audible
+      Doppler and AM; a converted sound plays as before with the knob at its converted value).
+      Rotor Depth instead, both, or a new master depth are open for Jacob. The editor-hints test
+      expects the role on exactly those names.
     - ~~**CI's privacy step lists the plugin IDs** (`.github/workflows/oscairn.yml`) and does not name
       `org.oscairn.effects.tremolo-rotary`; the workflow was left unchanged in this round. The
       check passes for it locally~~: resolved 2026-11-12, the step takes the ids from the plugin's
