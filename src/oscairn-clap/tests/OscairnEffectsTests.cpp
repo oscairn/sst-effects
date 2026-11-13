@@ -2986,7 +2986,8 @@ TEST_CASE("Tempo mono delay: the taps, times and gains at 44.1 and 48 kHz")
             const double want = 22049. / 44100 * rate; // fractional read
             std::vector<float> rr;
             auto lr = delayImpulseMode(6, "Tempo Mono Delay", rate,
-                                       {{"Feedback", 40}, {"High Damping", 0.5}, {"L/R Diffusion", 0}, {"Mix", 63}}, rr, 1.2, 120);
+                                       {{"Feedback", 40}, {"High Damping", 0.5}, {"L/R Diffusion", 0}, {"Mix", 63}}, rr, 1.6, 120);
+            REQUIRE(lr.size() > (size_t)(L + 2.5 * want));
             auto peakIn = [&](double from, double to) {
                 size_t p = (size_t)(L + from);
                 for (size_t i = p; i < (size_t)(L + to); ++i)
