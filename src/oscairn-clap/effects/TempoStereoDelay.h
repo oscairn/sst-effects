@@ -18,15 +18,14 @@
 namespace oscairn_fx::delay
 {
 // A line's length in 44.1 kHz samples (kept in seconds at other rates): the note time truncated
-// to 0.1 ms (the reference's displayed precision) plus the line's own offset in ms, then
-// floor(ms * 44.0991), at least one sample. The note time halves while the longer line would
-// exceed halveAbove samples. Every echo time the 02 28 renders measured (1 to 129,519 samples)
-// fits this; round(ms * 44.1) - 1 misses most of them by a sample.
+// to 0.1 ms (the reference's displayed precision) plus the line's own offset in ms, by the
+// family's time law (tenthsSamples). The note time halves while the longer line would exceed
+// halveAbove samples. Every echo time the 02 28 renders measured (1 to 129,519 samples) fits
+// this; round(ms * 44.1) - 1 misses most of them by a sample.
 constexpr long halveAbove = 131072;
 inline long stereoLineSamples(double noteMs, double offsetMs)
 {
-    const long units = std::lround(offsetMs * 10) + (long)std::floor(noteMs * 10 + 1e-6);
-    return std::max(1L, units * 440991 / 100000);
+    return tenthsSamples(std::lround(offsetMs * 10) + (long)std::floor(noteMs * 10 + 1e-6));
 }
 inline double stereoNoteMs(int note, double tempo, double longestOffsetMs)
 {

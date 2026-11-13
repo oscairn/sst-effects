@@ -9,8 +9,8 @@
  *  - input L feeds A only, R feeds B only, L&R feeds both. L Mode 2 feeds A only and sends A's
  *    output into B at unity and B's into A at fb |fb| (R Mode 2 the mirror), so each side repeats
  *    every two crossings and, at negative feedback, inverts once per repeat;
- *  - a line's length in samples at 44.1 kHz is round(T * 44100) + round(lag * 44.1) - 1, T the
- *    note value at the tempo and lag in ms (both lines), at most 65,535 samples;
+ *  - a line's length in samples at 44.1 kHz is the delay family's time law (tenthsSamples) of the
+ *    note value at the tempo, cut to 0.1 ms, plus the lag (both lines), at most 65,535 samples;
  *  - high damping is a two-tap filter (1 - g) x[n] + g x[n-1] in the feedback paths only (the
  *    first echo is unfiltered), g = 5 (1 - ratio) / 9;
  *  - the dry and wet levels are cos and sin of (pi / 2) x, x = (balance + 63) / 126.
@@ -53,6 +53,28 @@ inline const std::unordered_map<int, std::string> noteNames = {
     {10, "1/8 dotted"},  {11, "1/4"},        {12, "1/2 triplet"},  {13, "1/4 dotted"},  {14, "1/2"},
     {15, "1/1 triplet"}, {16, "1/2 dotted"}, {17, "4 quarters"},   {18, "5 quarters"},  {19, "6 quarters"}};
 
+// The delay family's one time law: a time in tenths of a millisecond is floor(t x 18063 / 4096)
+// samples at 44.1 kHz (4.4099121 per 0.1 ms), at least one. The 02 40 and 02 50 renders put the
+// factor between 4.40990 and 4.40994 (0.1 ms is 4 samples, 1,638.3 ms 72,247), the 02 28 and
+// 02 20 renders between 4.409908 and 4.409915; 18063 / 4096 is the one 12-bit fixed-point factor
+// inside both, and every time of every delay type's renders fits it (the 02 10 triplet and dotted
+// lengths of fx16 and fx18 too, which round(T x 44100) - 1 missed by up to 2 samples).
+inline long tenthsSamples(long tenths) { return tenths < 1 ? 1 : tenths * 18063 / 4096; }
+
+// A line's length in seconds from a time in ms (0.1 to 1638.3, steps of 0.1): the family's law,
+// kept in seconds at other rates.
+inline double msLineSeconds(double ms)
+{
+    return (double)tenthsSamples(std::lround(std::clamp(ms, 0.1, maxLineMs) * 10)) / designRate;
+}
+
+// A note value at the tempo in tenths of a millisecond, cut to 0.1 ms (the 02 28 and 02 20
+// renders: the 1/32 triplet at 120 BPM is 41.6 ms, 1,834 samples).
+inline long noteTenths(int note, double tempo)
+{
+    return (long)std::floor(noteBeats[std::clamp(note, 0, 19)] * 600000 / std::clamp(tempo, 20.0, 999.0) + 1e-6);
+}
+
 // High damping ratio r (0.1 to 1.0) to the two-tap coefficient: g = 5 (1 - r) / 9, so 0.1 puts
 // a zero at Nyquist and 1.0 is off (fx16, fx17: within 0.001 of a free fit at every value).
 inline double dampingCoefficient(double ratio) { return 5 * (1 - std::clamp(ratio, 0.1, 1.0)) / 9; }
@@ -67,22 +89,12 @@ inline double squaredBalancePosition(double v)
     return std::atan2(w * w, d * d) / (M_PI / 2);
 }
 
-// A line's length in seconds (the 44.1 kHz sample count, kept in seconds at other rates).
+// A tempo cross line's length in seconds: the note at the tempo plus the lag, by the family's
+// time law (the 44.1 kHz sample count, kept in seconds at other rates).
 inline double lineSeconds(int note, double tempo, double lagMs)
 {
-    const double t = noteBeats[std::clamp(note, 0, 19)] * 60 / std::clamp(tempo, 20.0, 999.0);
-    const long n = std::lround(t * designRate) + std::lround(lagMs * designRate / 1000) - 1;
-    return (double)std::clamp<long>(n, 1, maxSamples44) / designRate;
-}
-
-// A line's length in seconds from a time in ms: rounded to the same 44.1 kHz sample grid the
-// note lengths round on and one shorter (the 02 00 renders put every single-crossing echo at
-// round(ms * 44.1) - 1 samples: 500.0 ms gives 22,049, 700.0 gives 30,869, 300.0 gives 13,229),
-// kept in seconds at other rates.
-inline double msLineSeconds(double ms)
-{
-    const long n = std::lround(std::clamp(ms, 0.1, maxLineMs) * designRate / 1000) - 1;
-    return (double)std::max(1L, n) / designRate;
+    const long n = tenthsSamples(noteTenths(note, tempo) + std::lround(lagMs * 10));
+    return (double)std::min<long>(n, maxSamples44) / designRate;
 }
 
 // A reader of a delay line at a fractional length: integer part from the buffer, the fraction

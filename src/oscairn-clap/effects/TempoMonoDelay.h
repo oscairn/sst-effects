@@ -14,7 +14,7 @@
  * inverted polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback
  * path only, its delay taken off the loop so the output taps keep their time; the cosine/sine balance with the tempo types' linear angle position (measured
  * for this type at +-21). The time law is the stereo type's (the note time cut to 0.1 ms, plus
- * the tap's Lag and Diffusion in ms, then floor(ms * 44.0991) samples at 44.1 kHz) without its
+ * the tap's Lag and Diffusion in ms, then the family's tenthsSamples at 44.1 kHz) without its
  * halving: 6 quarters at 120 BPM repeat after 3,000 ms. At other rates the lines keep their
  * length in seconds via the first-order all-pass. The reference's four EQ parameters are not
  * built (plan, known difference 44).

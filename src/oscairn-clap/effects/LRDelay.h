@@ -20,7 +20,7 @@
  *
  * Every law inside a line is the delay family's (effects/TempoCrossDelay.h, whose Line,
  * Damping and dampingCoefficient this mode uses unchanged): the line length
- * round(ms * 44.1) - 1 samples at 44.1 kHz (msLineSeconds - each line stays under the
+ * floor(ms x 10 x 18063 / 4096) samples at 44.1 kHz (msLineSeconds - each line stays under the
  * parameter's own 1,638.3 ms, so no ceiling differs from the cross modes), kept in seconds
  * at other rates by the first-order all-pass; feedback v / 63.5 per loop with inverted
  * polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback path only,

@@ -5,7 +5,7 @@
  * (effects/TempoCrossDelay.h, CrossCore), its two line times in ms (0.1 to 1638.3) instead of
  * note lengths, and no lag. Measured against the 02 00 renders (measurements/
  * qwen-cross-delay-2026-11-11/, qwen-night-2026-11-12/cross_delay_extra/ and
- * qwen-night-2026-11-12-review/cross_delay/): the lines are round(ms * 44.1) - 1 samples
+ * qwen-night-2026-11-12-review/cross_delay/): the lines are the family's time law
  * (msLineSeconds); the feedback is v / 63.5 with inverted polarity when negative; the damping is
  * the two-tap g = 5(1 - r)/9 in the feedback path only; the input feeds are split L/R; the
  * balance turns the far side down by the square of its distance (squaredBalancePosition), not
