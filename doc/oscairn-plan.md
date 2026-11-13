@@ -2471,7 +2471,10 @@ Structure, as the measurements show it:
   its centre, shortest at the gain's peak (ampm; tr_pm against tr_depth): a vibrato. The deviation
   in time is the same at every harmonic (a pure delay swing). PM 4, 8, 12, 32, 64, 100, 124 and 127
   give 1.99, 4.01, 6.01, 16.07, 32.1, 50.18, 62.23 and 62.2 samples against 2, 4,
-  6, 16, 32, 50, 62 and 62: the depth acts in 32 steps.
+  6, 16, 32, 50, 62 and 62: the depth acts in 32 steps. Exactly (2026-11-12): the peak is
+  floor(8192 q / 127) / 32 samples times 0.9959 (q = floor(v / 4); the factor fitted to those eight
+  swings), which gives 1.991, 4.015, 6.006, 16.06, 32.12, 50.17, 62.21 and 62.21: within 0.02 samples
+  of every one (2 q missed by up to 0.23). The delay reads with linear interpolation, as Auto Pan's.
 - The phase difference acts in steps too: the right channel's lead is one of sixteen phases (every
   multiple of 30 degrees and the odd multiples of 45), the nearest to the printed angle, with the
   negative side's angles stretched slightly (law below).
@@ -2481,7 +2484,7 @@ Structure, as the measurements show it:
 | --- | --- | --- |
 | Speed in Hz (table 1) | tr_slow, tr_fast, tr_depth, tr_maxrate | -0.016% at 0.67 and 2.19 Hz, +0.004% at 39.7 Hz; tr_slow -0.04% |
 | +2 dB, then AM 1 - (v / 127)(1 - cos) / 2 | tr_am0, am4-96, tr_depth, tr_slow, tr_fast | peak 1.2585-1.2592 (+1.997 to +2.002 dB); trough within 0.002 of the law |
-| PM 2 floor(v / 4) samples at 44.1 kHz, shortest delay at the gain's peak | pm4-124, tr_pm, tr_pm_mid, ampm, pm_ph94 | 1.994-2.008 samples per step; the plugin's swing within 0.65% of the reference's through the same analysis (pm4, a 2-sample swing: 2.3%) |
+| PM 2 floor(v / 4) samples at 44.1 kHz, shortest delay at the gain's peak (2026-11-12: floor(8192 q / 127) / 32 x 0.9959) | pm4-124, tr_pm, tr_pm_mid, ampm, pm_ph94 | 1.994-2.008 samples per step; the plugin's swing within 0.65% of the reference's through the same analysis (pm4, a 2-sample swing: 2.3%); with the stepped law every measured peak within 0.02 samples |
 | Right channel ahead by the phase difference, AM and PM | 29 values: tr_phase, ph4-124, ampm_ph94, pm_ph94 | within 0.01 degrees of the plugin with the converter's snapped angle |
 | EQ: Auto Pan's | eq0-eq9 | as Auto Pan, 2.00 dB higher: within 0.006 dB with the coefficient steps (without them the 315 Hz width-12 peak misses by 1.25 dB) |
 | Mono / Stereo | st_mono, st_stereo, st_mono_pm | Stereo leaves the right output silent, Mono gives both half the left input |
@@ -2510,14 +2513,14 @@ unused):
 | Raw parameter | Plugin parameter | Law |
 | --- | --- | --- |
 | 1 LFO Speed (0-127) | LFO Speed, Hz | the Data List's table 1 at v, as Auto Pan |
-| 2 AM Depth | AM Depth, % | 100 v / 127 |
-| 3 PM Depth | PM Depth, % | 100 floor(v / 4) / 31 (100% = 62 samples at 44.1 kHz) |
+| 2 AM Depth | AM Depth, % | 100 trunc(32768 v / 127) / 32768 (at most 0.003 points below 100 v / 127) |
+| 3 PM Depth | PM Depth, % | 100 floor(v / 4) / 31 (the plugin takes the nearest of 31 steps; 100% = 62.21 samples at 44.1 kHz) |
 | 6-9, 11-13 EQ | as Auto Pan | as Auto Pan |
 | 14 LFO Phase Difference (4-124) | LFO Phase Difference, degrees | the angle 3 (v - 64) for v >= 64 and 180 (v - 62.5) / 58.5 below, snapped to the nearest of the sixteen phases 90 q + 0, 30, 45 or 60 degrees (q = 0-3, shown -180 to +180), a tie going to the phase nearer 0; so 65-69 give 0, 70-76 30, 77-81 45, 82-89 60, 90-99 90, 100-106 120, 107-111 135, 112-119 150, 120-124 180, 58-63 0, 51-57 -30, 46-50 -45, 39-45 -60, 29-38 -90, 22-28 -120, 17-21 -135, 9-16 -150, 4-8 180 |
 | 15 Input Mode | Input Mode | 0 Mono, 1 Stereo |
 
-The plugin takes the phase difference and the PM depth as continuous values; the steps are the
-converter's.
+The plugin takes the phase difference as a continuous value (its steps are the converter's) and the
+PM depth in its 31 steps.
 
 Plugin tests, each checked to fail with its law broken: "Tremolo: +2 dB at the LFO's peak, a sine AM
 to 1 - depth, at the set speed, at 44.1, 48 and 96 kHz" (fails without the +2 dB, 0.997, and with a
@@ -2528,6 +2531,10 @@ difference puts the right channel ahead, for AM and PM alike" (fails with the le
 insertion modes' Mono/Stereo and EQ tests now include Tremolo (the EQ against trem_c's 40 levels).
 "Processing never allocates" switches speed, depths, a band and the input mode while playing.
 Memory: 9,404 bytes per context at 44.1 kHz, 68,444 at other rates.
+
+2026-11-12: the PM test checks the peaks at q = 16, 25 and 31 against the reference's 32.1, 50.18 and
+62.23 samples within 0.06 samples at 44.1 kHz (in proportion within 1% at 48 and 96 kHz); it fails
+with the 2 q law (0.117 samples).
 
 ## 16. Known differences from the reference
 

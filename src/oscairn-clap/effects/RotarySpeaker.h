@@ -131,17 +131,6 @@ template <int Size> double linearRead(const float (&line)[Size], int w, double d
     const double f = d - n, x0 = line[(w - n) & (Size - 1)];
     return x0 + f * (line[(w - n - 1) & (Size - 1)] - x0);
 }
-// The ring `line` read d samples behind its write position w (4-point cubic; d >= 1).
-template <int Size> double cubicRead(const float (&line)[Size], int w, double d)
-{
-    static_assert((Size & (Size - 1)) == 0, "a power of two");
-    const int n = (int)d;
-    const double f = d - n;
-    auto at = [&](int j) { return (double)line[(w - j) & (Size - 1)]; };
-    const double xm = at(n - 1), x0 = at(n), x1 = at(n + 1), x2 = at(n + 2);
-    const double c1 = 0.5 * (x1 - xm), c2 = xm - 2.5 * x0 + 2 * x1 - 0.5 * x2, c3 = 0.5 * (x2 - xm) + 1.5 * (x0 - x1);
-    return ((c3 * f + c2) * f + c1) * f + x0;
-}
 // A power of two above the largest swing (150 samples at 44.1 kHz) at 768 kHz.
 inline constexpr int lineSize = 4096;
 

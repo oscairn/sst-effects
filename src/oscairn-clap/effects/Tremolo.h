@@ -8,7 +8,8 @@
  *  - one sine LFO; the left channel reads it at its phase, the right at its phase plus the phase
  *    difference;
  *  - per channel a gain of 1 - (AM depth) (1 - cos) / 2 (unity at the LFO's peak) and a delay that
- *    swings by the PM depth around its centre, shortest at the LFO's peak (a vibrato).
+ *    swings by the PM depth around its centre, shortest at the LFO's peak (a vibrato; linear
+ *    interpolation).
  * Everything is in seconds and hertz, so every sample rate behaves as 44.1 kHz does.
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_TREMOLO_H
@@ -18,8 +19,9 @@
 
 namespace oscairn_fx::rotary
 {
-// Full PM depth: the delay's peak swing (62 samples at 44.1 kHz).
-inline constexpr double pmFullSeconds = 62 / 44100.0;
+// PM depth in 31 steps q: the delay's peak swing is floor(8192 q / 127) / 32 samples at 44.1 kHz times
+// 0.9959 (fitted: 1.99-62.23 samples at q = 1-31 within 0.02 samples).
+inline double pmPeakSamples(int q) { return std::floor(8192.0 * q / 127) / 32 * 0.9959; }
 // The level with no modulation, +2 dB.
 inline constexpr double tremoloGain = 1.2589254117941673;
 
@@ -69,7 +71,7 @@ template <typename FXConfig> struct Tremolo : eq::SeriesEq<FXConfig, 3, 12, Trem
             {
                 const double co = std::cos(2 * M_PI * (phase + (c ? diff : 0)));
                 line[c][w] = in[c];
-                const double y = swing > 0 ? cubicRead(line[c], w, 1 + swing * (1 - co)) : in[c];
+                const double y = swing > 0 ? linearRead(line[c], w, 1 + swing * (1 - co)) : in[c];
                 out[c] = (1 - am * (1 - co) / 2) * y;
             }
             L[i] = (float)out[0];
@@ -124,7 +126,7 @@ template <typename FXConfig> struct Tremolo : eq::SeriesEq<FXConfig, 3, 12, Trem
         this->gain = (float)tremoloGain;
         lfoHz = std::max(0.f, l[lfoSpeed]);
         am = std::clamp(l[amDepth], 0.f, 100.f) / 100;
-        pmSeconds = pmFullSeconds * std::clamp(l[pmDepth], 0.f, 100.f) / 100;
+        pmSeconds = pmPeakSamples((int)std::lround(std::clamp(l[pmDepth], 0.f, 100.f) * 0.31f)) / designRate;
         diff = std::clamp(l[phaseDiff], -180.f, 180.f) / 360.0;
         mono = std::lround(l[inputMode]) == 0;
     }

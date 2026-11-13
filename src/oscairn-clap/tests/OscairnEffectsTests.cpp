@@ -4807,18 +4807,19 @@ TEST_CASE("Tremolo: +2 dB at the LFO's peak, a sine AM to 1 - depth, at the set 
 
 TEST_CASE("Tremolo: PM swings the delay by 62 samples at 44.1 kHz at full depth, shortest at the gain's peak")
 {
-    // Batch trem_c pm4-pm124 (PM raw v moves the delay by 2 floor(v / 4) samples at 44.1 kHz, peak):
-    // the reference's peak swing at full depth is 1.411 ms on its fundamental and half way (16 of 31
-    // steps) 0.729 ms; within 1% at 44.1, 48 and 96 kHz (tolerance proposed). With AM and PM at
-    // full depth (ampm) the shortest delay comes at the gain's peak.
+    // Batch trem_c pm4-pm124: PM raw v moves the delay's peak by floor(8192 q / 127) / 32 samples at
+    // 44.1 kHz times 0.9959, q = floor(v / 4) (the plugin's PM depth is q / 31): the reference's
+    // peaks 32.1, 50.18 and 62.23 samples at q = 16, 25 and 31, within 0.06 samples at 44.1 kHz and in
+    // proportion within 1% at 48 and 96 kHz (tolerances proposed). With AM and PM at full depth
+    // (ampm) the shortest delay comes at the gain's peak.
     for (double rate : {44100.0, 48000.0, 96000.0})
-        for (auto [pct, ms] : {std::pair{100.0, 1.411}, {100.0 * 16 / 31, 0.729}})
+        for (auto [q, samples] : {std::pair{16, 32.1}, {25, 50.18}, {31, 62.23}})
         {
-            auto o = modRender(rate, 3, "Tremolo", {{"LFO Speed", 0.67291}, {"PM Depth", pct}}, 4, 150);
+            auto o = modRender(rate, 3, "Tremolo", {{"LFO Speed", 0.67291}, {"PM Depth", 100.0 * q / 31}}, 4, 150);
             const auto d = delayTrack(envelopeAt(o.l, rate, 150), 150);
-            const double swing = peakToPeak(d, 100, d.size()) / 2;
-            INFO(rate << " Hz, PM " << pct << " %: peak swing " << swing << " ms");
-            REQUIRE(std::abs(swing / ms - 1) < 0.01);
+            const double swing = peakToPeak(d, 100, d.size()) / 2 * 44.1;
+            INFO(rate << " Hz, PM " << q << " of 31: peak swing " << swing << " samples at 44.1 kHz");
+            REQUIRE(std::abs(swing - samples) < (rate == 44100 ? 0.06 : 0.01 * samples));
         }
     auto o = modRender(44100, 3, "Tremolo", {{"LFO Speed", 0.67291}, {"PM Depth", 100}, {"AM Depth", 50}}, 4, 150);
     const auto z = envelopeAt(o.l, 44100, 150);
