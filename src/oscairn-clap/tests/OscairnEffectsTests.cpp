@@ -4020,109 +4020,318 @@ double peakToPeak(const std::vector<double> &x, size_t a, size_t b)
 }
 } // namespace
 
-TEST_CASE("Rotary A: steady speeds, and the speed switch first and live")
+namespace
 {
-    // Rotation rates in Hz as set (the converter's speeds are the measured table values), within 0.3%.
-    auto *params = [] { static Plugin pl(rotaryId); return &pl; }();
-    clap_param_info_t first;
-    REQUIRE(ext<clap_plugin_params_t>(params->p, CLAP_EXT_PARAMS)->get_info(params->p, 1, &first));
-    REQUIRE(std::string(first.name) == "Speed");
+// The platform's speeds as the measured rates (rotation phase per 44.1 kHz sample, 2^-24 turns).
+int platformStep(int i)
+{
+    if (i <= 63)
+        return 16 * i;
+    const int from[] = {64, 77, 89, 102, 114, 126, 128}, base[] = {1024, 1472, 2304, 4096, 7424, 14080}, step[] = {32, 64, 128, 256, 512, 1024};
+    int k = 0;
+    while (i >= from[k + 1])
+        ++k;
+    return base[k] + step[k] * (i - from[k]);
+}
+double platformHz(int i) { return platformStep(i) * 44100.0 / 16777216; }
+} // namespace
+
+TEST_CASE("Rotary A: the rotors turn at the platform's speeds, at 44.1, 48 and 96 kHz")
+{
+    // A set speed plays as the nearest of the platform's 128 (the measured rates: 0.6729 Hz at 16,
+    // 6.7291 at 91, 7.4020 at 93): 0.83 Hz plays at index 20, 0.8411 Hz; within 0.2% (tolerance
+    // proposed). Depths at 8 (6.3%) keep the delay tracks clean.
     for (double rate : {44100.0, 48000.0, 96000.0})
-        for (auto [speed, rotor, horn] : {std::tuple{0, 0.799, 1.0937}, std::tuple{1, 6.73, 7.40}})
+        for (auto [speed, set, rotor, horn] : {std::tuple{0, 0.83, platformHz(20), platformHz(26)}, std::tuple{1, 6.73, platformHz(91), platformHz(93)}})
         {
-            auto o = rotaryRender(rate, {{"Speed", speed}}, 6, {150, 3000});
-            const auto zr = envelopeAt(o.l, rate, 150), zh = envelopeAt(o.l, rate, 3000);
-            const double fr = rotationHz(crossings(delayTrack(zr, 150), 1000), 1000, 6000);
-            const double fh = rotationHz(crossings(delayTrack(zh, 3000), 1000), 1000, 6000);
+            auto o = rotaryRender(rate, {{"Speed", speed}, {speed ? "Rotor Fast Speed" : "Rotor Slow Speed", set}, {"Rotor Depth", 6.3}, {"Horn Depth", 6.3}},
+                                  speed ? 6 : 12, {150, 3000});
+            const double end = speed ? 6000 : 12000;
+            const double fr = rotationHz(crossings(delayTrack(envelopeAt(o.l, rate, 150), 150), 1000), 1000, end);
+            const double fh = rotationHz(crossings(delayTrack(envelopeAt(o.l, rate, 3000), 3000), 1000), 1000, end);
             INFO(rate << " Hz, speed " << speed << ": rotor " << fr << " horn " << fh);
-            REQUIRE(std::abs(fr / rotor - 1) < 0.003);
-            REQUIRE(std::abs(fh / horn - 1) < 0.003);
+            REQUIRE(std::abs(fr / rotor - 1) < 0.002);
+            REQUIRE(std::abs(fh / horn - 1) < 0.002);
         }
 }
 
-TEST_CASE("Rotary A: ramps, the rotor linear in Hz and the horn exponential, at 44.1, 48 and 96 kHz")
+TEST_CASE("Rotary A: ramps step every 100 ms through the platform's speeds, at 44.1, 48 and 96 kHz")
 {
-    // Fitted to the reference's ramps (r_ramp_def, t64, t127, jacob): the rotor's speed moves
-    // linearly over the ramp time for the slow-fast difference, the horn's exponentially, its time
-    // constant 0.925 times as long when speeding up as when slowing down. Counted from the first
-    // crossing of the delay track, every later crossing must fall within 0.05 turns of a whole number
-    // of the law's turns (tolerance proposed).
-    const double ramp = 0.0964 * 77, tau = -0.0964 / std::log(1 - 2.4 / 14), up = 1, down = 13;
-    auto rotorLaw = [&](double t) {
-        const double a = 0.799, b = 6.73, s = (b - a) / ramp;
-        if (t < up)
-            return a;
-        if (t < down)
-            return std::min(b, a + s * (t - up));
-        const double from = std::min(b, a + s * (down - up));
-        return std::max(a, from - s * (t - down));
-    };
-    auto hornLaw = [&](double t) {
-        const double a = 1.0937, b = 7.40;
-        if (t < up)
-            return a;
-        const double atDown = b + (a - b) * std::exp(-(down - up) / (0.925 * tau));
-        if (t < down)
-            return b + (a - b) * std::exp(-(t - up) / (0.925 * tau));
-        return a + (atDown - a) * std::exp(-(t - down) / tau);
+    // The reference's ramps (batch c e_ramp_def and e_ramp_jacob, and the first batch's r_ramp_*): a
+    // switch steps both rotors at once and then on every 50th tick of a 2 ms timer (the first tick
+    // 0-2 ms after the switch). The rotor's ramp speed moves by the slow-fast difference over the ramp
+    // time in tenths of a second; the horn's by 2.4 / (its ramp time in tenths) of the rest, plus or
+    // minus 1e-4 Hz. Each rotor turns at the platform's speed nearest its ramp speed on the side of the
+    // target (the speeds rounded to 3 decimals below 10 Hz and 2 above). A ramp stops when both turn at
+    // their targets, so a slowing ramp starts from where the speeding up stopped. Counted from the first
+    // crossing of the delay track, every later crossing must fall within 0.05 turns of a whole number of
+    // the law's turns (tolerance proposed); the reference's accumulated rotation over each of those four
+    // ramps matches the law within 0.003 turns.
+    const int slow[2] = {19, 26}, fast[2] = {91, 93};
+    const double tenths[2] = {77, 14}, up = 1, down = 9;
+    auto rampHz = [](int i) {
+        const double f = platformHz(i), s = f < 10 ? 1000 : 100;
+        return (float)(std::floor(f * s + 0.5) / s);
     };
     for (double rate : {44100.0, 48000.0, 96000.0})
     {
-        auto o = rotaryRender(rate, {{"Rotor Ramp Time", ramp}, {"Horn Time Constant", tau}}, 22, {150, 3000},
-                              {{up, 1}, {down, 0}});
-        for (auto [f, law, name] : {std::tuple{150.0, std::function<double(double)>(rotorLaw), "rotor"},
-                                    std::tuple{3000.0, std::function<double(double)>(hornLaw), "horn"}})
+        // The law, per sample: the plugin's 16-sample blocks carry the switch and the timer's ticks.
+        const size_t total = (size_t)(20 * rate);
+        std::vector<double> hz[2];
+        float state[2] = {rampHz(slow[0]), rampHz(slow[1])};
+        int idx[2] = {slow[0], slow[1]}, isFast = 0, count = 0, done[2] = {slow[0], slow[1]};
+        bool on = false;
+        double timer = 0;
+        auto step = [&] {
+            bool going = false;
+            for (int k = 0; k < 2; ++k)
+            {
+                const int t = isFast ? fast[k] : slow[k];
+                const float T = rampHz(t);
+                if (T != state[k])
+                {
+                    if (k == 0)
+                    {
+                        const float d = (rampHz(fast[0]) - rampHz(slow[0])) / (float)tenths[0];
+                        state[0] = T > state[0] ? std::min(T, state[0] + d) : std::max(T, state[0] - d);
+                    }
+                    else
+                    {
+                        const float x = state[1] + (T - state[1]) / ((float)tenths[1] / 2.4f);
+                        const float y = (float)((double)x + (T > state[1] ? 1e-4 : -1e-4));
+                        state[1] = T > state[1] ? std::min(T, y) : std::max(T, y);
+                    }
+                }
+                int i = 0;
+                if (state[k] <= T)
+                {
+                    while (i < 127 && state[k] > rampHz(i))
+                        ++i;
+                    i = std::min(i, t);
+                }
+                else
+                {
+                    for (i = 127; i > 0 && state[k] < rampHz(i); --i)
+                        ;
+                    i = std::max(i, t);
+                }
+                idx[k] = i;
+                done[k] = t;
+                going = going || i != t;
+            }
+            return going;
+        };
+        for (size_t at = 0; at < total; at += 16)
         {
+            const double t = at / rate;
+            isFast = t >= up && t < down ? 1 : 0;
+            if (done[0] != (isFast ? fast[0] : slow[0]))
+                on = step(), count = 0;
+            timer += 16 * 44100.0 / rate;
+            while (timer >= 88.2)
+            {
+                timer -= 88.2;
+                if (on && ++count == 50)
+                    count = 0, on = step();
+            }
+            for (int k = 0; k < 2; ++k)
+                hz[k].insert(hz[k].end(), 16, platformHz(idx[k]));
+        }
+        auto o = rotaryRender(rate, {{"Rotor Ramp Time", tenths[0] / 10}, {"Horn Ramp Time", tenths[1] / 10}, {"Rotor Depth", 6.3}, {"Horn Depth", 6.3}},
+                              19, {150, 3000}, {{up - L / rate, 1}, {down - L / rate, 0}});
+        for (int k = 0; k < 2; ++k)
+        {
+            const double f = k ? 3000 : 150;
             const auto c = crossings(delayTrack(envelopeAt(o.l, rate, f), f), 300);
             // The law's turns from the first crossing to each later one must be whole numbers.
-            double worst = 0, turns = 0, t = c[0] / 1000;
+            double worst = 0, turns = 0;
+            size_t s = (size_t)(c[0] / 1000 * rate);
             int n = 0;
-            for (size_t i = 1; i < c.size() && c[i] < 21500; ++i, ++n)
+            for (size_t i = 1; i < c.size() && c[i] < 18500; ++i, ++n)
             {
-                for (; t < c[i] / 1000; t += 1e-4)
-                    turns += law(t + 5e-5) * 1e-4;
+                for (; s < (size_t)(c[i] / 1000 * rate); ++s)
+                    turns += hz[k][s] / rate;
                 worst = std::max(worst, std::abs(turns - (double)i));
             }
-            std::printf("Rotary A ramps at %.0f Hz, %s: %d rotations, worst %.4f turns\n", rate, name, n, worst);
+            std::printf("Rotary A ramps at %.0f Hz, %s: %d rotations, worst %.4f turns\n", rate, k ? "horn" : "rotor", n, worst);
             REQUIRE(n > 20);
             REQUIRE(worst < 0.05);
         }
     }
 }
 
-TEST_CASE("Rotary A: depth sets the delay swing in proportion and the AM depth up to a low setting")
+namespace
 {
-    // The reference's pitch deviation grows in proportion to its depth setting (b_r_slow_dr*,
-    // c_slow_d*, c_fast_d*: 0.118-0.120 cents per hertz of rotation per step up to 64) and its AM
-    // stops growing at a low setting (c_slow_d20 = d24 = d40). With the mic angle at 0 the horn is
-    // one tap: its delay swings 1.69 ms (slow) or 1.21 ms (fast) at 100 %, and its gain dips by the
-    // AM depth, 0.45 (slow) from 17.4 % up, 0.71 (fast) from 40.3 % up (tolerances proposed: 2 % of
-    // the swing, 0.02 of the depth).
-    for (auto [fast, swingFull, amFull, amFrom] : {std::tuple{0, 1.69, 0.45, 17.4}, std::tuple{1, 1.21, 0.71, 40.3}})
-        for (double depth : {5.0, 10.0, 25.0, 50.0, 100.0})
-        {
-            auto o = rotaryRender(44100, {{"Speed", fast}, {"Mic Angle", 0}, {"Horn Depth", depth}, {"Balance", 100}}, 4, {3000});
-            const auto z = envelopeAt(o.l, 44100, 3000);
-            const auto d = delayTrack(z, 3000);
-            std::vector<double> a(z.size());
-            for (size_t i = 0; i < z.size(); ++i)
-                a[i] = std::abs(z[i]);
-            const double swing = peakToPeak(d, 1000, 3900) / 2;
-            const auto [lo, hi] = std::minmax_element(a.begin() + 1000, a.begin() + 3900);
-            const double am = 1 - *lo / *hi, wantAm = amFull * std::min(1.0, depth / amFrom);
-            INFO((fast ? "fast" : "slow") << " depth " << depth << ": swing " << swing << " ms, AM depth " << am);
-            REQUIRE(std::abs(swing / (swingFull * depth / 100) - 1) < 0.02);
-            REQUIRE(std::abs(am - wantAm) < 0.02);
-        }
-    // The rotor's swing doubles with its depth.
-    double s[2];
-    for (int i = 0; i < 2; ++i)
+// Rotary A's measured structure at 44.1 kHz, for a sine x[n] = sin(w n) at its input (both channels):
+// the output a sample at a time from the laws (plan, section 15, "Rotary A").
+struct RotaryLaw
+{
+    int rotorSpeed, hornSpeed, rotorDepth, hornDepth, balance, lowIndexHz, lowDb, highHz, highDb, mic;
+    bool fast;
+};
+// glide (optional): per band the swing (samples) and AM coefficients (centre, channel) in place of the setting's.
+std::array<std::complex<double>, 2> rotaryLawAt(const RotaryLaw &s, double w, size_t n, const double (*glide)[3] = nullptr)
+{
+    using namespace oscairn_fx;
+    auto H = [&](eq::Biquad b) {
+        const auto z = std::polar(1.0, -w);
+        return (b.b0 + b.b1 * z + b.b2 * z * z) / (1.0 + b.a1 * z + b.a2 * z * z);
+    };
+    // Bands: 1.25 (L + R), the crossover (16-bit words, one integer bit), 0.50116, the shelf (four
+    // integer bits), 0.5.
+    const double K0 = std::tan(M_PI * 619.5 / 44100), K1 = std::tan(M_PI * 999.35 / 44100), q = 0.7;
+    eq::Biquad lp, hp, lo, hi;
+    lp.set(-K0 * K0, -2 * K0 * K0, -K0 * K0, 1 + K0 / q + K0 * K0, 2 * (K0 * K0 - 1), 1 - K0 / q + K0 * K0);
+    hp.set(1, -2, 1, 1 + K1 / q + K1 * K1, 2 * (K1 * K1 - 1), 1 - K1 / q + K1 * K1);
+    eq::roundToSteps(lp, 1, true);
+    eq::roundToSteps(hp, 1, true);
+    eq::firstOrderShelf(lo, s.lowIndexHz, s.lowDb, false);
+    eq::firstOrderShelf(hi, s.highHz, s.highDb, true);
+    eq::roundToSteps(lo, 4, false);
+    eq::roundToSteps(hi, 4, false);
+    const std::complex<double> band[2] = {2.5 * 8211 / 16384 * 0.5 * H(lp) * H(lo), 2.5 * 8211 / 16384 * 0.5 * H(hp) * H(hi)};
+    // Taps: the sine of the rotation (128 segments, 16 bits, 0 to 1), the delay 1 + swing x m
+    // samples (linear), the gain 1 + AM x m in steps of 2^-15 rounded down.
+    auto sine = [](double turns) {
+        const uint32_t c = (uint32_t)(turns * 16777216.0) & 0xffffff;
+        const int i = (int)(c >> 17), f = (int)((c >> 9) & 255);
+        const double a = std::sin(2 * M_PI * i / 128), b = std::sin(2 * M_PI * (i + 1) / 128);
+        return (std::floor((a + (b - a) * f / 256) * 32767 + 0.5) + 32768) / 65536;
+    };
+    auto phase = [](int v) { // the sixteen phases, turns
+        const double a = v >= 64 ? 3.0 * (v - 64) : 180.0 * (v - 62.5) / 58.5;
+        double best = 0;
+        for (double p : {-180., -150., -135., -120., -90., -60., -45., -30., 0., 30., 45., 60., 90., 120., 135., 150., 180.})
+            if (std::abs(p - a) < std::abs(best - a) - 1e-9)
+                best = p;
+        return (best < 0 ? best + 360 : best) / 360;
+    };
+    const int v = s.mic / 2;
+    std::array<std::complex<double>, 2> out{};
+    for (int k = 0; k < 2; ++k)
     {
-        auto o = rotaryRender(44100, {{"Mic Angle", 0}, {"Rotor Depth", 20.0 * (i + 1)}, {"Balance", -100}}, 5, {150});
-        s[i] = peakToPeak(delayTrack(envelopeAt(o.l, 44100, 150), 150), 1000, 4900);
+        const int dv = k ? s.hornDepth : s.rotorDepth;
+        int d, a, ac;
+        if (k == 0)
+            d = s.fast ? dv : 5 * dv / 4, a = s.fast ? (dv < 34 ? 15 * dv / 4 : 127) : (dv < 18 ? 57 * dv / 8 : 127), ac = s.fast ? 13 * a / 20 : 25 * a / 38;
+        else
+            d = s.fast ? dv : 7 * dv / 6, a = s.fast ? (dv <= 51 ? 15 * dv / 12 : 64) : (dv <= 22 ? 19 * dv / 6 : 70), ac = s.fast ? 26 * a / 15 : 15 * a / 19;
+        double swing = 256.0 * (16384 * d / 127) / 32768, am = std::trunc(-a * 32768.0 / 127) / 32768, amc = std::trunc(-ac * 32768.0 / 127) / 32768;
+        if (glide)
+            swing = glide[k][0], am = glide[k][1], amc = glide[k][2];
+        const double turns = (double)((uint64_t)platformStep(k ? s.hornSpeed : s.rotorSpeed) * (n + 1) & 0xffffff) / 16777216;
+        auto tap = [&](double m, double c) {
+            const double o = swing * m, f = o - std::floor(o), x = c * m * 32768;
+            const double g = 1 + (x < 0 ? std::trunc(x - 1) : std::trunc(x)) / 32768;
+            return g * std::polar(1.0, -w * (1 + std::floor(o))) * (1.0 + f * (std::polar(1.0, -w) - 1.0));
+        };
+        const double mc = sine(turns + (k ? 0 : 0.25));
+        const int t = std::lround(32767 * std::sin(M_PI * ((k ? s.balance : 128 - s.balance) - 1) / 252));
+        const double wc = (k ? 9 * (t / 20) : 3 * (t / 4)) / 32768.0, ws = (k ? 9 * (-t / 80) : -(t / 8)) / 32768.0,
+                     wl = (k ? 9 * (t / 10) : t) / 32768.0;
+        const auto common = wc * tap(mc, am) + ws * tap(32767.0 / 32768 - mc, am);
+        const int centre = k ? 64 : 94;
+        out[0] += band[k] * (common + wl * tap(sine(turns + phase(centre - v)), amc));
+        out[1] += band[k] * (common + wl * tap(sine(turns + phase(centre + v)), amc));
     }
-    INFO("rotor swing " << s[0] << " and " << s[1] << " ms");
-    REQUIRE(std::abs(s[1] / s[0] - 2) < 0.04);
+    for (auto &z : out)
+        z *= 11571.0 / 4096 * std::polar(1.0, w * (double)n); // x[n] = Im(e^{jwn})
+    return out;
+}
+} // namespace
+
+TEST_CASE("Rotary A: the output follows the measured structure sample for sample")
+{
+    // The structure in section 15 ("Rotary A") reproduces the reference's clean two-tone recordings
+    // (batch c: Jacob's setting slow and fast, the mic at 0, 30 and 60, two rates, depth 8, three
+    // hold-outs) within the source's own noise (-35 to -49 dB of residual, with one gain for every
+    // setting). The plugin must give that structure's output, sample for sample, within -60 dB (the
+    // delay words' 12-bit mantissas leave about -80 dB), at 196 and 2637 Hz.
+    const std::vector<RotaryLaw> settings{{16, 21, 38, 39, 65, 200, 9, 4500, 3, 60, false}, {93, 96, 38, 39, 65, 200, 9, 4500, 3, 60, true},
+                                          {19, 26, 49, 56, 73, 315, 0, 1200, 1, 0, false}, {19, 26, 49, 56, 73, 315, 0, 1200, 1, 30, false},
+                                          {105, 106, 124, 118, 59, 630, 7, 2500, -5, 17, true}, {27, 25, 114, 21, 94, 1200, -7, 630, 7, 21, false},
+                                          {91, 93, 8, 8, 1, 315, 0, 1200, 1, 60, true}};
+    for (const auto &s : settings)
+    {
+        std::vector<std::pair<const char *, double>> set{
+            {"Speed", s.fast}, {s.fast ? "Rotor Fast Speed" : "Rotor Slow Speed", platformHz(s.rotorSpeed)},
+            {s.fast ? "Horn Fast Speed" : "Horn Slow Speed", platformHz(s.hornSpeed)}, {"Rotor Depth", 100.0 * s.rotorDepth / 127},
+            {"Horn Depth", 100.0 * s.hornDepth / 127}, {"Balance", 100.0 * (s.balance - 64) / 63}, {"Low Shelf Frequency", (double)s.lowIndexHz},
+            {"Low Shelf Gain", (double)s.lowDb}, {"High Shelf Frequency", (double)s.highHz}, {"High Shelf Gain", (double)s.highDb},
+            {"Mic Angle", 3.0 * s.mic}};
+        auto o = rotaryRender(44100, set, 2.5, {196, 2637});
+        double e = 0, sig = 0;
+        for (size_t n = 22050; n < o.l.size(); ++n)
+        {
+            const auto a = rotaryLawAt(s, 2 * M_PI * 196 / 44100, n), b = rotaryLawAt(s, 2 * M_PI * 2637 / 44100, n);
+            const double y[2] = {0.25 * (a[0] + b[0]).imag(), 0.25 * (a[1] + b[1]).imag()};
+            e += std::pow(o.l[n] - y[0], 2) + std::pow(o.r[n] - y[1], 2);
+            sig += y[0] * y[0] + y[1] * y[1];
+        }
+        const double db = 10 * std::log10(e / sig);
+        std::printf("Rotary A structure, %s, depths %d/%d, mic %d: %.1f dB\n", s.fast ? "fast" : "slow", s.rotorDepth, s.hornDepth, s.mic, db);
+        // The delay words' noise is there: the reference's broadband floor over 0.3-6 kHz matches the
+        // plugin's within 1.5 dB (e_jacob_slow, e_jacob_fast); full-precision words would leave -120 dB.
+        INFO("speeds " << s.rotorSpeed << "/" << s.hornSpeed << ", depths " << s.rotorDepth << "/" << s.hornDepth << ", balance " << s.balance
+                       << ", mic " << s.mic << (s.fast ? " fast" : " slow") << ": " << db << " dB");
+        REQUIRE(db < -60);
+        REQUIRE(db > -90);
+    }
+}
+
+TEST_CASE("Rotary A: on a switch the swing glides and the AM depths move at a bounded rate")
+{
+    // The swing moves as a one-pole of 2^-12 per sample, each AM coefficient by at most 2^-12 per
+    // sample (frexp-scaled steps of 2^-14 x 2^(2 - e) of the difference, a quarter of it near the end).
+    // Fitted on the reference's ramps (e_ramp_def, waveform over the 300 ms after the switch): -28.9 dB
+    // of residual with these laws, -20.4 / -20.2 dB with the swing's pole at 2^-11 / 2^-13, -13.7 dB with
+    // both stepping. Here both speeds are the same (index 40), so only the depths change (17 and 22,
+    // where slow and fast AM depths differ most); the output
+    // must follow the laws sample for sample within -60 dB over the 0.4 s after the switch.
+    const RotaryLaw slowS{40, 40, 17, 22, 73, 315, 0, 1200, 1, 60, false};
+    std::vector<std::pair<const char *, double>> set{{"Rotor Slow Speed", platformHz(40)}, {"Horn Slow Speed", platformHz(40)},
+                                                     {"Rotor Fast Speed", platformHz(40)}, {"Horn Fast Speed", platformHz(40)},
+                                                     {"Rotor Depth", 100.0 * 17 / 127}, {"Horn Depth", 100.0 * 22 / 127}};
+    const double t = 0.5;
+    auto o = rotaryRender(44100, set, 1.0, {196, 2637}, {{t - L / 44100.0, 1}});
+    // Coefficient targets slow and fast (the laws in section 15).
+    auto targets = [](int k, bool fast, int v, double *x) {
+        int d, a, ac;
+        if (k == 0)
+            d = fast ? v : 5 * v / 4, a = fast ? (v < 34 ? 15 * v / 4 : 127) : (v < 18 ? 57 * v / 8 : 127), ac = fast ? 13 * a / 20 : 25 * a / 38;
+        else
+            d = fast ? v : 7 * v / 6, a = fast ? (v <= 51 ? 15 * v / 12 : 64) : (v <= 22 ? 19 * v / 6 : 70), ac = fast ? 26 * a / 15 : 15 * a / 19;
+        x[0] = 256.0 * (16384 * d / 127) / 32768, x[1] = std::trunc(-a * 32768.0 / 127) / 32768, x[2] = std::trunc(-ac * 32768.0 / 127) / 32768;
+    };
+    double g[2][3], to[2][3];
+    for (int k = 0; k < 2; ++k)
+        targets(k, false, k ? 22 : 17, g[k]), targets(k, true, k ? 22 : 17, to[k]);
+    const size_t sw = (size_t)(t * 44100) / 16 * 16; // the block that carries the switch
+    double e = 0, sig = 0;
+    for (size_t n = 0; n < (size_t)(0.9 * 44100); ++n)
+    {
+        if (n >= sw)
+            for (int k = 0; k < 2; ++k)
+            {
+                g[k][0] += 0x1p-12 * (to[k][0] - g[k][0]);
+                for (int c = 1; c < 3; ++c)
+                    if (const double d = to[k][c] - g[k][c]; std::abs(d) > 1e-8)
+                    {
+                        int ex;
+                        std::frexp(d, &ex);
+                        g[k][c] += std::min(0.25, 0x1p-14 * std::ldexp(1.0, 2 - ex)) * d;
+                    }
+            }
+        if (n < sw)
+            continue;
+        const auto a = rotaryLawAt(slowS, 2 * M_PI * 196 / 44100, n, g), b = rotaryLawAt(slowS, 2 * M_PI * 2637 / 44100, n, g);
+        const double y[2] = {0.25 * (a[0] + b[0]).imag(), 0.25 * (a[1] + b[1]).imag()};
+        e += std::pow(o.l[n] - y[0], 2) + std::pow(o.r[n] - y[1], 2);
+        sig += y[0] * y[0] + y[1] * y[1];
+    }
+    const double db = 10 * std::log10(e / sig);
+    INFO("after the switch: " << db << " dB");
+    REQUIRE(db < -60);
 }
 
 TEST_CASE("Rotary A: the crossover and balance as measured, at 44.1, 48 and 96 kHz")
@@ -4156,34 +4365,11 @@ TEST_CASE("Rotary A: the crossover and balance as measured, at 44.1, 48 and 96 k
     }
 }
 
-TEST_CASE("Rotary A: the mic angle moves the horn's left and right in measured steps")
-{
-    // Every platform value 0-60 (batch b, d_mic*): the horn's L/R pitch phase is 0 up to 33 degrees
-    // (value 11), then 31, 61, 75, 88, 105, 121 and 180 degrees from 36, 42, 78, 84, 108, 114 and
-    // 156 degrees (values 12, 14, 26, 28, 36, 38, 52); within 2 degrees (tolerance proposed).
-    for (auto [deg, want] : {std::pair{0.0, 0.0}, {33.0, 0.0}, {36.0, 31.0}, {42.0, 61.0}, {75.0, 61.0}, {78.0, 75.0}, {84.0, 88.0},
-                             {108.0, 105.0}, {114.0, 121.0}, {153.0, 121.0}, {156.0, 180.0}, {180.0, 180.0}})
-    {
-        auto o = rotaryRender(44100, {{"Mic Angle", deg}, {"Balance", 100}}, 5, {3000});
-        const auto dl = delayTrack(envelopeAt(o.l, 44100, 3000), 3000), dr = delayTrack(envelopeAt(o.r, 44100, 3000), 3000);
-        // Phase of the rotation fundamental (1.0937 Hz) in each channel's delay.
-        auto phase = [](const std::vector<double> &d) {
-            std::complex<double> c;
-            const double f = 1.0937, n = std::floor(3.5 * f) / f * 1000;
-            for (size_t i = 1000; i < 1000 + (size_t)n; ++i)
-                c += d[i] * std::polar(1.0, -2 * M_PI * f * i / 1000);
-            return std::arg(c) * 180 / M_PI;
-        };
-        double got = std::remainder(phase(dr) - phase(dl), 360.0);
-        INFO("mic " << deg << " degrees: L/R " << got << ", reference " << want);
-        REQUIRE(std::abs(std::abs(got) - want) < 2);
-    }
-}
-
 TEST_CASE("Rotary A is linear: no harmonics, and twice the input gives twice the output")
 {
     // The reference's drive adds no distortion (harmonics at or below -80 dB at every setting and
-    // level); the mode is linear (tolerance 1e-5 of full scale on the doubled render).
+    // level); the mode is linear (tolerance 1e-5 of full scale on the doubled render: the delay words
+    // keep their 12-bit mantissa at any level).
     auto a = rotaryRender(44100, {{"Speed", 1}, {"Rotor Depth", 100}, {"Horn Depth", 100}}, 1, {440});
     Plugin pl(rotaryId);
     for (auto [n, v] : std::vector<std::pair<const char *, double>>{{"Speed", 1}, {"Rotor Depth", 100}, {"Horn Depth", 100}})
@@ -4199,7 +4385,8 @@ TEST_CASE("Rotary A is linear: no harmonics, and twice the input gives twice the
         worst = std::max(worst, (double)std::abs(l[i + L] - 2 * a.l[i]));
     INFO("worst " << worst);
     REQUIRE(worst < 1e-5);
-    // Stopped, depth 0: a 1 kHz sine keeps every harmonic below -100 dB.
+    // Stopped, depth 0: a 1 kHz sine keeps every harmonic below -90 dB (the delay words' noise sits
+    // near -66 dB, spread over the band).
     auto s = rotaryRender(44100, {{"Rotor Slow Speed", 0}, {"Horn Slow Speed", 0}, {"Rotor Depth", 0}, {"Horn Depth", 0}}, 1, {1000});
     auto amp = [&](double f) {
         std::complex<double> c;
@@ -4209,7 +4396,7 @@ TEST_CASE("Rotary A is linear: no harmonics, and twice the input gives twice the
     };
     const double h = 20 * std::log10(std::max(amp(2000), amp(3000)) / amp(1000));
     INFO("harmonics " << h << " dB");
-    REQUIRE(h < -100);
+    REQUIRE(h < -90);
 }
 
 TEST_CASE("Rotary A: the low shelf acts on the rotor, the high shelf on the horn, as measured")
@@ -4247,6 +4434,35 @@ TEST_CASE("Rotary A: the low shelf acts on the rotor, the high shelf on the horn
             REQUIRE(std::abs(at44 - db) < 0.15);
             for (double rate : {48000.0, 96000.0, 192000.0})
                 REQUIRE(std::abs(level(rate, s, hz) - at44) < (db > peak - 20 ? 0.05 : 0.5));
+        }
+    }
+}
+
+TEST_CASE("Rotary A: the low shelf at 32 Hz, in its coefficients' 16-bit steps, as measured")
+{
+    // Batch c's grid at the lowest corner (e_lo4_58 and e_lo4_70: 32 Hz at -6 and +6 dB), the
+    // harmonics at 32.7 and 65.4 Hz against the same render's at 196 Hz (the renders' own levels
+    // scatter by up to 0.3 dB, their harmonics by about 0.1 dB), within 0.1 dB (tolerance proposed);
+    // the unrounded design misses by 0.24 dB (-6) and 0.21 dB (+6) at 32.7 Hz.
+    const std::vector<std::pair<double, std::vector<std::pair<double, double>>>> settings{
+        {-6, {{32.70, 0.86}, {65.40, 3.01}, {196.20, 4.94}}}, {6, {{32.70, 9.28}, {65.40, 7.30}, {196.20, 5.71}}}};
+    auto level = [](double db, double hz) {
+        auto o = rotaryRender(44100, {{"Rotor Slow Speed", 0}, {"Horn Slow Speed", 0}, {"Rotor Depth", 0}, {"Horn Depth", 0},
+                                      {"Low Shelf Frequency", 32}, {"Low Shelf Gain", db}, {"High Shelf Gain", 0}}, 1.2, {hz});
+        double e = 0;
+        const size_t a = (size_t)(0.4 * 44100), b = o.l.size();
+        for (size_t i = a; i < b; ++i)
+            e += (double)o.l[i] * o.l[i];
+        return 10 * std::log10(e / (b - a));
+    };
+    for (auto &[db, ref] : settings)
+    {
+        const double base = level(db, ref.back().first);
+        for (auto [hz, want] : ref)
+        {
+            const double got = level(db, hz) - base;
+            INFO(db << " dB at " << hz << " Hz: " << got << " against " << want - ref.back().second);
+            REQUIRE(std::abs(got - (want - ref.back().second)) < 0.1);
         }
     }
 }
