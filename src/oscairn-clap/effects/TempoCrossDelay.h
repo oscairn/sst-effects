@@ -46,6 +46,13 @@ constexpr double maxLineMs{1638.3};
 constexpr double noteBeats[20] = {1. / 12, 3. / 32, 1. / 8, 1. / 6, 3. / 16, 1. / 4, 1. / 3, 3. / 8, 1. / 2, 2. / 3,
                                   3. / 4,  1.,      4. / 3, 3. / 2, 2.,      8. / 3, 3.,     4.,     5.,     6.};
 
+// The note names of the time parameters' 20 values, in the reference's Data List order.
+inline const std::unordered_map<int, std::string> noteNames = {
+    {0, "1/32 triplet"}, {1, "1/64 dotted"}, {2, "1/32"},          {3, "1/16 triplet"}, {4, "1/32 dotted"},
+    {5, "1/16"},         {6, "1/8 triplet"}, {7, "1/16 dotted"},   {8, "1/8"},          {9, "1/4 triplet"},
+    {10, "1/8 dotted"},  {11, "1/4"},        {12, "1/2 triplet"},  {13, "1/4 dotted"},  {14, "1/2"},
+    {15, "1/1 triplet"}, {16, "1/2 dotted"}, {17, "4 quarters"},   {18, "5 quarters"},  {19, "6 quarters"}};
+
 // High damping ratio r (0.1 to 1.0) to the two-tap coefficient: g = 5 (1 - r) / 9, so 0.1 puts
 // a zero at Nyquist and 1.0 is off (fx16, fx17: within 0.001 of a free fit at every value).
 inline double dampingCoefficient(double ratio) { return 5 * (1 - std::clamp(ratio, 0.1, 1.0)) / 9; }
@@ -78,21 +85,15 @@ inline double msLineSeconds(double ms)
     return (double)std::max(1L, n) / designRate;
 }
 
-// A delay line read at a fractional length: integer part from the buffer, the fraction (kept in
-// [0.5, 1.5) samples) by a first-order all-pass, which leaves every repeat's level unchanged.
-struct Line
+// A reader of a delay line at a fractional length: integer part from the buffer, the fraction
+// (kept in [0.5, 1.5) samples) by a first-order all-pass, which leaves every repeat's level
+// unchanged.
+struct Tap
 {
-    std::vector<float> buf;
-    int w{0};
     int whole{1};
     double eta{0}, x1{0}, y1{0};
     bool frac{false};
-    void resize(int n) { buf.assign((size_t)n, 0.f), w = 0; }
-    void clear()
-    {
-        std::fill(buf.begin(), buf.end(), 0.f);
-        x1 = y1 = 0;
-    }
+    void clear() { x1 = y1 = 0; }
     void setLength(double samples)
     {
         samples = std::max(samples, 1.0); // below a sample the all-pass's pole would leave the unit circle
@@ -108,23 +109,39 @@ struct Line
         const double d = samples - whole;
         eta = (1 - d) / (1 + d);
     }
-    inline float read() const
+};
+
+// A delay line with its own reader; further readers (Tap) can share its buffer.
+struct Line
+{
+    std::vector<float> buf;
+    int w{0};
+    Tap tap;
+    void resize(int n) { buf.assign((size_t)n, 0.f), w = 0; }
+    void clear()
     {
-        int r = w - whole;
+        std::fill(buf.begin(), buf.end(), 0.f);
+        tap.clear();
+    }
+    void setLength(double samples) { tap.setLength(samples); }
+    inline float read(const Tap &t) const
+    {
+        int r = w - t.whole;
         if (r < 0)
             r += (int)buf.size();
         return buf[(size_t)r];
     }
-    inline double out()
+    inline double out(Tap &t) const
     {
-        const double x = read();
-        if (!frac)
+        const double x = read(t);
+        if (!t.frac)
             return x;
-        const double y = eta * (x - y1) + x1;
-        x1 = x;
-        y1 = y;
+        const double y = t.eta * (x - t.y1) + t.x1;
+        t.x1 = x;
+        t.y1 = y;
         return y;
     }
+    inline double out() { return out(tap); }
     inline void write(float v)
     {
         buf[(size_t)w] = v;
@@ -228,7 +245,8 @@ enum Input
 
 // The cross delay's signal path, shared by every mode. A mode (the CRTP argument) supplies its
 // parameter enum and table, `bufferSamples(rate)` and `setLines(tempo, rate)`, which sets secA
-// and secB, the two lines' lengths in seconds.
+// and secB, the two lines' lengths in seconds. A mode with `outputTaps` also sets outA and outB,
+// where each line is read for the output when that differs from its length in the loop.
 template <typename FXConfig, template <typename> class Mode>
 struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
 {
@@ -245,12 +263,14 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
     static size_t heapBytesAt(double rate) { return 2 * sizeof(float) * (size_t)D::bufferSamples(rate); }
     size_t heapBytes() const { return (a.buf.size() + b.buf.size()) * sizeof(float); }
     // The longest silence between two echoes: the longer line, plus the wrapper's 100 ms.
-    double quietSeconds() const { return std::max(secA, secB) + 0.1; }
+    double quietSeconds() const { return std::max({secA, secB, outSecA, outSecB}) + 0.1; }
 
     void initialize()
     {
         a.clear();
         b.clear();
+        tapA.clear();
+        tapB.clear();
         dampA.clear();
         dampB.clear();
         inDelay.fill({0, 0});
@@ -266,11 +286,15 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
     void processBlock(float *__restrict L, float *__restrict R)
     {
         update();
-        const int mode = (int)std::lround(last[D::input]);
+        // A mode without an input-select parameter names its fixed feed as D::inputFeed.
+        const int mode = inputMode();
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             const double l = L[i], r = R[i];
             const double oA = a.out(), oB = b.out(); // A plays right, B left
+            double pA = oA, pB = oB; // what each line plays: its loop read, or its own output tap
+            if constexpr (requires { D::outputTaps; })
+                pA = a.out(tapA), pB = b.out(tapB);
             const double fA = dampB.run(oB), fB = dampA.run(oA);
             const bool left = mode != inR && mode != inRMode2, right = mode == inR || mode == inLR || mode == inRMode2;
             double gA = fb, gB = fb; // into A from B, into B from A
@@ -290,12 +314,22 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             }
             a.write((float)(xA + gA * fA));
             b.write((float)(xB + gB * fB));
-            L[i] = (float)(dry * l + wet * oB);
-            R[i] = (float)(dry * r + wet * oA);
+            L[i] = (float)(dry * l + wet * pB);
+            R[i] = (float)(dry * r + wet * pA);
         }
     }
 
   protected:
+    // The input feed: the input-select parameter's value, or the mode's fixed choice when it
+    // has no such parameter.
+    int inputMode() const
+    {
+        if constexpr (requires { D::input; })
+            return (int)std::lround(last[D::input]);
+        else
+            return D::inputFeed;
+    }
+
     double tempo() const
     {
         if constexpr (requires { this->globalStorage->tempo; })
@@ -330,16 +364,22 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
         static_cast<D *>(this)->setLines(lastTempo, rate);
         a.setLength(secA * rate - dampA.K);
         b.setLength(secB * rate - dampA.K);
+        if constexpr (requires { D::outputTaps; })
+        {
+            tapA.setLength(outSecA * rate - dampA.K);
+            tapB.setLength(outSecB * rate - dampA.K);
+        }
     }
 
     Line a, b;
+    Tap tapA, tapB; // the output reads of a mode with outputTaps
     Damping dampA, dampB;           // dampA filters A's output on its way into B, dampB the reverse
     std::array<std::array<double, 2>, Damping::maxK + 1> inDelay{};
     int inAt{0};
     bool designed{false};
     std::vector<float> last; // sized to D::numParams at construction
     double lastTempo{NAN};
-    double fb{0}, dry{1}, wet{0}, secA{0}, secB{0};
+    double fb{0}, dry{1}, wet{0}, secA{0}, secB{0}, outSecA{0}, outSecB{0};
 };
 
 template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoCrossDelay>
@@ -375,12 +415,7 @@ template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoC
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
         using pmd = sst::basic_blocks::params::ParamMetaData;
-        static const std::unordered_map<int, std::string> notes = {
-            {0, "1/32 triplet"}, {1, "1/64 dotted"}, {2, "1/32"},          {3, "1/16 triplet"}, {4, "1/32 dotted"},
-            {5, "1/16"},         {6, "1/8 triplet"}, {7, "1/16 dotted"},   {8, "1/8"},          {9, "1/4 triplet"},
-            {10, "1/8 dotted"},  {11, "1/4"},        {12, "1/2 triplet"},  {13, "1/4 dotted"},  {14, "1/2"},
-            {15, "1/1 triplet"}, {16, "1/2 dotted"}, {17, "4 quarters"},   {18, "5 quarters"},  {19, "6 quarters"}};
-        auto time = [&](const char *n) { return pmd().asInt().withName(n).withRange(0, 19).withDefault(11).withUnorderedMapFormatting(notes); };
+        auto time = [&](const char *n) { return pmd().asInt().withName(n).withRange(0, 19).withDefault(11).withUnorderedMapFormatting(noteNames); };
         switch (idx)
         {
         case timeLR: return time("Time L>R");

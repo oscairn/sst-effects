@@ -2292,6 +2292,163 @@ TEST_CASE("Cross delay: Mode 2 and the balance, as measured")
     }
 }
 
+// ---- Tempo stereo delay (one time, L/R Diffusion; plan, section 15) ----
+
+TEST_CASE("Tempo stereo delay: every echo time measured on the 02 28 renders")
+{
+    // At 120 BPM each line is floor(ms * 44.0991) samples, ms = the note truncated to 0.1 ms
+    // (halved when the longer line would pass 131,072 samples) + Lag, + Diffusion on the left
+    // and - Diffusion on the right; never under one sample. Each row is a render of the review
+    // batch (night batch for 41.6 ms), {note, lag, diffusion, left echo, right echo}.
+    struct Row
+    {
+        int note;
+        double lag, diff;
+        long left, right;
+    };
+    const Row rows[] = {{9, 0, 0, 14698, 14698},      {0, 0, 0, 1834, 1834},          {9, -63, 0, 11919, 11919},
+                        {9, 32, 0, 16109, 16109},     {9, 0, 63, 17476, 11919},       {9, 0, -63, 11919, 17476},
+                        {9, 0, 32, 16109, 13287},     {9, -63, 63, 14698, 9141},      {14, 17, -40, 43084, 46612},
+                        {0, 0, 41, 3642, 26},         {0, 0, 63, 4612, 1},            {16, 0, 0, 66148, 66148},
+                        {17, 0, 0, 88198, 88198},     {18, 0, 0, 110247, 110247},     {18, 63, 63, 115804, 110247},
+                        {19, 0, 0, 66148, 66148},     {19, -15, 0, 65487, 65487},     {19, -40, 0, 130533, 130533},
+                        {19, -63, 0, 129519, 129519}, {19, -63, 63, 66148, 60592}};
+    auto peak = [](const std::vector<float> &x) {
+        size_t at = 0;
+        for (size_t i = 1; i < x.size(); ++i)
+            if (std::abs(x[i]) > std::abs(x[at]))
+                at = i;
+        return (long)(at - L);
+    };
+    for (const auto &w : rows)
+    {
+        INFO("note " << w.note << " lag " << w.lag << " diffusion " << w.diff);
+        const std::vector<std::pair<const char *, double>> set{
+            {"Delay Time", w.note}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", w.diff}, {"Lag", w.lag}, {"Mix", 63}};
+        const double seconds = (std::max(w.left, w.right) + 4096) / 44100.;
+        std::vector<float> r, rr;
+        delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, r, seconds, 120); // input L plays right
+        auto l = delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, rr, seconds, 120, true); // input R plays left
+        REQUIRE(peak(r) == w.right);
+        REQUIRE(peak(l) == w.left);
+        REQUIRE(r[L + w.right] == Approx(1.0).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("Tempo stereo delay: the lines loop at the note plus Lag, Diffusion moves only the output")
+{
+    // rs_dfb / rs_dfb2: with feedback, every later echo follows the first by the note plus Lag
+    // on each channel (17,476 left / 11,919 right, then +14,698 each); feedback v / 63.5 per
+    // repeat, its sign alternating when negative. The lines cross: input L's repeats alternate
+    // right, left, right, and a centred source gives both channels every repeat.
+    const double fb = -40 / 63.5;
+    const long q = 14698;
+    const std::vector<std::pair<const char *, double>> set{
+        {"Delay Time", 9}, {"Feedback", -40}, {"High Damping", 1.0}, {"L/R Diffusion", 63}, {"Mix", 63}};
+    for (bool rightIn : {false, true})
+    {
+        std::vector<float> r;
+        auto l = delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, r, 1.6, 120, rightIn);
+        int nonzero = 0;
+        for (size_t i = 1; i < r.size() - L; ++i)
+            nonzero += (r[L + i] != 0) + (l[L + i] != 0);
+        REQUIRE(nonzero == 4);
+        for (int k = 0; k < 4; ++k)
+        {
+            const bool onRight = (k % 2 == 0) != rightIn;
+            const auto &out = onRight ? r : l;
+            REQUIRE(out[L + (onRight ? 11919 : 17476) + q * k] == Approx(std::pow(fb, k)).epsilon(1e-6));
+        }
+    }
+    SECTION("A right-input impulse at 48 kHz keeps its time in seconds")
+    {
+        const double want = 17476. / 44100 * 48000;
+        std::vector<float> r48;
+        auto l48 = delayImpulseMode(3, "Tempo Stereo Delay", 48000,
+                                    {{"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 63}, {"Mix", 63}}, r48, 1.0, 120, true);
+        size_t at = 0;
+        for (size_t i = 1; i < l48.size(); ++i)
+            if (std::abs(l48[i]) > std::abs(l48[at]))
+                at = i;
+        REQUIRE(std::abs((double)(at - L) - want) <= 1.0);
+        for (float v : r48)
+            REQUIRE(std::abs(v) < 1e-12);
+    }
+    SECTION("The dry and wet follow the tempo family's linear balance (measured at -21, +21, +48)")
+    {
+        for (int v : {-48, -21, 0, 21, 48})
+        {
+            const double x = (v + 63) / 126.0;
+            std::vector<float> rb;
+            auto out = delayImpulseMode(3, "Tempo Stereo Delay", 44100,
+                                        {{"Feedback", 0}, {"High Damping", 1.0}, {"Mix", v}}, rb, 0.6, 120);
+            REQUIRE(out[L] == Approx(std::cos(M_PI / 2 * x)).margin(1e-7));
+            REQUIRE(rb[L + 14698] == Approx(std::sin(M_PI / 2 * x)).margin(1e-7));
+        }
+    }
+}
+
+TEST_CASE("Tempo stereo delay state round-trips")
+{
+    Plugin a(delayId);
+    a.set(1, 3);
+    for (auto [n, v] : {std::pair{"Delay Time", 7}, {"Feedback", -21}, {"High Damping", 0.4},
+                        {"L/R Diffusion", 31.5}, {"Lag", -9}, {"Mix", 12}})
+        a.set(paramIdByName(a.p, "Tempo Stereo Delay", n), v);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin b(delayId);
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
+    auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 0; i < params->count(a.p); ++i)
+    {
+        clap_param_info_t info;
+        params->get_info(a.p, i, &info);
+        REQUIRE(a.get(info.id) == b.get(info.id));
+    }
+    std::vector<float> inL, inR, ra, rb;
+    signal(24000, inL, inR);
+    a.activate();
+    b.activate();
+    REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+}
+
+TEST_CASE("Tempo stereo delay: every parameter's value text parses back")
+{
+    Plugin pl(delayId);
+    pl.set(1, 3);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    int checked = 0;
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if ((info.id >> 8) != 3)
+            continue;
+        for (double t : {0., .25, .5, .75, 1.})
+        {
+            double v = info.min_value + t * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            char text[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, v, text, sizeof(text)));
+            double back = NAN;
+            INFO(info.name << " at " << v << ": \"" << text << "\"");
+            REQUIRE(params->text_to_value(pl.p, info.id, text, &back));
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                REQUIRE(back == v); // a label must select the value it came from
+            char again[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, back, again, sizeof(again)));
+            REQUIRE(!std::strcmp(text, again));
+            ++checked;
+        }
+    }
+    REQUIRE(checked == 30); // five points on each of the mode's six parameters, no vacuous pass
+}
+
 TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
 {
     namespace sc = oscairn_fx::scales;
