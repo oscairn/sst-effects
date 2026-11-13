@@ -14,7 +14,7 @@
  *    131,072 samples halves its note until it fits (halvedNote);
  *  - high damping is a two-tap filter (1 - g) x[n] + g x[n-1] in the feedback paths only (the
  *    first echo is unfiltered), g = 5 (1 - ratio) / 9;
- *  - the dry and wet levels are cos and sin of (pi / 2) x, x = (balance + 63) / 126.
+ *  - the dry and wet levels are cos and sin of (pi / 2) x, x = (balance + 63) / 126 (tempoBalance).
  * At other rates the lines keep their length in seconds (an all-pass interpolator for the
  * fraction, so repeats keep their level) and the damping is a linear-phase filter fitted to the
  * 44.1 kHz filter's magnitude, its delay taken off the line.
@@ -93,14 +93,27 @@ inline long halvedNote(long note, long offsetTenths, long limit)
 // a zero at Nyquist and 1.0 is off (fx16, fx17: within 0.001 of a free fit at every value).
 inline double dampingCoefficient(double ratio) { return 5 * (1 - std::clamp(ratio, 0.1, 1.0)) / 9; }
 
-// Dry/wet balance v (-63..63) to an equal-power crossfade position: the side being turned down
-// falls with the square of its distance to the end, ((63 - |v|) / 63)^2, the other stays at
-// full level, and the position is the angle of that dry/wet pair (the 02 00 renders, within
-// 0.01 dB from v = -55 to +59). The tempo modes keep their linear (v + 63) / 126.
-inline double squaredBalancePosition(double v)
+// Dry/wet balance v (-63..63) to the two gains.
+struct Balance
+{
+    double dry, wet;
+};
+// The ms types (02 00, 02 40, 02 50): the side being turned down falls with the square of its
+// distance to the end, ((63 - |v|) / 63)^2, and the other stays at unity, so at D=W both are at
+// unity. Wet/dry within 0.01 dB from v = -55 to +59 (cross_delay_extra, review cross_delay, the
+// L/R and L/C/R batches); the steady saw of delay-eq-2026-11-12 puts the dry at D=W level with
+// the dry-only render and the echo of the wet-only render level with it (0.000 / -0.002 dB).
+inline Balance msBalance(double v)
 {
     const double d = v > 0 ? (63 - v) / 63 : 1, w = v < 0 ? (63 + v) / 63 : 1;
-    return std::atan2(w * w, d * d) / (M_PI / 2);
+    return {d * d, w * w};
+}
+// The tempo types (02 10, 02 28, 02 20): cosine and sine of (pi / 2)(v + 63) / 126, an equal-power
+// pair (fx17; delay-eq-2026-11-12: the dry at D=W 3.01 dB under the dry-only render).
+inline Balance tempoBalance(double v)
+{
+    const double x = std::clamp((v + 63) / 126, 0.0, 1.0);
+    return {std::cos(M_PI / 2 * x), std::sin(M_PI / 2 * x)};
 }
 
 // A tempo cross line's length in seconds: the note at the tempo, halved while the line would
@@ -378,9 +391,8 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
         lastTempo = tempo();
         const double rate = this->sampleRate();
         fb = std::lround(last[D::feedback]) / 63.5;
-        const double x = std::clamp(D::balancePosition((double)std::lround(last[D::mix])), 0.0, 1.0);
-        dry = std::cos(M_PI / 2 * x);
-        wet = std::sin(M_PI / 2 * x);
+        const Balance bal = D::balance((double)std::lround(last[D::mix]));
+        dry = bal.dry, wet = bal.wet;
         const double g = dampingCoefficient(last[D::damping]);
         if (!designed || g != dampA.g)
         {
@@ -436,8 +448,7 @@ template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoC
         this->secA = lineSeconds((int)std::lround(this->last[timeLR]), tempo, this->last[lag]);
         this->secB = lineSeconds((int)std::lround(this->last[timeRL]), tempo, this->last[lag]);
     }
-    // The balance parameter's crossfade position (fx17, 02 10): straight from -63..63 to 0..1.
-    static double balancePosition(double v) { return (v + 63) / 126.0; }
+    static Balance balance(double v) { return tempoBalance(v); }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {

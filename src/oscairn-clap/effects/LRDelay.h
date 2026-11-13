@@ -25,7 +25,7 @@
  * at other rates by the first-order all-pass; feedback v / 63.5 per loop with inverted
  * polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback path only,
  * its delay taken off the loop so the output taps keep their time; the cross delay's balance
- * (squaredBalancePosition, measured here too; the tempo modes' linear position is theirs).
+ * (msBalance, measured here too; the tempo modes' equal-power pair is theirs).
  * The reference's four EQ parameters are not built: they act on the whole output, dry and
  * wet alike, not in the feedback path, and their shelf law is not measured yet (plan
  * decision 23, known difference 44).
@@ -136,9 +136,8 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         const double rate = this->sampleRate();
         fb = std::lround(last[feedback]) / 63.5;
         // the cross delay's balance law (lr_hold_mix, lr_bal_m48: +7.04 / -24.94 dB wet/dry at v = +21 / -48)
-        const double x = std::clamp(squaredBalancePosition((double)std::lround(last[mix])), 0.0, 1.0);
-        dry = std::cos(M_PI / 2 * x);
-        wet = std::sin(M_PI / 2 * x);
+        const Balance bal = msBalance((double)std::lround(last[mix]));
+        dry = bal.dry, wet = bal.wet;
         const double g = dampingCoefficient(last[damping]);
         if (!designed || g != dampL.g)
         {

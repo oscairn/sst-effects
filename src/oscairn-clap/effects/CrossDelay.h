@@ -8,8 +8,8 @@
  * qwen-night-2026-11-12-review/cross_delay/): the lines are the family's time law
  * (msLineSeconds); the feedback is v / 63.5 with inverted polarity when negative; the damping is
  * the two-tap g = 5(1 - r)/9 in the feedback path only; the input feeds are split L/R; the
- * balance turns the far side down by the square of its distance (squaredBalancePosition), not
- * the tempo mode's linear position (plan, known difference 43). The reference's EQ parameters
+ * balance turns the far side down by the square of its distance and keeps the near side at
+ * unity (msBalance), not the tempo mode's equal-power pair. The reference's EQ parameters
  * are not built: they act on the whole output, dry and wet alike, and their shelf law is not
  * measured (plan decision 23).
  */
@@ -46,7 +46,7 @@ template <typename FXConfig> struct CrossDelay : CrossCore<FXConfig, CrossDelay>
         this->secA = msLineSeconds(this->last[timeLR]);
         this->secB = msLineSeconds(this->last[timeRL]);
     }
-    static double balancePosition(double v) { return squaredBalancePosition(v); }
+    static Balance balance(double v) { return msBalance(v); }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {

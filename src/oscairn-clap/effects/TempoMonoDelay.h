@@ -99,9 +99,6 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         }
     }
 
-    // The balance parameter's crossfade position: the tempo types' linear one (the ms types'
-    // squaredBalancePosition is theirs); the review batch's +-21 renders give +-4.77 dB wet over dry.
-    static double balancePosition(double v) { return (v + 63) / 126.0; }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
@@ -142,9 +139,8 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         lastTempo = tempo();
         const double rate = this->sampleRate();
         fb = std::lround(last[feedback]) / 63.5;
-        const double x = std::clamp(balancePosition((double)std::lround(last[mix])), 0.0, 1.0);
-        dry = std::cos(M_PI / 2 * x);
-        wet = std::sin(M_PI / 2 * x);
+        const Balance bal = tempoBalance((double)std::lround(last[mix]));
+        dry = bal.dry, wet = bal.wet;
         const double g = dampingCoefficient(last[damping]);
         if (!designed || g != damp.g)
         {

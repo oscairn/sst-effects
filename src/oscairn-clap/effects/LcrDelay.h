@@ -11,7 +11,7 @@
  *
  * The line laws are the delay family's (effects/TempoCrossDelay.h: Line, Damping,
  * dampingCoefficient, msLineSeconds) and the balance is the cross delay's
- * (squaredBalancePosition). The line's feed is the mean of the two inputs: every probe drives the
+ * (msBalance). The line's feed is the mean of the two inputs: every probe drives the
  * effect with the same signal on both channels, so the reference cannot tell this from a
  * one-channel feed (known difference 47). The reference's four EQ parameters act on the
  * whole output and are not modelled (known difference 44).
@@ -128,9 +128,8 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         fb = std::lround(last[feedback]) / 63.5;
         const double lc = std::lround(last[levelC]) / 127.0;
         gainC = lc * lc;
-        const double x = std::clamp(squaredBalancePosition((double)std::lround(last[mix])), 0.0, 1.0);
-        dry = std::cos(M_PI / 2 * x);
-        wet = std::sin(M_PI / 2 * x);
+        const Balance bal = msBalance((double)std::lround(last[mix]));
+        dry = bal.dry, wet = bal.wet;
         const double g = dampingCoefficient(last[damping]);
         if (!designed || g != damp.g)
         {

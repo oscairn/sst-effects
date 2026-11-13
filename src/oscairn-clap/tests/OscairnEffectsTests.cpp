@@ -2333,7 +2333,8 @@ TEST_CASE("Cross delay: Mode 2 and the balance, as measured")
     REQUIRE(l2[L + q] == Approx(1.0).epsilon(1e-6));
     REQUIRE(r[L + 2 * q] == Approx(1.0).epsilon(1e-6));
     REQUIRE(l2[L + 3 * q] == Approx(g).epsilon(1e-6));
-    // Balance: the reference's wet/dry in dB (echo against its own render's click), equal power.
+    // Balance: the reference's wet/dry in dB (echo against its own render's click); the near side
+    // stays at unity (delay-eq-2026-11-12: at D=W the dry is level with the dry-only render's).
     const std::vector<std::pair<double, double>> measured = {
         {-55, -35.86}, {-48, -24.94}, {-35, -14.09}, {-21, -7.05}, {10, 3.00},
         {21, 7.04},    {35, 14.09},   {48, 24.93},   {55, 35.85},  {59, 47.89}};
@@ -2342,8 +2343,11 @@ TEST_CASE("Cross delay: Mode 2 and the balance, as measured")
         auto out = delayImpulseMode(2, "Cross Delay", 44100, {{"Time L>R", 500}, {"Feedback", 0}, {"Mix", v}, {"Input", 0}}, r, 0.6);
         INFO("Mix " << v);
         REQUIRE(20 * std::log10(r[L + q] / out[L]) == Approx(db).margin(0.05));
-        REQUIRE(r[L + q] * r[L + q] + out[L] * out[L] == Approx(1.0).margin(1e-6));
+        REQUIRE(std::max(r[L + q], out[L]) == Approx(1.0).margin(1e-6));
     }
+    auto dw = delayImpulseMode(2, "Cross Delay", 44100, {{"Time L>R", 500}, {"Feedback", 0}, {"Mix", 0}, {"Input", 0}}, r, 0.6);
+    REQUIRE(dw[L] == Approx(1.0).margin(1e-6)); // D=W: dry and wet both at unity
+    REQUIRE(r[L + q] == Approx(1.0).margin(1e-6));
 }
 
 // ---- Tempo stereo delay (one time, L/R Diffusion; plan, section 15) ----
@@ -2585,7 +2589,7 @@ TEST_CASE("L/R delay ignores the transport, and its balance and damping follow t
     REQUIRE(l120 == l150); // ms times: the tempo means nothing here, as in the cross modes
     REQUIRE(r120 == r150);
     const size_t qa = 8819, fa = 6614;
-    SECTION("The balance is equal power with the cross delay's position")
+    SECTION("The balance is the cross delay's: the near side at unity")
     {
         // 02 40 renders: wet/dry +7.04 dB at v = +21 (lr_hold_mix) and -24.94 dB at v = -48
         // (lr_bal_m48); the tempo family's linear position gives +4.77 / -14.46 dB there.
@@ -2594,7 +2598,7 @@ TEST_CASE("L/R delay ignores the transport, and its balance and damping follow t
             auto out = delayImpulseMode(4, "L/R Delay", 44100,
                                         {{"Time L", 200}, {"Feedback", 0}, {"High Damping", 1.0}, {"Mix", v}}, r120, 0.5);
             INFO("Mix " << v);
-            REQUIRE(out[L] * out[L] + out[L + qa] * out[L + qa] == Approx(1).margin(1e-6));
+            REQUIRE(std::max(out[L], out[L + qa]) == Approx(1).margin(1e-6));
             REQUIRE(20 * std::log10(out[L + qa] / out[L]) == Approx(db).margin(0.02));
         }
     }

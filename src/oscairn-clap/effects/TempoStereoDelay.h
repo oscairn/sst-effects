@@ -66,8 +66,8 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
         this->outSecA = (double)stereoLineSamples(note, lagMs - diffMs) / designRate; // plays right
         this->outSecB = (double)stereoLineSamples(note, lagMs + diffMs) / designRate; // plays left
     }
-    // The tempo family's linear balance position (measured at -21, +21 and +48 for this type).
-    static double balancePosition(double v) { return (v + 63) / 126.0; }
+    // The tempo family's balance (measured at -21, +21 and +48 for this type).
+    static Balance balance(double v) { return tempoBalance(v); }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
