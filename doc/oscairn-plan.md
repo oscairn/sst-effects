@@ -2194,8 +2194,13 @@ Structure, as the measurements show it:
 
 - The three-band EQ first: first-order shelves, exactly Rotary A's law (bilinear at 44.1 kHz; the
   five-band EQ's slope-0.5 shelf is the same response), and a peak with Q = width x 10^(-|gain| /
-  40) (the cookbook peak with the three-band EQ's effective Q, no widening). At L/R depth 0 the
-  effect is otherwise unity (ap_fr: 1.000 in both channels).
+  40) (the cookbook peak with the three-band EQ's effective Q, no widening). Each section's
+  coefficients are 16-bit words with 1 (low shelf), 2 (peak) and 4 (high shelf) integer bits: each
+  rounded to the nearest step, halves away from zero, and where the numerator's (or the
+  denominator's) rounding errors add up to more than half a step, the word that gained most loses
+  a step (or the one that lost most gains one). At the low centres the steps move the peak: 315 Hz
+  at width 12 peaks at 310.5 Hz, 100 Hz at width 5 at 109.7 Hz, as measured (known difference 50,
+  resolved). At L/R depth 0 the effect is otherwise unity (ap_fr: 1.000 in both channels).
 - Mono feeds both channels the mean of the input, Stereo each channel its own (st_mono: both
   channels at half the left input; st_stereo: the right output stays silent).
 - One LFO at the set speed in Hz. Each channel has its own attenuation u in [0, 1]; its gain is
@@ -2226,7 +2231,7 @@ Structure, as the measurements show it:
 | Directions: phase offsets 0/180, 60/0, 0/60, 90/0, 0/90, 0/180 degrees (left/right) | dir1-4, dir1_w20, dir3_w20, w*, lr_* | within 0.05 degrees of the plugin's (L/R phase, the plugin against the reference) |
 | L/R: a sine with threshold 0.069 and a measured steepness per wave | lr_w0-28 (every wave) | model fit rms 0.24-0.87% of full gain per wave (wave 28: 1.7%) |
 | F/R: delay up to 124 samples at 44.1 kHz times the F/R depth (4 floor(v / 4) samples), times u, in the turn directions only | fr127, fr64, fr8, fr127_d4w20, fr_lr_d3, ap_turn | fitted 123.5, 63.7, 7.96 samples for 124, 64, 8; the plugin's swing within 0.4% of the reference's through the same analysis (fr8: 3.7%, a 0.18 ms swing) |
-| EQ: first-order shelves, peak with Q = width x 10^(-abs(gain) / 40) | eq0-eq9 | shelves within 0.032 dB, peaks at 630, 1600 and 4000 Hz within 0.075 dB; the peak at 315 Hz, width 12: 1.25 dB (known difference 50) |
+| EQ: first-order shelves, peak with Q = width x 10^(-abs(gain) / 40), coefficients in 16-bit steps | eq0-eq9, autopan_d mid* | every harmonic within 20 dB of the peak within 0.010 dB (eq0-eq9, mid315w2, mid1600w12, mid100w5, mid10kw3); without the steps the peak at 315 Hz, width 12 misses by 1.25 dB and at 100 Hz, width 5 by 2.70 dB |
 | Mono / Stereo | st_mono, st_stereo, st_mono_d3 | the right output silent with Stereo; Mono half the left input in both, within 0.14 dB |
 
 Whole-render comparison (`summary.py`): the plugin renders the reference's own dry note with the
@@ -2246,11 +2251,12 @@ it), "L/R phase" the right channel's LFO phase against the left's, reference min
 | Hold-out ho0 (L>>R, L/R 18, F/R 65, EQ) | 0.0% | 0.01 dB | 0.005 deg | — | 0.001 dB | 0.003 dB |
 | Hold-out ho1 (L turn, 3.11 Hz, L/R 25, F/R 18, EQ) | 0.4% | 0.21 dB | 0.04 deg | +0.15% | 0.016 dB | 0.014 dB |
 | Hold-out ho2 (R turn, wave 14, L/R 112, F/R 70, high shelf +10 dB at 560 Hz) | 1.3% | 1.52 dB | 0.014 deg | +0.16% | 0.16 dB | 0.26 dB |
-| Hold-out EQ: mid 315 Hz w2 / 1.6 kHz w12 / 100 Hz w5 / 10 kHz w3 (autopan_d) | | 0.19 / 0.01 / 2.70 / 0.03 dB worst harmonic | | | | |
+| Hold-out EQ: mid 315 Hz w2 / 1.6 kHz w12 / 100 Hz w5 / 10 kHz w3 (autopan_d) | | 0.19 / 0.01 / 2.70 / 0.03 dB worst harmonic (2026-11-12, with the coefficient steps: 0.005 / 0.004 / 0.008 / 0.004 dB) | | | | |
 
 So the rate (M4/M5 ±2%), L/R phase (±5 degrees), depth (±1 dB) and level (±0.5 dB) tolerances are
-met on every fitting render and every hold-out; the EQ (±0.5 dB) is met except the mid band at its
-lowest centres with a narrow width (315 Hz at width 12, 100 Hz at width 5; known difference 50).
+met on every fitting render and every hold-out; the EQ (±0.5 dB) is met everywhere since its
+coefficients are held in their 16-bit steps (before, the mid band at its lowest centres with a
+narrow width missed: 315 Hz at width 12, 100 Hz at width 5; known difference 50).
 The pointwise p99 is above 1 dB only on the steep L/R waves and on ho2, at the edges: there a
 one-period analysis window straddles a fast gain change (known differences 51 and 52).
 
@@ -2283,7 +2289,9 @@ with the input mode ignored); "The rotary plugin's insertion modes: the three-ba
 at 44.1 kHz and within the rate gate" (40 reference levels within 0.05 dB; fails with the peak's Q
 without the gain factor and with a cut's corner moved by the gain). "Processing never allocates"
 switches the speed, the direction and a band while playing; the state and value-text tests cover
-the mode's thirteen parameters. Rotary A's context is 34,252 bytes at 44.1 kHz now (the plugin's parameter values for the new modes). Rotary A shares the shelf design and the cubic tap read; its output
+the mode's thirteen parameters. The EQ test (2026-11-12) adds the low-centre peaks (eq9, mid100w5,
+mid315w2: 55 levels for Auto Pan, 45 for Tremolo, within 0.05 dB) and fails without the peak's
+coefficient steps (0.068 dB at 220 Hz for 315 Hz at width 12). Rotary A's context is 34,252 bytes at 44.1 kHz now (the plugin's parameter values for the new modes). Rotary A shares the shelf design and the cubic tap read; its output
 is bit-identical (its renders at 44.1 and 96 kHz compared before and after, and its tests).
 Memory: 9,428 bytes per context at 44.1 kHz (two 1,024-sample lines), 68,468 at other rates (the
 EQ's matcher). Tremolo & Rotary plugin version 0.2.0 (decision 24).
@@ -2299,8 +2307,8 @@ every step of the law. Source and analysis as for Auto Pan.
 
 Structure, as the measurements show it:
 
-- The three-band EQ as Auto Pan's (the same laws: within 0.051 dB at every EQ probe but the narrow
-  315 Hz peak, known difference 50), then a fixed
+- The three-band EQ as Auto Pan's (the same laws, coefficient steps included: within 0.006 dB at
+  every EQ probe, the narrow 315 Hz peak included), then a fixed
   +2 dB: with both depths 0 every harmonic is 2.00 dB above the dry note (tr_am0), and the AM's peak
   is the same 1.259.
 - Mono feeds both channels the mean of the input, Stereo each channel its own (st_*).
@@ -2327,7 +2335,7 @@ Structure, as the measurements show it:
 | +2 dB, then AM 1 - (v / 127)(1 - cos) / 2 | tr_am0, am4-96, tr_depth, tr_slow, tr_fast | peak 1.2585-1.2592 (+1.997 to +2.002 dB); trough within 0.002 of the law |
 | PM 2 floor(v / 4) samples at 44.1 kHz, shortest delay at the gain's peak | pm4-124, tr_pm, tr_pm_mid, ampm, pm_ph94 | 1.994-2.008 samples per step; the plugin's swing within 0.65% of the reference's through the same analysis (pm4, a 2-sample swing: 2.3%) |
 | Right channel ahead by the phase difference, AM and PM | 29 values: tr_phase, ph4-124, ampm_ph94, pm_ph94 | within 0.01 degrees of the plugin with the converter's snapped angle |
-| EQ: Auto Pan's | eq0-eq9 | as Auto Pan, 2.00 dB higher: within 0.051 dB except the 315 Hz width-12 peak (1.25 dB, known difference 50) |
+| EQ: Auto Pan's | eq0-eq9 | as Auto Pan, 2.00 dB higher: within 0.006 dB with the coefficient steps (without them the 315 Hz width-12 peak misses by 1.25 dB) |
 | Mono / Stereo | st_mono, st_stereo, st_mono_pm | Stereo leaves the right output silent, Mono gives both half the left input |
 
 | Set | rms | p99 | L/R phase | Delay swing | Level | Depth (max / min) |
@@ -2345,7 +2353,8 @@ Structure, as the measurements show it:
 Every tolerance is met on every fitting render and every hold-out (rate ±2%, depth ±1 dB, level
 ±0.5 dB, L/R phase ±5 degrees); the hold-outs' phase values 9, 18, 20, 26, 37 and 67 were never
 fitted and land on the law's phase within 0.02 degrees. ho0 and ho1's 2.7-2.9% rms is a level
-offset of 0.1-0.2 dB, with their mid band at 110 and 180 Hz (known difference 50).
+offset of 0.1-0.2 dB, with their mid band at 110 and 180 Hz (known difference 50, whose cause the
+coefficient steps now model; these two hold-outs were not compared again).
 
 **Mapping law for the converter** (raw value to plugin parameter; parameters 4, 5, 10 and 16 are
 unused):
@@ -2430,7 +2439,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 47 | L/C/R and Tempo Mono Delay (02 50, 02 20): the line's feed with a true stereo input | None: both feed their one line the mean (l + r) / 2, as the plugin does. With an AWM2 saw panned hard left (a stereo signal at the insertion), wet only, both types echo on both channels at −5.93 dB against the source's left channel, where the one-channel feeds of 02 00, 02 10, 02 28 and 02 40 in the same batch sit at +0.09 dB: 6.02 dB lower, the mean | The click probes drive both channels alike (panned after the insertion) | Resolved 2026-11-12 (measured; no change) | delay-eq-2026-11-12 `lcr_st`, `tm_st`, `none_st`; `analyse.py` | `LcrDelay::processBlock`, `TempoMonoDelay::processBlock` |
 | 48 | Auto Pan, Tremolo: the LFO's phase at activation | The reference's LFO starts when the performance loads (in these probes about 0.45 s before the note; Tremolo then 214 degrees past its peak); the plugin's starts at its peak when the mode is activated | Not measured beyond the probes' onsets | Unmeasured | autopan_b, trem_b phases at three speeds | `initialize` |
 | 49 | Auto Pan, Tremolo: the modulated delay's centre | The reference's delay against its dry path is not measured (the types have no dry/wet mix); the plugin's tap is at least one sample, and with F/R or PM at 0 the input passes with no delay | Unmeasured | Unmeasured | — | `processBlock` |
-| 50 | The insertion modes: EQ mid band at low centres | 315 Hz (index 24): fitted centre 310.5-312.5 Hz (-0.8 to -1.5%), so 1.25 dB at 330 Hz at width 12 and +12 dB, 0.19 dB at width 2; 100 Hz (index 14) at width 5: fitted centre about 110 Hz, 2.70 dB at 110 Hz; 630 Hz +0.3% (0.075 dB); 1.6, 4 and 10 kHz exact | The converter uses the printed frequency; the reference's centre at these indices differs, perhaps with the width (as known difference 9) | Unresolved; next: a mid sweep over index and width | autopan_c eq7, eq9, autopan_d mid*, trem_c eq9; `eqfit.py` | converter (table 3) |
+| 50 | (Resolved 2026-11-12.) The insertion modes: EQ mid band at low centres | Was 1.25 dB at 330 Hz (315 Hz, width 12, +12 dB), 0.19 dB at width 2, 2.70 dB at 110 Hz (100 Hz, width 5), 0.075 dB at 630 Hz; now every EQ probe within 0.010 dB | The coefficients are 16-bit words (1, 2 and 4 integer bits for the low shelf, peak and high shelf) with a rounding-sum correction; at low centres the steps move the peak | Resolved | autopan_c eq*, autopan_d mid*, trem_c eq*; scratch `eqq.py` | `eq::roundToSteps`, `insertEq` |
 | 51 | Auto Pan: direction L/R at its steepest waves | The steepness per wave is fitted from 9 ms analysis windows; at waves 24-28 the edges take a few milliseconds, and wave 28's steepness fits about as well anywhere from 34 to 65; pointwise gain errors up to 6 dB on the edges, rms within 1.6% of full gain | The analysis' time resolution | Partly resolved | autopan_d lr_w24-28; `lrfit2.py` | `lrSteepness` |
 | 52 | Auto Pan: isolated spikes in the reference's turn directions | ho2 (R turn, F/R 70, L/R 112, high shelf +10 dB): single 20-sample windows off by up to 0.22 of full gain, 1.1% of the windows | Unknown; the flat-EQ F/R probes show none, and their noise between harmonics matches the plugin's within 0.5 dB | Unresolved | autopan_c ho2; `cmp.py` | — |
 | 53 | Auto Pan, Tremolo: parameter changes | Applied from the next block without smoothing (a depth, speed or direction change steps the gain or the delay); the reference's smoothing is not measured | Unmeasured | Unmeasured | — | `processBlock` |

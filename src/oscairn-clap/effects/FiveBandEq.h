@@ -391,6 +391,39 @@ inline void firstOrderShelf(Biquad &b, double hz, double db, bool high)
     b.set(c1 + c0, c0 - c1, 0, d1 + d0, d0 - d1, 0);
 }
 
+// The coefficients held as 16-bit words with `shift` integer bits (steps of 2^(shift - 15)), as the
+// rotary plugin's measured EQs show: each rounded to the nearest step (halves away from zero),
+// then within the numerator and within the denominator, if the rounding errors add up to more
+// than half a step, the word that gained most loses a step (or the one that lost most gains one).
+// This is what moves the low peaks' centres (plan, section 15, "Auto Pan").
+inline void roundToSteps(Biquad &b, int shift, bool secondOrder)
+{
+    const double step = std::ldexp(1.0, shift - 15);
+    auto group = [&](double *const *c, int n) {
+        double e[3];
+        for (int i = 0; i < n; ++i)
+        {
+            const double x = (double)(float)*c[i] / step, w = x < 0 ? std::ceil(x - 0.5) : std::floor(x + 0.5);
+            e[i] = w - x;
+            *c[i] = w;
+        }
+        const double s = n > 1 ? e[0] + e[1] + (n > 2 ? e[2] : 0) : 0;
+        if (s < -0.5 || s > 0.5)
+        {
+            int k = 0;
+            for (int i = 1; i < n; ++i)
+                if (s < 0 ? e[i] < e[k] : e[i] > e[k])
+                    k = i;
+            *c[k] += s < 0 ? 1 : -1;
+        }
+        for (int i = 0; i < n; ++i)
+            *c[i] *= step;
+    };
+    double *num[3] = {&b.b0, &b.b1, &b.b2}, *den[2] = {&b.a1, &b.a2};
+    group(num, secondOrder ? 3 : 2);
+    group(den, secondOrder ? 2 : 1);
+}
+
 // First-order bilinear low- and high-pass sections at hz (prewarped).
 // A unity-peak band-pass (constant 0 dB peak gain) at hz with Q, for the five-band network: the
 // Q is kept as the 44.1 kHz design's at other rates (peakingQAt).

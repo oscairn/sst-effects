@@ -4408,9 +4408,10 @@ TEST_CASE("The rotary plugin's insertion modes: Mono feeds both channels the inp
 
 TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, at 44.1 kHz and within the rate gate")
 {
-    // First-order shelves (Rotary A's law) and a peak with Q = width x 10^(-|gain| / 40), modulation
-    // off: the reference's levels against its dry input (batches autopan_c and trem_c eq*, a saw at
-    // velocity 50; Tremolo 2 dB above Auto Pan at every setting) within 0.05 dB at 44.1 kHz
+    // First-order shelves (Rotary A's law) and a peak with Q = width x 10^(-|gain| / 40), their
+    // coefficients in 16-bit steps (1, 2 and 4 integer bits), modulation off: the reference's levels
+    // against its dry input (batches autopan_c and trem_c eq*, autopan_d mid*, a saw at velocity
+    // 50; Tremolo 2 dB above Auto Pan at every setting) within 0.05 dB at 44.1 kHz
     // (tolerance proposed); at 48, 96 and 192 kHz within the rate gate of the 44.1 kHz levels.
     struct Setting { double loHz, loDb, hiHz, hiDb, midHz, midDb, width; std::vector<std::pair<double, double>> ref; };
     const std::vector<Setting> pan{
@@ -4421,7 +4422,11 @@ TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, a
         {250, 0, 2000, 6, 1600, 0, 0.7, {{110.00, 0.04}, {330.00, 0.32}, {990.00, 1.99}, {2970.00, 4.86}, {8910.01, 5.88}}},
         {250, 0, 5000, 0, 1600, 12, 0.7, {{110.00, 0.58}, {330.00, 3.57}, {990.00, 10.39}, {2970.00, 9.48}, {8910.01, 2.38}}},
         {250, 0, 5000, 0, 630, -12, 2, {{110.00, -0.48}, {330.00, -4.28}, {990.00, -6.35}, {2970.00, -0.70}, {8910.01, -0.06}}},
-        {250, 0, 5000, 0, 4000, 6, 5, {{110.00, -0.00}, {330.00, 0.00}, {990.00, 0.03}, {2970.00, 1.04}, {8910.01, 0.11}}}};
+        {250, 0, 5000, 0, 4000, 6, 5, {{110.00, -0.00}, {330.00, 0.00}, {990.00, 0.03}, {2970.00, 1.04}, {8910.01, 0.11}}},
+        // the low-centre peaks, which only the 16-bit coefficient steps reproduce (autopan_c eq9, autopan_d)
+        {250, 0, 5000, 0, 315, 12, 12, {{110.00, 0.07}, {220.00, 0.82}, {330.00, 7.57}, {990.00, 0.05}, {2970.00, 0.00}}},
+        {250, 0, 5000, 0, 100, 12, 5, {{110.00, 12.13}, {220.00, 0.85}, {330.00, 0.29}, {990.00, 0.03}, {2970.00, 0.00}}},
+        {250, 0, 5000, 0, 315, 12, 2, {{110.00, 2.01}, {220.00, 7.75}, {330.00, 11.80}, {990.00, 1.61}, {2970.00, 0.18}}}};
     const std::vector<Setting> trem{
         {250, 12, 5000, 0, 1600, 0, 0.7, {{110.00, 13.29}, {330.00, 10.07}, {990.00, 4.76}, {2970.00, 2.42}, {8910.01, 2.03}}},
         {250, -12, 5000, 0, 1600, 0, 0.7, {{110.00, -9.29}, {330.00, -6.07}, {990.00, -0.76}, {2970.00, 1.58}, {8910.01, 1.96}}},
@@ -4430,7 +4435,8 @@ TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, a
         {250, 0, 2000, 6, 1600, 0, 0.7, {{110.00, 2.04}, {330.00, 2.32}, {990.00, 3.99}, {2970.00, 6.86}, {8910.01, 7.88}}},
         {250, 0, 5000, 0, 1600, 12, 0.7, {{110.00, 2.57}, {330.00, 5.56}, {990.00, 12.39}, {2970.00, 11.48}, {8910.01, 4.38}}},
         {250, 0, 5000, 0, 630, -12, 2, {{110.00, 1.52}, {330.00, -2.28}, {990.00, -4.35}, {2970.00, 1.30}, {8910.01, 1.94}}},
-        {250, 0, 5000, 0, 4000, 6, 5, {{110.00, 2.00}, {330.00, 2.00}, {990.00, 2.03}, {2970.00, 3.04}, {8910.01, 2.11}}}};
+        {250, 0, 5000, 0, 4000, 6, 5, {{110.00, 2.00}, {330.00, 2.00}, {990.00, 2.03}, {2970.00, 3.04}, {8910.01, 2.11}}},
+        {250, 0, 5000, 0, 315, 12, 12, {{110.00, 2.07}, {220.00, 2.82}, {330.00, 9.56}, {990.00, 2.05}, {2970.00, 2.00}}}};
     for (auto [modeId, module, settings] : {std::tuple{2, "Auto Pan", &pan}, {3, "Tremolo", &trem}})
     {
         auto level = [&](double rate, const Setting &s, double hz) {

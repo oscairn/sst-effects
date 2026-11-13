@@ -38,6 +38,10 @@ template <typename Last> void insertEq(std::array<eq::Biquad, 3> &bands, const L
     eq::firstOrderShelf(bands[0], l[p.lowFreq], l[p.lowGain], false);
     eq::peaking(bands[1], eq::designRate, l[p.midFreq], l[p.midGain], l[p.midWidth], false);
     eq::firstOrderShelf(bands[2], l[p.highFreq], l[p.highGain], true);
+    // Held in 16-bit words with 1, 2 and 4 integer bits (the measured low-centre peaks).
+    eq::roundToSteps(bands[0], 1, false);
+    eq::roundToSteps(bands[1], 2, true);
+    eq::roundToSteps(bands[2], 4, false);
 }
 
 // The delay swing's line: above the largest swing at 192 kHz, plus the interpolator.
