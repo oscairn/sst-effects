@@ -97,7 +97,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         {
             const double l = L[i], r = R[i];
             const double oL = line.out(tapL), oR = line.out(tapR);
-            // the mono mean (known difference 47) and the loop, read at the line's own tap
+            // the mono mean (delay-eq-2026-11-12 tm_st) and the loop, read at the line's own tap
             const double x = 0.5 * (l + r) + fb * damp.run(line.out());
             line.write((float)x);
             L[i] = (float)(dry * l + wet * oL);

@@ -11,10 +11,9 @@
  *
  * The line laws are the delay family's (effects/TempoCrossDelay.h: Line, Damping,
  * dampingCoefficient, msLineSeconds) and the balance is the cross delay's
- * (msBalance). The line's feed is the mean of the two inputs: every probe drives the
- * effect with the same signal on both channels, so the reference cannot tell this from a
- * one-channel feed (known difference 47). The EQ parameters are the family's output EQ
- * (OutputEq).
+ * (msBalance). The line's feed is the mean of the two inputs: a left-only source echoes on
+ * both channels 6.02 dB under a one-channel feed (delay-eq-2026-11-12 lcr_st). The EQ parameters
+ * are the family's output EQ (OutputEq).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_LCRDELAY_H
 #define OSCAIRN_CLAP_EFFECTS_LCRDELAY_H

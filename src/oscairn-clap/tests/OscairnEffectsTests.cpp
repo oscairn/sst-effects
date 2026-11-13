@@ -2747,7 +2747,7 @@ TEST_CASE("L/C/R delay: one line, three taps and a shared feedback time, at 44.1
     // left, Time R right, Time C both channels at (Level C / 127)^2, Feedback Time recirculates
     // at the feedback gain. At 44.1 kHz the taps are the family's time law: 200 -> 8,819,
     // 300 -> 13,229, 560 -> 24,695, 150 -> 6,614, as lcr_grid and lcr_r_dw measured. The line's
-    // feed is the mean of the inputs (a convention, known difference 47), so a left impulse of
+    // feed is the mean of the inputs (measured with a left-only source, lcr_st), so a left impulse of
     // 1 feeds it 0.5 and answers on both channels.
     const size_t qa = 8819, qb = 13229, qc = 24695, fa = 6614;
     const double g = 40 * fbStep, half = 0.5; // mono-mean feed
