@@ -8,8 +8,8 @@
  * by the same ms. Feedback v x 516 / 32768 per crossing, the two-tap feedback damping
  * g = 5 (1 - r) / 9 and the cosine/sine balance with the tempo family's linear position are
  * the family's laws, re-measured for this type (plan, section 15, "Tempo Stereo Delay"). The
- * time law is the family's, with this type's offsets (stereoLineSamples, stereoNote). The reference's four EQ parameters are left
- * out as in the neighbouring delay modes (decision 23, re-checked for this type).
+ * time law is the family's, with this type's offsets (stereoLineSamples, stereoNote). The EQ
+ * parameters are the family's output EQ (OutputEq).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_TEMPOSTEREODELAY_H
 #define OSCAIRN_CLAP_EFFECTS_TEMPOSTEREODELAY_H
@@ -42,6 +42,10 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
         diffusion,
         lag,
         mix,
+        eqLowFreq,
+        eqLowGain,
+        eqHighFreq,
+        eqHighGain,
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
@@ -94,6 +98,8 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
             return pmd().asInt().withName("Mix").withRange(-63, 63).withDefault(-52).withUnorderedMapFormatting(m);
         }
         }
+        if (idx >= eqLowFreq && idx <= eqHighGain)
+            return eqParamAt(idx - eqLowFreq);
         return pmd().withName("Unused").withType(pmd::NONE);
     }
 };

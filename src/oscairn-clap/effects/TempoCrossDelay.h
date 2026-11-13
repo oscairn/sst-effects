@@ -16,6 +16,7 @@
  *  - high damping is a two-tap filter (1 - g) x[n] + g x[n-1] in the feedback paths only (the
  *    first echo is unfiltered), g = 5 (1 - ratio) / 9;
  *  - the dry and wet levels are cos and sin of (pi / 2) x, x = (balance + 63) / 126 (tempoBalance).
+ *  - after the dry/wet sum, a first-order low and high shelf on the whole output (OutputEq).
  * At other rates the lines keep their length in seconds (an all-pass interpolator for the
  * fraction, so repeats keep their level) and the damping is a linear-phase filter fitted to the
  * 44.1 kHz filter's magnitude, its delay taken off the line.
@@ -28,6 +29,7 @@
 
 #include "sst/effects/EffectCore.h"
 #include "sst/basic-blocks/params/ParamMetadata.h"
+#include "effects/FiveBandEq.h"
 
 #include <algorithm>
 #include <array>
@@ -287,6 +289,87 @@ struct Damping
     }
 };
 
+// The output EQ of every delay mode: a first-order low shelf and a first-order high shelf
+// (eq::firstOrderShelf, the insertion types' design: bilinear at 44.1 kHz, K = tan(pi f / 44100) at
+// the set frequency) in series on the whole output, dry and wet alike, outside the loop. A steady
+// saw through all six types (delay-eq-2026-11-12, 30 settings, none fitted: the design is the one
+// measured for Rotary A, Auto Pan and Tremolo) matches it within 0.03 dB in every octave band
+// from 63 Hz to 16 kHz, on dry-only renders and at D=W before and after the echo. At other
+// rates the shelves run their rate-matched replacement (eq::MatchedCascade), as the EQs do.
+struct OutputEq
+{
+    template <typename G> void prepare(double rate, G *s)
+    {
+        if constexpr (requires { s->worker; s->offline; })
+            cascade.prepare(rate, s->worker, s->offline);
+        else
+            cascade.prepare(rate, nullptr, nullptr);
+    }
+    static size_t heapBytesAt(double rate) { return eq::MatchedCascade<2>::heapBytesAt(rate); }
+    size_t heapBytes() const { return cascade.heapBytes(); }
+    void reset()
+    {
+        for (auto &b : bands)
+            b.reset();
+        cascade.reset();
+    }
+    void set(double lowHz, double lowDb, double highHz, double highDb, double rate)
+    {
+        eq::firstOrderShelf(bands[0], lowHz, lowDb, false);
+        eq::firstOrderShelf(bands[1], highHz, highDb, true);
+        for (int k = 0; k < 2; ++k)
+        {
+            const bool now = (k ? highDb : lowDb) != 0;
+            if (now && !on[k])
+                bands[k].reset();
+            on[k] = now;
+        }
+        matched = rate != eq::designRate;
+        if (matched)
+        {
+            const eq::Biquad *d[2] = {on[0] ? &bands[0] : nullptr, on[1] ? &bands[1] : nullptr};
+            cascade.set(d);
+        }
+    }
+    void process(float *__restrict L, float *__restrict R, int n)
+    {
+        if (matched)
+            return cascade.process(L, R, n, 1.0);
+        for (int k = 0; k < 2; ++k)
+            if (on[k])
+                for (int i = 0; i < n; ++i)
+                {
+                    L[i] = bands[k].run(0, L[i]);
+                    R[i] = bands[k].run(1, R[i]);
+                }
+    }
+
+    std::array<eq::Biquad, 2> bands;
+    std::array<bool, 2> on{};
+    bool matched{false};
+    eq::MatchedCascade<2> cascade;
+};
+
+// The EQ's four parameters, the same in every mode (k = 0..3: low frequency and gain, high
+// frequency and gain; the converter maps the platform's table 3 index to Hz and gain - 64 to dB).
+inline sst::basic_blocks::params::ParamMetaData eqParamAt(int k)
+{
+    using pmd = sst::basic_blocks::params::ParamMetaData;
+    auto hz = [](const char *n, float lo, float hi, float d) {
+        return pmd().asFloat().withName(n).withRange(lo, hi).withDefault(d).withLinearScaleFormatting("Hz").withDecimalPlaces(2);
+    };
+    auto db = [](const char *n) {
+        return pmd().asFloat().withName(n).withRange(-12.f, 12.f).withDefault(0.f).withLinearScaleFormatting("dB").withDecimalPlaces(1);
+    };
+    switch (k)
+    {
+    case 0: return hz("Low Shelf Frequency", 32.f, 2000.f, 250.f);
+    case 1: return db("Low Shelf Gain");
+    case 2: return hz("High Shelf Frequency", 500.f, 16000.f, 4000.f);
+    default: return db("High Shelf Gain");
+    }
+}
+
 // The input select parameter's choices, shared by the delay modes.
 enum Input
 {
@@ -314,9 +397,10 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
         a.resize(n);
         b.resize(n);
         last.assign(D::numParams, NAN);
+        eqOut.prepare(this->sampleRate(), s);
     }
-    static size_t heapBytesAt(double rate) { return 2 * sizeof(float) * (size_t)D::bufferSamples(rate); }
-    size_t heapBytes() const { return (a.buf.size() + b.buf.size()) * sizeof(float); }
+    static size_t heapBytesAt(double rate) { return 2 * sizeof(float) * (size_t)D::bufferSamples(rate) + OutputEq::heapBytesAt(rate); }
+    size_t heapBytes() const { return (a.buf.size() + b.buf.size()) * sizeof(float) + eqOut.heapBytes(); }
     // The longest silence between two echoes: the longer line, plus the wrapper's 100 ms.
     double quietSeconds() const { return std::max({secA, secB, outSecA, outSecB}) + 0.1; }
 
@@ -328,6 +412,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
         tapB.clear();
         dampA.clear();
         dampB.clear();
+        eqOut.reset();
         inDelay.fill({0, 0});
         inAt = 0;
         std::fill(last.begin(), last.end(), NAN);
@@ -376,6 +461,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             L[i] = (float)(dry * l + wet * (parallel() ? pA : pB));
             R[i] = (float)(dry * r + wet * (parallel() ? pB : pA));
         }
+        eqOut.process(L, R, FXConfig::blockSize);
     }
 
   protected:
@@ -423,6 +509,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             dampA.design(g, rate);
             dampB.design(g, rate);
         }
+        eqOut.set(last[D::eqLowFreq], last[D::eqLowGain], last[D::eqHighFreq], last[D::eqHighGain], rate);
         static_cast<D *>(this)->setLines(lastTempo, rate);
         a.setLength(secA * rate - dampA.K);
         b.setLength(secB * rate - dampA.K);
@@ -436,6 +523,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
     Line a, b;
     Tap tapA, tapB; // the output reads of a mode with outputTaps
     Damping dampA, dampB;           // dampA filters A's output on its way back (into B, or A when parallel)
+    OutputEq eqOut;
     std::array<std::array<double, 2>, Damping::maxK + 1> inDelay{};
     int inAt{0};
     bool designed{false};
@@ -455,6 +543,10 @@ template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoC
         damping,
         lag,
         mix,
+        eqLowFreq,
+        eqLowGain,
+        eqHighFreq,
+        eqHighGain,
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
@@ -496,6 +588,8 @@ template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoC
             return pmd().asInt().withName("Mix").withRange(-63, 63).withDefault(0).withUnorderedMapFormatting(m);
         }
         }
+        if (idx >= eqLowFreq && idx <= eqHighGain)
+            return eqParamAt(idx - eqLowFreq);
         return pmd().withName("Unused").withType(pmd::NONE);
     }
 };

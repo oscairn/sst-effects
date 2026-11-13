@@ -13,8 +13,8 @@
  * dampingCoefficient, msLineSeconds) and the balance is the cross delay's
  * (msBalance). The line's feed is the mean of the two inputs: every probe drives the
  * effect with the same signal on both channels, so the reference cannot tell this from a
- * one-channel feed (known difference 47). The reference's four EQ parameters act on the
- * whole output and are not modelled (known difference 44).
+ * one-channel feed (known difference 47). The EQ parameters are the family's output EQ
+ * (OutputEq).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_LCRDELAY_H
 #define OSCAIRN_CLAP_EFFECTS_LCRDELAY_H
@@ -35,6 +35,10 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         levelC,   // 0..127, the centre tap's level, (raw / 127)^2
         damping,  // 0.1..1.0, the family's two-tap in the feedback path
         mix,      // -63..+63, D>W .. D<W
+        eqLowFreq, // the output EQ (OutputEq)
+        eqLowGain,
+        eqHighFreq,
+        eqHighGain,
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
@@ -47,10 +51,11 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         const int n = bufferSamples(this->sampleRate());
         line.resize(n);
         last.assign(numParams, NAN);
+        eqOut.prepare(this->sampleRate(), s);
     }
     static constexpr int bufferSamples(double rate) { return (int)std::ceil(maxLineMs / 1000 * rate) + 2 * Damping::maxK + 8; }
-    static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate); }
-    size_t heapBytes() const { return line.buf.size() * sizeof(float); }
+    static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate) + OutputEq::heapBytesAt(rate); }
+    size_t heapBytes() const { return line.buf.size() * sizeof(float) + eqOut.heapBytes(); }
     // The longest silence between two echoes: the longest tap or the loop spacing, plus the
     // wrapper's 100 ms.
     double quietSeconds() const
@@ -63,6 +68,7 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         line.clear();
         tapL.clear(), tapR.clear(), tapC.clear();
         damp.clear();
+        eqOut.reset();
         std::fill(last.begin(), last.end(), NAN);
         update();
     }
@@ -83,6 +89,7 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
             L[i] = (float)(dry * l + wet * (oL + c));
             R[i] = (float)(dry * r + wet * (oR + c));
         }
+        eqOut.process(L, R, FXConfig::blockSize);
     }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
@@ -109,6 +116,8 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
             return pmd().asInt().withName("Mix").withRange(-63, 63).withDefault(-32).withUnorderedMapFormatting(m);
         }
         }
+        if (idx >= eqLowFreq && idx <= eqHighGain)
+            return eqParamAt(idx - eqLowFreq);
         return pmd().withName("Unused").withType(pmd::NONE);
     }
 
@@ -130,6 +139,7 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         gainC = lc * lc;
         const Balance bal = msBalance((double)std::lround(last[mix]));
         dry = bal.dry, wet = bal.wet;
+        eqOut.set(last[eqLowFreq], last[eqLowGain], last[eqHighFreq], last[eqHighGain], rate);
         const double g = dampingCoefficient(last[damping]);
         if (!designed || g != damp.g)
         {
@@ -147,6 +157,7 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
     Line line; // its own tap is the recirculation
     Tap tapL, tapR, tapC;
     Damping damp;
+    OutputEq eqOut;
     bool designed{false};
     std::vector<float> last; // sized to numParams at construction
     double fb{0}, gainC{0}, dry{1}, wet{0};

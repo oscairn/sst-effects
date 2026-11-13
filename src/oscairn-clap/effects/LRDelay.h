@@ -26,9 +26,8 @@
  * polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback path only,
  * its delay taken off the loop so the output taps keep their time; the cross delay's balance
  * (msBalance, measured here too; the tempo modes' equal-power pair is theirs).
- * The reference's four EQ parameters are not built: they act on the whole output, dry and
- * wet alike, not in the feedback path, and their shelf law is not measured yet (plan
- * decision 23, known difference 44).
+ * The EQ parameters are the family's output EQ (OutputEq): two first-order shelves on the
+ * whole output, dry and wet alike, not in the feedback path.
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_LRDELAY_H
 #define OSCAIRN_CLAP_EFFECTS_LRDELAY_H
@@ -48,6 +47,10 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         feedback, // -63..+63, v x 516 / 32768 per loop
         damping,  // 0.1..1.0, the family's two-tap in the feedback path
         mix,      // -63..+63, D>W .. D<W
+        eqLowFreq, // the output EQ (OutputEq)
+        eqLowGain,
+        eqHighFreq,
+        eqHighGain,
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
@@ -60,10 +63,11 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         const int n = bufferSamples(this->sampleRate());
         lineL.resize(n), lineR.resize(n);
         last.assign(numParams, NAN);
+        eqOut.prepare(this->sampleRate(), s);
     }
     static constexpr int bufferSamples(double rate) { return (int)std::ceil(maxLineMs / 1000 * rate) + 2 * Damping::maxK + 8; }
-    static size_t heapBytesAt(double rate) { return 2 * sizeof(float) * (size_t)bufferSamples(rate); }
-    size_t heapBytes() const { return (lineL.buf.size() + lineR.buf.size()) * sizeof(float); }
+    static size_t heapBytesAt(double rate) { return 2 * sizeof(float) * (size_t)bufferSamples(rate) + OutputEq::heapBytesAt(rate); }
+    size_t heapBytes() const { return (lineL.buf.size() + lineR.buf.size()) * sizeof(float) + eqOut.heapBytes(); }
     // The longest silence between two echoes: the longest tap or loop spacing, plus the wrapper's 100 ms.
     double quietSeconds() const { return std::max({last[timeL], last[timeR], last[fbTime1], last[fbTime2]}) / 1000 + 0.1; }
 
@@ -73,6 +77,7 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         outL.clear(), outR.clear();
         dampL.clear();
         dampR.clear();
+        eqOut.reset();
         std::fill(last.begin(), last.end(), NAN);
         update();
     }
@@ -93,6 +98,7 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
             L[i] = (float)(dry * l + wet * oL);
             R[i] = (float)(dry * r + wet * oR);
         }
+        eqOut.process(L, R, FXConfig::blockSize);
     }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
@@ -118,6 +124,8 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
             return pmd().asInt().withName("Mix").withRange(-63, 63).withDefault(-22).withUnorderedMapFormatting(m);
         }
         }
+        if (idx >= eqLowFreq && idx <= eqHighGain)
+            return eqParamAt(idx - eqLowFreq);
         return pmd().withName("Unused").withType(pmd::NONE);
     }
 
@@ -138,6 +146,7 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         // the cross delay's balance law (lr_hold_mix, lr_bal_m48: +7.04 / -24.94 dB wet/dry at v = +21 / -48)
         const Balance bal = msBalance((double)std::lround(last[mix]));
         dry = bal.dry, wet = bal.wet;
+        eqOut.set(last[eqLowFreq], last[eqLowGain], last[eqHighFreq], last[eqHighGain], rate);
         const double g = dampingCoefficient(last[damping]);
         if (!designed || g != dampL.g)
         {
@@ -156,6 +165,7 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
     Line lineL, lineR; // each line's own tap is its loop
     Tap outL, outR;    // what each line plays on its channel
     Damping dampL, dampR;
+    OutputEq eqOut;
     bool designed{false};
     std::vector<float> last; // sized to numParams at construction
     double fb{0}, dry{1}, wet{0};

@@ -2244,7 +2244,7 @@ TEST_CASE("Cross delay: every parameter's value text parses back")
             ++checked;
         }
     }
-    REQUIRE(checked == 30); // five points on each of the mode's six parameters, no vacuous pass
+    REQUIRE(checked == 50); // five points on each parameter (the EQ's four included), no vacuous pass
 }
 
 TEST_CASE("Cross delay: the laws measured against the 02 00 renders")
@@ -2513,7 +2513,7 @@ TEST_CASE("Tempo stereo delay: every parameter's value text parses back")
             ++checked;
         }
     }
-    REQUIRE(checked == 30); // five points on each of the mode's six parameters, no vacuous pass
+    REQUIRE(checked == 50); // five points on each parameter (the EQ's four included), no vacuous pass
 }
 
 // ---- L/R delay (one line per channel, four times; plan, section 15) ----
@@ -2736,7 +2736,7 @@ TEST_CASE("L/R delay: every parameter's value text parses back")
             ++checked;
         }
     }
-    REQUIRE(checked == 35); // five points on each of the mode's seven parameters, no vacuous pass
+    REQUIRE(checked == 55); // five points on each parameter (the EQ's four included), no vacuous pass
 }
 
 // ---- L/C/R delay (one line, three taps, one feedback time; plan, section 15) ----
@@ -2961,7 +2961,7 @@ TEST_CASE("L/C/R delay: every parameter's value text parses back")
             ++checked;
         }
     }
-    REQUIRE(checked == 40); // five points on each of the mode's eight parameters, no vacuous pass
+    REQUIRE(checked == 60); // five points on each parameter (the EQ's four included), no vacuous pass
 }
 
 // ---- Tempo mono delay (one line, two taps, loop = note time plus Lag; plan, section 15) ----
@@ -3191,7 +3191,110 @@ TEST_CASE("Tempo mono delay: every parameter's value text parses back")
             ++checked;
         }
     }
-    REQUIRE(checked == 30); // five points on each of the mode's six parameters, no vacuous pass
+    REQUIRE(checked == 50); // five points on each parameter (the EQ's four included), no vacuous pass
+}
+
+// ---- The delay modes' output EQ (plan, section 15 and decision 23) ----
+
+TEST_CASE("Delay: the EQ shelves the whole output as measured, in every mode, and within the rate gate")
+{
+    // delay-eq-2026-11-12: a steady 55 Hz saw through each type, the EQ's response at its
+    // harmonics against the same type's render with the EQ flat (dry only, or at D=W before the
+    // echo for 02 40). None of these settings was fitted. At 44.1 kHz within 0.05 dB of the
+    // reference (tolerance proposed); at 48, 88.2, 96, 176.4 and 192 kHz within the rate gate of 44.1 kHz.
+    struct Setting
+    {
+        int modeId;
+        const char *module;
+        double loHz, loDb, hiHz, hiDb, mix;
+        std::vector<double> ref; // dB at 55, 110, 330, 990, 2970, 8910 and 16005 Hz
+    };
+    const double hzs[] = {55.0, 110.0, 330.0, 990.0, 2970.0, 8910.0, 16005.0};
+    const std::vector<Setting> settings{
+        {2, "Cross Delay", 32, 12, 16000, -12, -63, {6.77, 3.34, 0.56, 0.00, -0.58, -4.03, -9.26}},      // cd_eq1
+        {1, "Tempo Cross Delay", 125, -9, 8000, 9, -63, {-8.32, -6.90, -2.68, -0.10, 2.26, 6.94, 8.69}}, // tcd_eq2
+        {6, "Tempo Mono Delay", 32, -12, 6300, 6, -63, {-6.78, -3.34, -0.53, 0.20, 1.74, 4.90, 5.85}},   // tm_eq4
+        {3, "Tempo Stereo Delay", 400, 9, 630, -9, -63, {8.70, 7.91, 3.12, -4.80, -8.35, -8.95, -9.00}}, // ts_eq3
+        {4, "L/R Delay", 32, 12, 16000, -12, 0, {6.77, 3.34, 0.56, 0.00, -0.58, -4.03, -9.26}},          // lr_eqdw
+        {5, "L/C/R Delay", 2000, -12, 500, 12, -63, {-11.29, -9.72, -4.49, -0.04, 4.42, 10.11, 11.73}}}; // lcr_eq4
+    auto level = [](double rate, const Setting &s, double hz) {
+        Plugin pl(delayId);
+        pl.set(1, s.modeId);
+        const std::vector<std::pair<const char *, double>> set{
+            {"Low Shelf Frequency", s.loHz}, {"Low Shelf Gain", s.loDb}, {"High Shelf Frequency", s.hiHz},
+            {"High Shelf Gain", s.hiDb}, {"Mix", s.mix}, {"Feedback", 0}};
+        for (auto [n, v] : set)
+            pl.set(paramIdByName(pl.p, s.module, n), v);
+        if (s.mix > -63) // at D=W the echo comes after the window
+            pl.set(paramIdByName(pl.p, s.module, "Time L"), 1000);
+        pl.activate(rate);
+        const size_t n = (size_t)(0.6 * rate);
+        std::vector<float> in(n), r;
+        for (size_t i = 0; i < n; ++i)
+            in[i] = (float)(0.25 * std::sin(2 * M_PI * hz * (double)i / rate));
+        auto l = pl.render(in, in, r, {64}, {}, false);
+        double e = 0;
+        const size_t a = (size_t)(0.2 * rate);
+        for (size_t i = a; i < n; ++i)
+            e += (double)l[i] * l[i];
+        return 10 * std::log10(e / (double)(n - a) / (0.25 * 0.25 / 2));
+    };
+    for (const auto &s : settings)
+    {
+        const double peak = *std::max_element(s.ref.begin(), s.ref.end());
+        for (size_t k = 0; k < s.ref.size(); ++k)
+        {
+            const double at44 = level(44100, s, hzs[k]);
+            INFO(s.module << ": low " << s.loHz << " Hz " << s.loDb << " dB, high " << s.hiHz << " Hz " << s.hiDb << " dB, at "
+                          << hzs[k] << " Hz: " << at44 << ", reference " << s.ref[k]);
+            REQUIRE(std::abs(at44 - s.ref[k]) < 0.05);
+            for (double rate : {48000.0, 88200.0, 96000.0, 176400.0, 192000.0})
+                REQUIRE(std::abs(level(rate, s, hzs[k]) - at44) < (s.ref[k] > peak - 20 ? 0.05 : 0.5));
+        }
+    }
+}
+
+TEST_CASE("Delay: the EQ acts on dry and wet alike and stays out of the loop")
+{
+    // The reference's loop keeps its echo-to-echo ratio with the EQ on (cd_eq, tm_eq, lr_eq,
+    // lcr_eq), and its dry and echo carry the same shelf (lr_eqdw, cd_eqdw before and after the
+    // echo). Here: the first echo is the dry's shape, and every later echo is exactly the
+    // feedback gain times the one before, sample by sample.
+    for (auto [modeId, module, timeName] : {std::tuple{2, "Cross Delay", "Time L>R"}, {4, "L/R Delay", "Time L"}, {5, "L/C/R Delay", "Time L"}})
+    {
+        const std::vector<std::pair<const char *, double>> eqSet{
+            {"Low Shelf Frequency", 250}, {"Low Shelf Gain", 9}, {"High Shelf Frequency", 2000}, {"High Shelf Gain", -12}};
+        auto with = [&](std::vector<std::pair<const char *, double>> set, std::vector<float> &r) {
+            set.insert(set.end(), eqSet.begin(), eqSet.end());
+            set.push_back({timeName, 200});
+            set.push_back({"High Damping", 1.0});
+            if (modeId == 2)
+                set.push_back({"Time R>L", 200});
+            if (modeId == 4)
+                set.push_back({"Feedback Time 1", 200});
+            if (modeId == 5)
+                set.insert(set.end(), {{"Feedback Time", 200}, {"Level C", 0}});
+            return delayImpulseMode(modeId, module, 44100, set, r, 1.0);
+        };
+        std::vector<float> rd, rw;
+        auto dry = with({{"Mix", -63}, {"Feedback", 0}}, rd);
+        auto wet = with({{"Mix", 63}, {"Feedback", 40}}, rw);
+        const auto &echo = modeId == 2 ? rw : wet;  // the cross mode plays a left input on the right,
+        const auto &echo2 = modeId == 2 ? wet : echo; // and its repeat on the left
+        const double scale = modeId == 5 ? 0.5 : 1.0;  // L/C/R feeds its line the inputs' mean
+        const size_t q = 8819;                          // 200 ms
+        INFO(module);
+        double worst = 0, energy = 0;
+        for (size_t i = 0; i < q; ++i)
+        {
+            worst = std::max(worst, std::abs((double)echo[L + q + i] - scale * dry[L + i]));
+            worst = std::max(worst, std::abs((double)echo2[L + 2 * q + i] - 40 * fbStep * echo[L + q + i]));
+            energy += (double)dry[L + i] * dry[L + i];
+        }
+        REQUIRE(worst < 1e-6);
+        REQUIRE(std::abs(dry[L] - 1.0) > 0.05); // the shelf is really there: not an impulse
+        REQUIRE(energy > 0);
+    }
 }
 
 // ---- Converter frequency scales (decision 17) ----
@@ -3764,8 +3867,10 @@ TEST_CASE("Reset leaves a fresh instance at once in every mode")
                     setAll(used, m, 0.55);
                     std::vector<float> z(64, 0);
                     used.render(z, z, r1, {64});
-                    // time for the worker to match the change (the EQs, and Rotary A's shelves)
-                    if ((!std::strcmp(id, eqId) || !std::strcmp(id, "org.oscairn.effects.tremolo-rotary")) && rate != 44100)
+                    // time for the worker to match the change (the EQs, Rotary A's shelves, the delays' EQ)
+                    if ((!std::strcmp(id, eqId) || !std::strcmp(id, "org.oscairn.effects.tremolo-rotary") ||
+                         !std::strcmp(id, "org.oscairn.effects.delay")) &&
+                        rate != 44100)
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     Buffer before;
                     REQUIRE(ext<clap_plugin_state_t>(used.p, CLAP_EXT_STATE)->save(used.p, &before.out));

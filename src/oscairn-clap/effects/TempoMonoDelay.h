@@ -16,8 +16,8 @@
  * for this type at +-21). The time law is the stereo type's (the note time cut to 0.1 ms, plus
  * the tap's Lag and Diffusion in ms, then the family's tenthsSamples at 44.1 kHz) with twice its
  * halving limit: 6 quarters at 120 BPM repeat after 3,000 ms. At other rates the lines keep their
- * length in seconds via the first-order all-pass. The reference's four EQ parameters are not
- * built (plan, known difference 44).
+ * length in seconds via the first-order all-pass. The EQ parameters are the family's output EQ
+ * (OutputEq).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_TEMPOMONODELAY_H
 #define OSCAIRN_CLAP_EFFECTS_TEMPOMONODELAY_H
@@ -47,6 +47,10 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         diffusion, // -63..63 ms, the left tap that much later than the loop, the right earlier
         lag,       // -63..63 ms, on the loop and both taps
         mix,       // -63..+63, D>W .. D<W
+        eqLowFreq, // the output EQ (OutputEq)
+        eqLowGain,
+        eqHighFreq,
+        eqHighGain,
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
@@ -60,14 +64,15 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         const int n = bufferSamples(this->sampleRate());
         line.resize(n);
         last.assign(numParams, NAN);
+        eqOut.prepare(this->sampleRate(), s);
     }
     static constexpr int bufferSamples(double rate)
     {
         // every tap stays under monoLimit samples
         return (int)std::ceil(monoLimit / designRate * rate) + 2 * Damping::maxK + 8;
     }
-    static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate); }
-    size_t heapBytes() const { return line.buf.size() * sizeof(float); }
+    static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate) + OutputEq::heapBytesAt(rate); }
+    size_t heapBytes() const { return line.buf.size() * sizeof(float) + eqOut.heapBytes(); }
     // The longest silence between two echoes: the longer tap, plus the wrapper's 100 ms.
     double quietSeconds() const { return std::max(secL, secR) + 0.1; }
 
@@ -76,6 +81,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         line.clear();
         tapL.clear(), tapR.clear();
         damp.clear();
+        eqOut.reset();
         std::fill(last.begin(), last.end(), NAN);
         lastTempo = NAN;
         update();
@@ -97,6 +103,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
             L[i] = (float)(dry * l + wet * oL);
             R[i] = (float)(dry * r + wet * oR);
         }
+        eqOut.process(L, R, FXConfig::blockSize);
     }
 
 
@@ -121,6 +128,8 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
             return pmd().asInt().withName("Mix").withRange(-63, 63).withDefault(0).withUnorderedMapFormatting(m);
         }
         }
+        if (idx >= eqLowFreq && idx <= eqHighGain)
+            return eqParamAt(idx - eqLowFreq);
         return pmd().withName("Unused").withType(pmd::NONE);
     }
 
@@ -141,6 +150,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         fb = feedbackGain(last[feedback]);
         const Balance bal = tempoBalance((double)std::lround(last[mix]));
         dry = bal.dry, wet = bal.wet;
+        eqOut.set(last[eqLowFreq], last[eqLowGain], last[eqHighFreq], last[eqHighGain], rate);
         const double g = dampingCoefficient(last[damping]);
         if (!designed || g != damp.g)
         {
@@ -167,6 +177,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
     Line line; // its own tap is the loop
     Tap tapL, tapR;
     Damping damp;
+    OutputEq eqOut;
     bool designed{false};
     std::vector<float> last; // sized to numParams at construction
     double lastTempo{NAN};
