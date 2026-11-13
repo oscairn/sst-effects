@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/oscairn/oscairn-clap",
+  "path": "include/oscairn-clap",
+  "commit": "7b5c4e0ca1004e769d22ac9ec107c65830702597",
+  "note": "Vendored include/oscairn-clap only (MIT, header-only); the same commit README.md's table records for every header. Read by src/oscairn-clap/release/manifest.py for the release manifest's oscairnClap field."
+}

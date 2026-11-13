@@ -1862,3 +1862,26 @@ Requests for the Oscairn session:
    threads in a worker process, or how their CPU is counted; these plugins start one per engine
    for EQ matching at rates other than 44.1 kHz.
 
+## Releasing
+
+The package version is the CMake version of the Oscairn project (`src/oscairn-clap/CMakeLists.txt`);
+each plugin's own version lives in its descriptor in `src/oscairn-clap/OscairnEffects.cpp` (the
+release scripts read them there). Bump what changed, commit, then tag the package version and push
+the tag:
+
+```
+git tag oscairn-v0.2.0
+git push origin oscairn-v0.2.0
+```
+
+The [release workflow](../.github/workflows/release.yml) builds the single-file `.clap` for each
+platform (`macos-arm64`, `linux-arm64`), runs upstream's tests, ours and the privacy check, and the
+device dependency checks, and creates a GitHub Release holding `oscairn-effects-<platform>.clap`,
+`licenses.tar.gz` and `oscairn-release.json`. The tag version must match the package version; the
+release fails if it does not. To try the workflow without a tag, run it manually
+(`workflow_dispatch`) with *dry run* checked: everything runs and the files land as a workflow
+artifact instead of a release. The repo-specific facts (names, ids, plugins, licences, test
+commands) live in `src/oscairn-clap/release/release.conf`; the scripts there are the setBfree
+fork's `oscairn/tools/release`, extended for several plugins in one descriptor file, a CLAP
+pinned by CPM rather than vendored, and extra configure flags. The stock-vs-fork gate stays in `oscairn.yml`;
+the release workflow does not repeat it.

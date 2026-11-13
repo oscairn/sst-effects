@@ -1,6 +1,9 @@
 # Oscairn effects: sst-effects as CLAP plugins for the Oscairn host (doc/oscairn-plan.md).
 # Built with -DSST_EFFECTS_BUILD_OSCAIRN=ON from the repository root.
-project(oscairn-effects LANGUAGES CXX)
+# The version here is the Oscairn PACKAGE version (the tag oscairn-vX.Y.Z and
+# src/oscairn-clap/release/release.conf's release manifest must agree with it); the
+# plugins' own versions live in their descriptors in OscairnEffects.cpp.
+project(oscairn-effects VERSION 0.2.0 LANGUAGES CXX)
 
 add_library(oscairn-effects-core STATIC OscairnEffects.cpp)
 target_include_directories(oscairn-effects-core PUBLIC
