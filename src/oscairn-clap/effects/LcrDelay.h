@@ -6,7 +6,7 @@
  * (L, R and centre) and one feedback time: the input feeds one line, which answers on the left
  * Time L after it, on the right Time R after it, on both channels Time C after it at
  * (Level C / 127)^2, and feeds itself back through the damping every Feedback Time at
- * feedback / 63.5. Each channel's echo grid is {its time + k x Feedback Time} together with
+ * the feedback gain. Each channel's echo grid is {its time + k x Feedback Time} together with
  * {Time C + k x Feedback Time} (plan, section 15, "L/C/R Delay").
  *
  * The line laws are the delay family's (effects/TempoCrossDelay.h: Line, Damping,
@@ -31,7 +31,7 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         timeR,    // ms, the right tap
         timeC,    // ms, the centre tap (both channels)
         fbTime,   // ms, the recirculation tap: the spacing every channel's grid repeats on
-        feedback, // -63..+63, v / 63.5 per loop
+        feedback, // -63..+63, v x 516 / 32768 per loop
         levelC,   // 0..127, the centre tap's level, (raw / 127)^2
         damping,  // 0.1..1.0, the family's two-tap in the feedback path
         mix,      // -63..+63, D>W .. D<W
@@ -125,7 +125,7 @@ template <typename FXConfig> struct LcrDelay : sst::effects::core::EffectTemplat
         if (!changed)
             return;
         const double rate = this->sampleRate();
-        fb = std::lround(last[feedback]) / 63.5;
+        fb = feedbackGain(last[feedback]);
         const double lc = std::lround(last[levelC]) / 127.0;
         gainC = lc * lc;
         const Balance bal = msBalance((double)std::lround(last[mix]));

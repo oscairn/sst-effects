@@ -6,7 +6,7 @@
  * feedback time per channel - and no input select, so the two lines are independent: the L
  * line is fed by input L and answers on the left Time L after it, its own output feeding
  * itself back through the damping and returning Time FB1 later (so its echoes sit
- * Time L + k x Feedback Time 1 apart, dropping feedback / 63.5 each time); the R line is the mirror
+ * Time L + k x Feedback Time 1 apart, dropping the feedback gain each time); the R line is the mirror
  * with Time R and Feedback Time 2. Nothing crosses to the other channel: with feedback at
  * its default, a left input answers on the left only. The pairing of the times to their own
  * channel follows the parameter set's own naming (the cross type names its times "L>R / R>L",
@@ -22,7 +22,7 @@
  * Damping and dampingCoefficient this mode uses unchanged): the line length
  * floor(ms x 10 x 18063 / 4096) samples at 44.1 kHz (msLineSeconds - each line stays under the
  * parameter's own 1,638.3 ms, so no ceiling differs from the cross modes), kept in seconds
- * at other rates by the first-order all-pass; feedback v / 63.5 per loop with inverted
+ * at other rates by the first-order all-pass; feedback v x 516 / 32768 per loop with inverted
  * polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback path only,
  * its delay taken off the loop so the output taps keep their time; the cross delay's balance
  * (msBalance, measured here too; the tempo modes' equal-power pair is theirs).
@@ -45,7 +45,7 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         timeR,    // ms, the R line's delay time
         fbTime1,  // ms, the L line's loop spacing
         fbTime2,  // ms, the R line's loop spacing
-        feedback, // -63..+63, v / 63.5 per loop
+        feedback, // -63..+63, v x 516 / 32768 per loop
         damping,  // 0.1..1.0, the family's two-tap in the feedback path
         mix,      // -63..+63, D>W .. D<W
         numParamsEnum
@@ -134,7 +134,7 @@ template <typename FXConfig> struct LRDelay : sst::effects::core::EffectTemplate
         if (!changed)
             return;
         const double rate = this->sampleRate();
-        fb = std::lround(last[feedback]) / 63.5;
+        fb = feedbackGain(last[feedback]);
         // the cross delay's balance law (lr_hold_mix, lr_bal_m48: +7.04 / -24.94 dB wet/dry at v = +21 / -48)
         const Balance bal = msBalance((double)std::lround(last[mix]));
         dry = bal.dry, wet = bal.wet;

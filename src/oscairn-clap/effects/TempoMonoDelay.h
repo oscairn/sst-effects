@@ -3,14 +3,14 @@
  *
  * A tempo-synced mono delay - "Tempo Mono Delay". Written for Oscairn; follows the
  * sst-effects effect contract. ONE recirculating line: the input (the mono mean of the two
- * inputs) feeds the line, which feeds itself back through the damping at feedback / 63.5 every
+ * inputs) feeds the line, which feeds itself back through the damping at the feedback gain every
  * note time plus Lag, and is read for the left channel L/R Diffusion later than that and for
  * the right channel L/R Diffusion earlier. Every channel's echoes therefore sit on the grid
  * {time + lag +- diffusion + k x (time + lag)} (tempo_mono and its review batch: the loop
  * spacing follows Lag, not Diffusion; a positive Diffusion puts the right echo first).
  *
  * Every law inside the line is the delay family's (effects/TempoCrossDelay.h, whose Line,
- * Tap, Damping and dampingCoefficient this mode uses unchanged): feedback v / 63.5 per loop with
+ * Tap, Damping and dampingCoefficient this mode uses unchanged): feedback v x 516 / 32768 per loop with
  * inverted polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback
  * path only, its delay taken off the loop so the output taps keep their time; the cosine/sine balance with the tempo types' linear angle position (measured
  * for this type at +-21). The time law is the stereo type's (the note time cut to 0.1 ms, plus
@@ -42,7 +42,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
     enum params
     {
         delayTime, // table #13 index, the note time of the loop and both taps
-        feedback,  // -63..+63, v / 63.5 per loop
+        feedback,  // -63..+63, v x 516 / 32768 per loop
         damping,   // 0.1..1.0, the family's two-tap in the feedback path
         diffusion, // -63..63 ms, the left tap that much later than the loop, the right earlier
         lag,       // -63..63 ms, on the loop and both taps
@@ -138,7 +138,7 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
             return;
         lastTempo = tempo();
         const double rate = this->sampleRate();
-        fb = std::lround(last[feedback]) / 63.5;
+        fb = feedbackGain(last[feedback]);
         const Balance bal = tempoBalance((double)std::lround(last[mix]));
         dry = bal.dry, wet = bal.wet;
         const double g = dampingCoefficient(last[damping]);

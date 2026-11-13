@@ -4,7 +4,7 @@
  * A tempo-synced stereo delay: the cross delay's signal path (effects/TempoCrossDelay.h,
  * CrossCore) with one note length for both lines, a Lag on both and an L/R Diffusion that
  * lengthens the line playing left and shortens the one playing right by the same ms, and a
- * fixed L&R input feed. Feedback v / 63.5 per crossing, the two-tap feedback damping
+ * fixed L&R input feed. Feedback v x 516 / 32768 per crossing, the two-tap feedback damping
  * g = 5 (1 - r) / 9 and the cosine/sine balance with the tempo family's linear position are
  * the family's laws, re-measured for this type (plan, section 15, "Tempo Stereo Delay"). The
  * time law is the family's, with this type's offsets (stereoLineSamples, stereoNote). The reference's four EQ parameters are left

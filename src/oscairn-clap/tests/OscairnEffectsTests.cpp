@@ -1923,6 +1923,9 @@ TEST_CASE("Rate-matched EQs change their number of sections without clicks")
 namespace
 {
 constexpr const char *delayId = "org.oscairn.effects.delay";
+// The delay family's feedback step (feedbackGain) and Mode 2's legs (mode2Gain, mode2Unity).
+constexpr double fbStep = 516.0 / 32768, unity2 = 32767.0 / 32768;
+double leg2(int v) { return (double)(std::abs(v) * v * 516 / 63) / 32768; }
 struct Echo
 {
     size_t at;
@@ -1958,9 +1961,9 @@ std::vector<float> delayImpulse(double rate, const std::vector<std::pair<const c
 TEST_CASE("Tempo cross delay: the measured routing, times and gains at 44.1 kHz")
 {
     // Laws from fx14, fx16 and fx17 (plan, section 15): at 120 BPM a quarter is 22,049 samples;
-    // feedback v / 63.5 per crossing; input L ping-pongs, first on the right.
+    // feedback v x 516 / 32768 per crossing; input L ping-pongs, first on the right.
     std::vector<float> r;
-    const double fb = 40 / 63.5, wet = std::sin(M_PI / 4), dry = std::cos(M_PI / 4);
+    const double fb = 40 * fbStep, wet = std::sin(M_PI / 4), dry = std::cos(M_PI / 4);
     auto l = delayImpulse(44100, {{"Feedback", 40}, {"High Damping", 1.0}, {"Input", 0}}, r);
     REQUIRE(l[L] == Approx(dry).epsilon(1e-6));
     REQUIRE(r[L] == 0);
@@ -1975,16 +1978,19 @@ TEST_CASE("Tempo cross delay: the measured routing, times and gains at 44.1 kHz"
     SECTION("Mode 2 crosses at unity one way and at the feedback squared the other")
     {
         auto l2 = delayImpulse(44100, {{"Feedback", 40}, {"High Damping", 1.0}, {"Input", 3}}, r);
+        // the squared leg is the feedback times |v| / 63 (1.0078 x fb^2; the reference's loop
+        // measures 1.0072-1.0073 x fb^2 in cd_m2* and tcd_m2*), the other leg 32767 / 32768
         REQUIRE(r[L + q] == Approx(wet).epsilon(1e-6));
-        REQUIRE(l2[L + 2 * q] == Approx(wet).epsilon(1e-6));
-        REQUIRE(r[L + 3 * q] == Approx(wet * fb * fb).epsilon(1e-6));
+        REQUIRE(l2[L + 2 * q] == Approx(wet * unity2).epsilon(1e-7));
+        REQUIRE(r[L + 3 * q] == Approx(wet * unity2 * leg2(40)).epsilon(1e-6));
+        REQUIRE(leg2(40) / (fb * fb) == Approx(1.0079).margin(0.0001));
         // at negative feedback the squared leg inverts once per repeat (fx18 dho01, and the
         // 2026-11-12 review batch's tcd_m2l_n37 / n20: ++--++)
         auto l3 = delayImpulse(44100, {{"Feedback", -20}, {"High Damping", 1.0}, {"Input", 3}}, r);
-        REQUIRE(l3[L + 2 * q] == Approx(wet).epsilon(1e-6));
-        REQUIRE(r[L + 3 * q] == Approx(-wet * 20 * 20 / 63.5 / 63.5).epsilon(1e-6));
-        REQUIRE(l3[L + 4 * q] == Approx(-wet * 20 * 20 / 63.5 / 63.5).epsilon(1e-6));
-        REQUIRE(r[L + 5 * q] == Approx(wet * std::pow(20 / 63.5, 4)).epsilon(1e-6));
+        REQUIRE(l3[L + 2 * q] == Approx(wet * unity2).epsilon(1e-7));
+        REQUIRE(r[L + 3 * q] == Approx(wet * unity2 * leg2(-20)).epsilon(1e-6));
+        REQUIRE(l3[L + 4 * q] == Approx(wet * unity2 * unity2 * leg2(-20)).epsilon(1e-6));
+        REQUIRE(r[L + 5 * q] == Approx(wet * std::pow(unity2 * leg2(-20), 2)).epsilon(1e-6));
     }
     SECTION("Lag shortens or lengthens both lines; the tempo comes from the transport")
     {
@@ -2065,7 +2071,7 @@ TEST_CASE("Tempo cross delay keeps its 44.1 kHz echoes at 48, 88.2, 96 and 192 k
     // filter from 20 Hz to 20 kHz, for every damping value (tolerance proposed).
     for (double damping : {0.1, 0.4, 0.7, 0.9})
     {
-        const double g = oscairn_fx::delay::dampingCoefficient(damping), fb = 40 / 63.5;
+        const double g = oscairn_fx::delay::dampingCoefficient(damping), fb = 40 * fbStep;
         for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
         {
             std::vector<float> r;
@@ -2244,7 +2250,7 @@ TEST_CASE("Cross delay: every parameter's value text parses back")
 TEST_CASE("Cross delay: the laws measured against the 02 00 renders")
 {
     // measurements/qwen-cross-delay-2026-11-11/results.md: a 500.0 ms line is 22,049 samples
-    // (the family's time law, cd_500_t120), feedback v / 63.5 per crossing with inverted
+    // (the family's time law, cd_500_t120), feedback v x 516 / 32768 per crossing with inverted
     // polarity at negative v (cd_fb_low -18.00 dB, cd_fb_neg alternates), a 300/700 ms pair
     // routes L into line A (right after 13,229) and R into line B (left after 30,869) —
     // split, not summed (cd_input_r, cd_input_lr) — and the two tempos of cd_500_t120/150
@@ -2257,7 +2263,7 @@ TEST_CASE("Cross delay: the laws measured against the 02 00 renders")
                                 right, 3.0, tempo);
     };
     auto l = cross(120, 8, r);
-    const double f8 = 8 / 63.5; // -18.06 dB per crossing; measured -18.00 ± 0.5
+    const double f8 = 8 * fbStep; // -18.06 dB per crossing; measured -18.00 ± 0.5
     REQUIRE(r[L + 22049] == Approx(1.0).epsilon(1e-6));
     REQUIRE(l[L + 2 * 22049] == Approx(f8).epsilon(1e-6));
     REQUIRE(r[L + 3 * 22049] == Approx(f8 * f8).epsilon(1e-6));
@@ -2269,7 +2275,7 @@ TEST_CASE("Cross delay: the laws measured against the 02 00 renders")
     {
         std::vector<float> rn;
         auto ln = cross(120, -63, rn);
-        const double fn = -63 / 63.5; // -0.07 dB per crossing, measured -0.07
+        const double fn = -63 * fbStep; // -0.07 dB per crossing, measured -0.07
         REQUIRE(rn[L + 22049] == Approx(1.0).epsilon(1e-6));
         REQUIRE(ln[L + 2 * 22049] == Approx(fn).epsilon(1e-6)); // inverted
         REQUIRE(rn[L + 3 * 22049] == Approx(fn * fn).epsilon(1e-6));
@@ -2312,26 +2318,27 @@ TEST_CASE("Cross delay: Mode 2 and the balance, as measured")
 {
     // measurements/qwen-night-2026-11-12/cross_delay_extra (cd_m2*, cd_mix_m48/m21/p21/p48)
     // and qwen-night-2026-11-12-review/cross_delay (cd_mix_p10/m35/p35/m55/p55/p59).
-    // Mode 2: the fed line answers at unity, crosses at unity, then repeats at fb |fb| per two
-    // crossings: at -37 the reference's signs run ++--++ (cd_m2l_n37, cd_m2r_n37).
+    // Mode 2: the fed line answers at unity, crosses at 32767 / 32768, then repeats at the
+    // feedback times |v| / 63 per two crossings: at -37 the reference's signs run ++--++
+    // (cd_m2l_n37, cd_m2r_n37), its loop 0.34198 against the law's 0.34215 (fb^2: 0.33947).
     const size_t q = 22049; // 500.0 ms
-    const double g = -37. / 63.5 * (37. / 63.5);
+    const double g = unity2 * leg2(-37);
     std::vector<float> r;
     auto l = delayImpulseMode(2, "Cross Delay", 44100,
                               {{"Time L>R", 500}, {"Time R>L", 500}, {"Feedback", -37}, {"High Damping", 1.0},
                                {"Mix", 63}, {"Input", 3}},
                               r, 3.2);
     REQUIRE(r[L + q] == Approx(1.0).epsilon(1e-6));
-    REQUIRE(l[L + 2 * q] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(l[L + 2 * q] == Approx(unity2).epsilon(1e-7));
     REQUIRE(r[L + 3 * q] == Approx(g).epsilon(1e-6));
-    REQUIRE(l[L + 4 * q] == Approx(g).epsilon(1e-6));
+    REQUIRE(l[L + 4 * q] == Approx(g * unity2).epsilon(1e-6));
     REQUIRE(r[L + 5 * q] == Approx(g * g).epsilon(1e-6));
     auto l2 = delayImpulseMode(2, "Cross Delay", 44100,
                                {{"Time L>R", 500}, {"Time R>L", 500}, {"Feedback", -37}, {"High Damping", 1.0},
                                 {"Mix", 63}, {"Input", 4}},
                                r, 3.2, 0, true);
     REQUIRE(l2[L + q] == Approx(1.0).epsilon(1e-6));
-    REQUIRE(r[L + 2 * q] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(r[L + 2 * q] == Approx(unity2).epsilon(1e-7));
     REQUIRE(l2[L + 3 * q] == Approx(g).epsilon(1e-6));
     // Balance: the reference's wet/dry in dB (echo against its own render's click); the near side
     // stays at unity (delay-eq-2026-11-12: at D=W the dry is level with the dry-only render's).
@@ -2397,10 +2404,10 @@ TEST_CASE("Tempo stereo delay: every echo time measured on the 02 28 renders")
 TEST_CASE("Tempo stereo delay: the lines loop at the note plus Lag, Diffusion moves only the output")
 {
     // rs_dfb / rs_dfb2: with feedback, every later echo follows the first by the note plus Lag
-    // on each channel (17,476 left / 11,919 right, then +14,698 each); feedback v / 63.5 per
+    // on each channel (17,476 left / 11,919 right, then +14,698 each); feedback v x 516 / 32768 per
     // repeat, its sign alternating when negative. The lines cross: input L's repeats alternate
     // right, left, right, and a centred source gives both channels every repeat.
-    const double fb = -40 / 63.5;
+    const double fb = -40 * fbStep;
     const long q = 14698;
     const std::vector<std::pair<const char *, double>> set{
         {"Delay Time", 9}, {"Feedback", -40}, {"High Damping", 1.0}, {"L/R Diffusion", 63}, {"Mix", 63}};
@@ -2515,11 +2522,11 @@ TEST_CASE("L/R delay: one line per channel, its own delay time and loop spacing,
     // Each channel feeds its own line and answers on its own side: input L returns on the left
     // floor(Time L x 10 x 18063 / 4096) samples later (msLineSeconds, the family's law; 200.0 ms is
     // 8,819 samples at 44.1 kHz, the length kept in seconds at 48 kHz with the all-pass for
-    // the fraction), then every Feedback Time 1 (150.0 ms is 6,614) at feedback / 63.5 per
+    // the fraction), then every Feedback Time 1 (150.0 ms is 6,614) at the feedback gain per
     // loop. The R line is the mirror with Time R 500 (22,049) and Feedback Time 2 300
     // (13,229). Nothing crosses: a left input leaves the right output silent (lr_cross).
     const size_t qa = 8819, fa = 6614, qb = 22049, fb = 13229;
-    const double g = 40 / 63.5; // -4.01 dB per loop
+    const double g = 40 * fbStep; // -4.01 dB per loop
     const std::vector<std::pair<const char *, double>> set{
         {"Time L", 200}, {"Time R", 500}, {"Feedback Time 1", 150}, {"Feedback Time 2", 300},
         {"Feedback", 40}, {"High Damping", 1.0}, {"Mix", 63}};
@@ -2572,8 +2579,8 @@ TEST_CASE("L/R delay: one line per channel, its own delay time and loop spacing,
         std::vector<float> rn;
         auto ln = delayImpulseMode(4, "L/R Delay", 44100, neg, rn, 3.0);
         REQUIRE(ln[L + qa] == Approx(1.0).epsilon(1e-6));
-        REQUIRE(ln[L + qa + fa] == Approx(-63 / 63.5).epsilon(1e-6));
-        REQUIRE(ln[L + qa + 2 * fa] == Approx(63 / 63.5 * (63 / 63.5)).epsilon(1e-6));
+        REQUIRE(ln[L + qa + fa] == Approx(-63 * fbStep).epsilon(1e-6));
+        REQUIRE(ln[L + qa + 2 * fa] == Approx(63 * fbStep * (63 * fbStep)).epsilon(1e-6));
     }
 }
 
@@ -2613,7 +2620,7 @@ TEST_CASE("L/R delay ignores the transport, and its balance and damping follow t
             e1 += (double)out[L + i] * out[L + i];
         for (size_t i = qa + fa; i < qa + 2 * fa; ++i)
             e2 += (double)out[L + i] * out[L + i];
-        const double f = 63 / 63.5; // feedback's own drop, on top of the filter's
+        const double f = 63 * fbStep; // feedback's own drop, on top of the filter's
         REQUIRE(e2 == Approx(e1 * f * f * ((1 - g) * (1 - g) + g * g)).epsilon(0.02));
     }
 }
@@ -2630,7 +2637,7 @@ TEST_CASE("L/R delay: the range ends and the series loop")
                                  {"Feedback Time 2", 0.1}, {"Feedback", 40}, {"High Damping", 1.0}, {"Mix", 63}},
                                 r, 3.6);
     REQUIRE(out[L + 72247] == Approx(1.0).epsilon(1e-6));
-    REQUIRE(out[L + 144494] == Approx(40 / 63.5).epsilon(1e-6));
+    REQUIRE(out[L + 144494] == Approx(40 * fbStep).epsilon(1e-6));
     for (size_t i = 5; i < 72247; ++i)
         REQUIRE(std::abs(out[L + i]) < 1e-6); // nothing else on the left until the long echo
     for (size_t i = 0; i < r.size(); ++i)
@@ -2641,7 +2648,7 @@ TEST_CASE("L/R delay: the range ends and the series loop")
                                    {"Feedback Time 2", 0.1}, {"Feedback", 40}, {"High Damping", 1.0}, {"Mix", 63}},
                                   r2, 0.5, 0, true);
     REQUIRE(r2[L + 4] == Approx(1.0).epsilon(1e-6)); // the 0.1 ms line plays 4 samples later
-    REQUIRE(r2[L + 8] == Approx(40 / 63.5).epsilon(1e-6));
+    REQUIRE(r2[L + 8] == Approx(40 * fbStep).epsilon(1e-6));
     for (size_t i = 9; i < 400; ++i)
         if (i % 4)
             REQUIRE(std::abs(r2[L + i]) < 1e-6); // echoes only every Feedback Time 2 (4 samples)
@@ -2737,12 +2744,12 @@ TEST_CASE("L/C/R delay: one line, three taps and a shared feedback time, at 44.1
 {
     // ONE line read at four offsets (effects/LcrDelay.h; plan, section 15): Time L answers
     // left, Time R right, Time C both channels at (Level C / 127)^2, Feedback Time recirculates
-    // at feedback / 63.5. At 44.1 kHz the taps are the family's time law: 200 -> 8,819,
+    // at the feedback gain. At 44.1 kHz the taps are the family's time law: 200 -> 8,819,
     // 300 -> 13,229, 560 -> 24,695, 150 -> 6,614, as lcr_grid and lcr_r_dw measured. The line's
     // feed is the mean of the inputs (a convention, known difference 47), so a left impulse of
     // 1 feeds it 0.5 and answers on both channels.
     const size_t qa = 8819, qb = 13229, qc = 24695, fa = 6614;
-    const double g = 40 / 63.5, half = 0.5; // mono-mean feed
+    const double g = 40 * fbStep, half = 0.5; // mono-mean feed
     const std::vector<std::pair<const char *, double>> set{
         {"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
         {"Feedback", 40}, {"Level C", 127}, {"High Damping", 1.0}, {"Mix", 63}};
@@ -2829,7 +2836,7 @@ TEST_CASE("L/C/R delay: one line, three taps and a shared feedback time, at 44.1
 
 TEST_CASE("L/C/R delay: negative feedback, damping, the range ends and the shared loop")
 {
-    // Feedback - v / 63.5 per loop, inverted every loop (the family's law): with one shared
+    // Feedback - v x 516 / 32768 per loop, inverted every loop (the family's law): with one shared
     // feedback tap every channel's k-th echo carries the same (-1)^k. Damping is the two-tap
     // g = 5(1 - r)/9 in the feedback path only, measured here the way lr_dampmin checks it:
     // successive echoes' energy ratio is fb^2 ((1-g)^2 + g^2), the first echo unfiltered.
@@ -2840,8 +2847,8 @@ TEST_CASE("L/C/R delay: negative feedback, damping, the range ends and the share
                                  {"Feedback", -63}, {"Level C", 127}, {"High Damping", 1.0}, {"Mix", 63}},
                                 r, 2.0);
     REQUIRE(neg[L + qa] == Approx(0.5).epsilon(1e-6));
-    REQUIRE(neg[L + qa + fa] == Approx(-63 / 63.5 * 0.5).epsilon(1e-6));
-    REQUIRE(neg[L + qa + 2 * fa] == Approx(63 / 63.5 * (63 / 63.5) * 0.5).epsilon(1e-6));
+    REQUIRE(neg[L + qa + fa] == Approx(-63 * fbStep * 0.5).epsilon(1e-6));
+    REQUIRE(neg[L + qa + 2 * fa] == Approx(63 * fbStep * (63 * fbStep) * 0.5).epsilon(1e-6));
     std::vector<float> rd;
     auto damp = delayImpulseMode(5, "L/C/R Delay", 44100,
                                  {{"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
@@ -2852,7 +2859,7 @@ TEST_CASE("L/C/R delay: negative feedback, damping, the range ends and the share
         e1 += (double)damp[L + i] * damp[L + i];
     for (size_t i = qa + fa; i < qa + 2 * fa; ++i)
         e2 += (double)damp[L + i] * damp[L + i];
-    const double gc = 5 * (1 - 0.1) / 9, f = 63 / 63.5; // the filter's, and the feedback's own drop
+    const double gc = 5 * (1 - 0.1) / 9, f = 63 * fbStep; // the filter's, and the feedback's own drop
     REQUIRE(e2 == Approx(e1 * f * f * ((1 - gc) * (1 - gc) + gc * gc)).epsilon(0.02));
     SECTION("The range ends, and echoes run past them on the shared loop")
     {
@@ -2865,7 +2872,7 @@ TEST_CASE("L/C/R delay: negative feedback, damping, the range ends and the share
                                     {"Feedback", 40}, {"Level C", 0}, {"High Damping", 1.0}, {"Mix", 63}},
                                    rt, 3.6);
         REQUIRE(mx[L + 72247] == Approx(0.5).epsilon(1e-6));
-        REQUIRE(mx[L + 144494] == Approx(0.5 * 40 / 63.5).epsilon(1e-6));
+        REQUIRE(mx[L + 144494] == Approx(0.5 * 40 * fbStep).epsilon(1e-6));
         REQUIRE(rt[L + 4] == Approx(0.5).epsilon(1e-6)); // the 0.1 ms right tap on the right channel
         for (size_t i = 5; i < 72247; ++i)
             REQUIRE(std::abs(mx[L + i]) < 1e-6);
@@ -2965,10 +2972,10 @@ TEST_CASE("Tempo mono delay: the taps, times and gains at 44.1 and 48 kHz")
     // (this set has no separate feedback time). The time law is the TEMPO DELAY pair's:
     // trunc(T ms, 0.1) x 44.1 rounded, minus 1 (tempo_stereo ts_base / ts_tmin): the quarter
     // default (raw 11) at 120 BPM is 500.0 ms -> 22,049 samples; its 1/32 triplet "41.6 ms" ->
-    // 1,834. Feedback v / 63.5 per loop; the tempo types' linear balance position. A left
+    // 1,834. Feedback v x 516 / 32768 per loop; the tempo types' linear balance position. A left
     // impulse of 1 feeds the line 0.5 (the mono mean; difference 48).
     const size_t q = 22049;
-    const double fb = 40 / 63.5, half = 0.5;
+    const double fb = 40 * fbStep, half = 0.5;
     const std::vector<std::pair<const char *, double>> set{
         {"Feedback", 40}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}};
     std::vector<float> r;
@@ -2997,7 +3004,7 @@ TEST_CASE("Tempo mono delay: the taps, times and gains at 44.1 and 48 kHz")
         // 6 quarters = 3,000 ms; the reference repeats 132,297 samples after its click and after
         // its first echo (review batch tmx_tmax), floor(3,000 x 44.0991)
         REQUIRE(rt[L + 132297] == Approx(half).epsilon(1e-6));
-        REQUIRE(lt[L + 2 * 132297] == Approx(half * 16 / 63.5).epsilon(1e-6));
+        REQUIRE(lt[L + 2 * 132297] == Approx(half * 16 * fbStep).epsilon(1e-6));
         std::vector<float> r5; // 5 quarters: 110,247 (tmx_t18), round(ms x 44.1) - 1 gives 110,249
         delayImpulseMode(6, "Tempo Mono Delay", 44100,
                          {{"Delay Time", 18}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, r5, 3.0, 120);
@@ -3017,8 +3024,8 @@ TEST_CASE("Tempo mono delay: the taps, times and gains at 44.1 and 48 kHz")
         auto ln = delayImpulseMode(6, "Tempo Mono Delay", 44100,
                                    {{"Feedback", -63}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, rn, 2.5, 120);
         REQUIRE(ln[L + q] == Approx(half).epsilon(1e-6));
-        REQUIRE(ln[L + 2 * q] == Approx(-half * 63 / 63.5).epsilon(1e-6));
-        REQUIRE(rn[L + 3 * q] == Approx(half * 63 / 63.5 * 63 / 63.5).epsilon(1e-6));
+        REQUIRE(ln[L + 2 * q] == Approx(-half * 63 * fbStep).epsilon(1e-6));
+        REQUIRE(rn[L + 3 * q] == Approx(half * 63 * fbStep * 63 * fbStep).epsilon(1e-6));
     }
     SECTION("At 48 to 192 kHz the taps and the loop keep their length in seconds")
     {
@@ -3086,7 +3093,7 @@ TEST_CASE("Tempo mono delay: L/R Diffusion splits the taps around the loop, Lag 
         fed.emplace_back("Feedback", 40);
         std::vector<float> rf;
         auto lf = delayImpulseMode(6, "Tempo Mono Delay", 44100, fed, rf, 1.5, 120);
-        const double g = 40 / 63.5; // tmx_diffp: 24,827 and 19,271, both repeating every 22,049
+        const double g = 40 * fbStep; // tmx_diffp: 24,827 and 19,271, both repeating every 22,049
         REQUIRE(lf[L + q + 2778] == Approx(0.5).epsilon(1e-6));
         REQUIRE(lf[L + 2 * q + 2778] == Approx(0.5 * g).epsilon(1e-6));
         REQUIRE(rf[L + q - 2778] == Approx(0.5).epsilon(1e-6));
@@ -3119,7 +3126,7 @@ TEST_CASE("Tempo mono delay: L/R Diffusion splits the taps around the loop, Lag 
             e1 += (double)ld[L + i] * ld[L + i];
         for (size_t i = 2 * q; i < 3 * q; ++i)
             e2 += (double)ld[L + i] * ld[L + i];
-        const double f = 40 / 63.5; // feedback's own drop, on top of the filter's
+        const double f = 40 * fbStep; // feedback's own drop, on top of the filter's
         REQUIRE(e2 == Approx(e1 * f * f * ((1 - g) * (1 - g) + g * g)).epsilon(0.02));
         REQUIRE(ld[L + 2 * q] != 0); // the second echo exists (echo 1 came from the raw input)
     }

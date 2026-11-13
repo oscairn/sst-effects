@@ -5,10 +5,11 @@
  * fitted to reference renders at 44.1 kHz (plan, section 15, "Tempo cross delay"):
  *  - two lines: A takes the left input and plays on the right after its time (L>R), B takes the
  *    right input and plays on the left (R>L). Each line's output feeds the other line back
- *    through the feedback gain v / 63.5 (v the displayed -63..+63), so a left input ping-pongs;
+ *    through the feedback gain v x 516 / 32768 (v the displayed -63..+63; feedbackGain), so a
+ *    left input ping-pongs;
  *  - input L feeds A only, R feeds B only, L&R feeds both. L Mode 2 feeds A only and sends A's
- *    output into B at unity and B's into A at fb |fb| (R Mode 2 the mirror), so each side repeats
- *    every two crossings and, at negative feedback, inverts once per repeat;
+ *    output into B at unity and B's into A at fb |v| / 63 (mode2Gain; R Mode 2 the mirror), so each
+ *    side repeats every two crossings and, at negative feedback, inverts once per repeat;
  *  - a line's length in samples at 44.1 kHz is the delay family's time law (tenthsSamples) of the
  *    note value at the tempo, cut to 0.1 ms, plus the lag (both lines); a line that would reach
  *    131,072 samples halves its note until it fits (halvedNote);
@@ -88,6 +89,19 @@ inline long halvedNote(long note, long offsetTenths, long limit)
         note /= 2;
     return note;
 }
+
+// Feedback v (-63..63) per crossing or loop: v x 516 / 32768, the 1/32768-grid step nearest
+// 1/63.5 (1/63.504; the renders measure v / 63.5 within 0.01 dB, which cannot tell them apart).
+inline double feedbackGain(double v) { return (double)std::lround(v) * 516 / 32768; }
+// Mode 2's legs. The squared one is the feedback times |v| / 63 on the same grid, cut toward zero;
+// the other is the grid's unity, 32767 / 32768. Their loop is 1.0078 x fb^2, which the cd_m2* and
+// tcd_m2* renders measure at 1.0072-1.0073 (fb^2 itself missed by 0.063 dB per loop).
+inline double mode2Gain(double v)
+{
+    const long n = std::lround(v);
+    return (double)(std::abs(n) * n * 516 / 63) / 32768;
+}
+constexpr double mode2Unity = 32767.0 / 32768;
 
 // High damping ratio r (0.1 to 1.0) to the two-tap coefficient: g = 5 (1 - r) / 9, so 0.1 puts
 // a zero at Nyquist and 1.0 is off (fx16, fx17: within 0.001 of a free fit at every value).
@@ -339,9 +353,9 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             const bool left = mode != inR && mode != inRMode2, right = mode == inR || mode == inLR || mode == inRMode2;
             double gA = fb, gB = fb; // into A from B, into B from A
             if (mode == inLMode2)
-                gA = fb * std::abs(fb), gB = 1;
+                gA = fb2, gB = mode2Unity;
             else if (mode == inRMode2)
-                gA = 1, gB = fb * std::abs(fb);
+                gA = mode2Unity, gB = fb2;
             double xA = left ? l : 0, xB = right ? r : 0;
             if (const int K = dampA.K)
             {
@@ -390,7 +404,8 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             return;
         lastTempo = tempo();
         const double rate = this->sampleRate();
-        fb = std::lround(last[D::feedback]) / 63.5;
+        fb = feedbackGain(last[D::feedback]);
+        fb2 = mode2Gain(last[D::feedback]);
         const Balance bal = D::balance((double)std::lround(last[D::mix]));
         dry = bal.dry, wet = bal.wet;
         const double g = dampingCoefficient(last[D::damping]);
@@ -418,7 +433,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
     bool designed{false};
     std::vector<float> last; // sized to D::numParams at construction
     double lastTempo{NAN};
-    double fb{0}, dry{1}, wet{0}, secA{0}, secB{0}, outSecA{0}, outSecB{0};
+    double fb{0}, fb2{0}, dry{1}, wet{0}, secA{0}, secB{0}, outSecA{0}, outSecB{0};
 };
 
 template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoCrossDelay>
