@@ -2673,6 +2673,231 @@ TEST_CASE("L/R delay: every parameter's value text parses back")
     REQUIRE(checked == 35); // five points on each of the mode's seven parameters, no vacuous pass
 }
 
+// ---- L/C/R delay (one line, three taps, one feedback time; plan, section 15) ----
+
+TEST_CASE("L/C/R delay: one line, three taps and a shared feedback time, at 44.1 and 48 kHz")
+{
+    // ONE line read at four offsets (effects/LcrDelay.h; plan, section 15): Time L answers
+    // left, Time R right, Time C both channels at (Level C / 127)^2, Feedback Time recirculates
+    // at feedback / 63.5. At 44.1 kHz the taps are round(ms x 44.1) - 1 samples: 200 -> 8,819,
+    // 300 -> 13,229, 560 -> 24,695, 150 -> 6,614, as lcr_grid and lcr_r_dw measured. The line's
+    // feed is the mean of the inputs (a convention, known difference 47), so a left impulse of
+    // 1 feeds it 0.5 and answers on both channels.
+    const size_t qa = 8819, qb = 13229, qc = 24695, fa = 6614;
+    const double g = 40 / 63.5, half = 0.5; // mono-mean feed
+    const std::vector<std::pair<const char *, double>> set{
+        {"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+        {"Feedback", 40}, {"Level C", 127}, {"High Damping", 1.0}, {"Mix", 63}};
+    std::vector<float> r;
+    auto l = delayImpulseMode(5, "L/C/R Delay", 44100, set, r, 3.0);
+    REQUIRE(l[L + qa] == Approx(half).epsilon(1e-6));
+    REQUIRE(l[L + qa + fa] == Approx(half * g).epsilon(1e-6));
+    REQUIRE(l[L + qa + 2 * fa] == Approx(half * g * g).epsilon(1e-6));
+    REQUIRE(r[L + qb] == Approx(half).epsilon(1e-6)); // a LEFT input answers on the RIGHT at Time R
+    REQUIRE(r[L + qb + fa] == Approx(half * g).epsilon(1e-6));
+    REQUIRE(r[L + qc] == Approx(half).epsilon(1e-6));  // the centre tap, Level C 127: same gain
+    REQUIRE(r[L + qc + fa] == Approx(half * g).epsilon(1e-6));
+    REQUIRE(l[L + qc] == Approx(half).epsilon(1e-6));  // and in the left channel too
+    for (size_t i = 1; i < l.size() - L; ++i)
+        if ((i - qa) % fa && (i - qb) % fa && (i - qc) % fa)
+            REQUIRE(l[L + i] == 0); // no dry (Mix wet), no taps off the three grids
+    SECTION("Level C sets the centre tap alone")
+    {
+        std::vector<std::pair<const char *, double>> zero{
+            {"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+            {"Feedback", 40}, {"Level C", 0}, {"High Damping", 1.0}, {"Mix", 63}};
+        auto off = delayImpulseMode(5, "L/C/R Delay", 44100, zero, r, 2.0); // r = its right channel
+        for (size_t i = 1; i + L < off.size(); ++i)
+            if ((i - qc) % fa == 0)
+                REQUIRE(off[L + i] == 0); // the centre grid is gone from the left...
+        for (size_t i = 1; i + L < r.size(); ++i)
+            if ((i - qc) % fa == 0)
+                REQUIRE(r[L + i] == 0); // ...and gone from the right, whose 560-grid echoes ARE the centre
+        REQUIRE(off[L + qa] == Approx(half).epsilon(1e-6)); // the side taps unchanged
+        auto mid = delayImpulseMode(5, "L/C/R Delay", 44100,
+                                    {{"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+                                     {"Feedback", 0}, {"Level C", 64}, {"High Damping", 1.0}, {"Mix", 63}},
+                                    r, 1.0);
+        REQUIRE(mid[L + qc] == Approx(half * (64.0 / 127) * (64.0 / 127)).epsilon(1e-6));
+        // centre over side tap as measured: 64 by lcr_hold_level (fitted), 32 and 100 by the
+        // review batch (hold-outs)
+        for (auto [raw, db] : {std::pair{64, -11.91}, {32, -23.95}, {100, -4.15}})
+        {
+            auto c = delayImpulseMode(5, "L/C/R Delay", 44100,
+                                      {{"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+                                       {"Feedback", 0}, {"Level C", (double)raw}, {"High Damping", 1.0}, {"Mix", 63}},
+                                      r, 1.0);
+            INFO("Level C " << raw);
+            REQUIRE(20 * std::log10(c[L + qc] / c[L + qa]) == Approx(db).margin(0.02));
+        }
+    }
+    SECTION("A right input mirrors it, and 48 kHz keeps the lengths in seconds")
+    {
+        std::vector<float> rr;
+        auto lr = delayImpulseMode(5, "L/C/R Delay", 44100, set, rr, 3.0, 0, true);
+        REQUIRE(rr[L + qb] == Approx(half).epsilon(1e-6));
+        REQUIRE(lr[L + qa] == Approx(half).epsilon(1e-6)); // the mean feed: right answers left too
+        std::vector<float> r48;
+        auto l48 = delayImpulseMode(5, "L/C/R Delay", 48000, set, r48, 3.0);
+        size_t peak = 0;
+        for (size_t i = 1; i < l48.size(); ++i)
+            if (std::abs(l48[i]) > std::abs(l48[peak]))
+                peak = i;
+        REQUIRE(std::abs((double)(peak - L) - qa * 48000 / 44100.0) <= 1.0);
+    }
+    SECTION("The 0.1 ms taps and the loop keep their time at every rate, with the damping on")
+    {
+        for (double rate : {48000., 88200., 96000., 176400., 192000.})
+        {
+            std::vector<float> rs;
+            auto ls = delayImpulseMode(5, "L/C/R Delay", rate,
+                                       {{"Time L", 0.1}, {"Time R", 0.1}, {"Time C", 0.1}, {"Feedback Time", 150},
+                                        {"Feedback", 40}, {"Level C", 127}, {"High Damping", 0.1}, {"Mix", 63}},
+                                       rs, 0.3);
+            auto peakIn = [&](size_t from, size_t to) {
+                size_t p = from;
+                for (size_t i = from; i < to; ++i)
+                    if (std::abs(ls[i]) > std::abs(ls[p]))
+                        p = i;
+                return (double)(p - L);
+            };
+            const size_t half = L + (size_t)(0.075 * rate);
+            INFO(rate << " Hz");
+            REQUIRE(std::abs(peakIn(1, half) - 3 * rate / 44100) <= 1.0); // 3 samples at 44.1 kHz
+            REQUIRE(std::abs(peakIn(half, ls.size()) - (3 + 6614) * rate / 44100) <= 1.0); // one loop later
+        }
+    }
+}
+
+TEST_CASE("L/C/R delay: negative feedback, damping, the range ends and the shared loop")
+{
+    // Feedback - v / 63.5 per loop, inverted every loop (the family's law): with one shared
+    // feedback tap every channel's k-th echo carries the same (-1)^k. Damping is the two-tap
+    // g = 5(1 - r)/9 in the feedback path only, measured here the way lr_dampmin checks it:
+    // successive echoes' energy ratio is fb^2 ((1-g)^2 + g^2), the first echo unfiltered.
+    const size_t qa = 8819, fa = 6614;
+    std::vector<float> r;
+    auto neg = delayImpulseMode(5, "L/C/R Delay", 44100,
+                                {{"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+                                 {"Feedback", -63}, {"Level C", 127}, {"High Damping", 1.0}, {"Mix", 63}},
+                                r, 2.0);
+    REQUIRE(neg[L + qa] == Approx(0.5).epsilon(1e-6));
+    REQUIRE(neg[L + qa + fa] == Approx(-63 / 63.5 * 0.5).epsilon(1e-6));
+    REQUIRE(neg[L + qa + 2 * fa] == Approx(63 / 63.5 * (63 / 63.5) * 0.5).epsilon(1e-6));
+    std::vector<float> rd;
+    auto damp = delayImpulseMode(5, "L/C/R Delay", 44100,
+                                 {{"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+                                  {"Feedback", 63}, {"Level C", 0}, {"High Damping", 0.1}, {"Mix", 63}},
+                                 rd, 2.0);
+    double e1 = 0, e2 = 0;
+    for (size_t i = qa; i < qa + fa; ++i)
+        e1 += (double)damp[L + i] * damp[L + i];
+    for (size_t i = qa + fa; i < qa + 2 * fa; ++i)
+        e2 += (double)damp[L + i] * damp[L + i];
+    const double gc = 5 * (1 - 0.1) / 9, f = 63 / 63.5; // the filter's, and the feedback's own drop
+    REQUIRE(e2 == Approx(e1 * f * f * ((1 - gc) * (1 - gc) + gc * gc)).epsilon(0.02));
+    SECTION("The range ends, and echoes run past them on the shared loop")
+    {
+        // Time L = Feedback Time = 1,638.3 ms: echo 1 at 72,248, echo 2 one loop later (the
+        // series of two taps, past the parameter's own maximum) - lr_tmax's shape, probed by
+        // lcr_tmax. Time R = 0.1 ms rounds to 3 samples.
+        std::vector<float> rt;
+        auto mx = delayImpulseMode(5, "L/C/R Delay", 44100,
+                                   {{"Time L", 1638.3}, {"Time R", 0.1}, {"Time C", 0.1}, {"Feedback Time", 1638.3},
+                                    {"Feedback", 40}, {"Level C", 0}, {"High Damping", 1.0}, {"Mix", 63}},
+                                   rt, 3.6);
+        REQUIRE(mx[L + 72248] == Approx(0.5).epsilon(1e-6));
+        REQUIRE(mx[L + 144496] == Approx(0.5 * 40 / 63.5).epsilon(1e-6));
+        REQUIRE(rt[L + 3] == Approx(0.5).epsilon(1e-6)); // the 0.1 ms right tap on the right channel
+        for (size_t i = 4; i < 72248; ++i)
+            REQUIRE(std::abs(mx[L + i]) < 1e-6);
+    }
+    SECTION("The transport means nothing, and the balance follows the cross delay's")
+    {
+        const std::vector<std::pair<const char *, double>> set{
+            {"Time L", 200}, {"Time R", 300}, {"Time C", 560}, {"Feedback Time", 150},
+            {"Feedback", 40}, {"Level C", 100}, {"High Damping", 1.0}, {"Mix", 21}};
+        std::vector<float> r120, r150;
+        auto l120 = delayImpulseMode(5, "L/C/R Delay", 44100, set, r120, 2.0, 120);
+        auto l150 = delayImpulseMode(5, "L/C/R Delay", 44100, set, r150, 2.0, 150);
+        REQUIRE(l120 == l150);
+        REQUIRE(r120 == r150);
+        // wet over dry as measured from the click: +7.04 dB at D<W21 (lcr_hold_mix), -24.94 dB
+        // at D48>W (lcr_r_balm48); the dry is the input, the wet the line's mean feed
+        for (auto [v, db] : {std::pair{21, 7.04}, {-48, -24.94}})
+        {
+            std::vector<float> rw;
+            auto dw = delayImpulseMode(5, "L/C/R Delay", 44100,
+                                       {{"Time L", 200}, {"Feedback", 0}, {"Level C", 0}, {"High Damping", 1.0}, {"Mix", (double)v}},
+                                       rw, 0.5);
+            INFO("Mix " << v);
+            REQUIRE(20 * std::log10(2 * dw[L + qa] / dw[L]) == Approx(db).margin(0.02));
+        }
+    }
+}
+
+TEST_CASE("L/C/R delay state round-trips")
+{
+    Plugin a(delayId);
+    a.set(1, 5);
+    for (auto [n, v] : {std::pair{"Time L", 123.4}, {"Time R", 77.7}, {"Time C", 456.7},
+                        {"Feedback Time", 321.1}, {"Feedback", 30}, {"Level C", 40},
+                        {"High Damping", 0.3}, {"Mix", -12}})
+        a.set(paramIdByName(a.p, "L/C/R Delay", n), v);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin b(delayId);
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
+    auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 0; i < params->count(a.p); ++i)
+    {
+        clap_param_info_t info;
+        params->get_info(a.p, i, &info);
+        REQUIRE(a.get(info.id) == b.get(info.id));
+    }
+    std::vector<float> inL, inR, ra, rb;
+    signal(24000, inL, inR);
+    a.activate();
+    b.activate();
+    REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+}
+
+TEST_CASE("L/C/R delay: every parameter's value text parses back")
+{
+    Plugin pl(delayId);
+    pl.set(1, 5);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    int checked = 0;
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if ((info.id >> 8) != 5)
+            continue;
+        for (double t : {0., .25, .5, .75, 1.})
+        {
+            double v = info.min_value + t * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            char text[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, v, text, sizeof(text)));
+            double back = NAN;
+            INFO(info.name << " at " << v << ": \"" << text << "\"");
+            REQUIRE(params->text_to_value(pl.p, info.id, text, &back));
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                REQUIRE(back == v); // a label must select the value it came from
+            char again[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, back, again, sizeof(again)));
+            REQUIRE(!std::strcmp(text, again));
+            ++checked;
+        }
+    }
+    REQUIRE(checked == 40); // five points on each of the mode's eight parameters, no vacuous pass
+}
+
 TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
 {
     namespace sc = oscairn_fx::scales;
