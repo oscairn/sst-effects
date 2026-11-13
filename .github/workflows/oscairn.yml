@@ -107,9 +107,14 @@ jobs:
         run: ./build/src/oscairn-clap/oscairn-effects-tests
       - name: Privacy
         run: |
-          for id in reverb eq delay dynamics; do
-            src/oscairn-clap/tests/privacy-check.sh build/src/oscairn-clap/oscairn-effects-privacy-host \
-              build/src/oscairn-clap/oscairn-effects.clap org.oscairn.effects.$id
+          # The ids come from the plugin's own factory, so a new plugin is checked without
+          # touching this file.
+          host=build/src/oscairn-clap/oscairn-effects-privacy-host
+          ids=$("$host" --list build/src/oscairn-clap/oscairn-effects.clap)
+          [ -n "$ids" ] # a failed or empty list would otherwise check nothing and pass
+          for id in $ids; do
+            src/oscairn-clap/tests/privacy-check.sh "$host" \
+              build/src/oscairn-clap/oscairn-effects.clap "$id"
           done
       - name: Stock-vs-fork gate
         if: matrix.gate

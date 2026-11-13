@@ -595,9 +595,10 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
       neither), so no parameter carries the `mix` role and Oscairn puts the first parameter by
       priority (Mode) on the Effects knob. The editor-hints test now expects no role for it. A
       `mix` role on Speed, or Balance, would be a choice.
-    - **CI's privacy step lists the plugin IDs** (`.github/workflows/oscairn.yml`) and does not name
+    - ~~**CI's privacy step lists the plugin IDs** (`.github/workflows/oscairn.yml`) and does not name
       `org.oscairn.effects.tremolo-rotary`; the workflow was left unchanged in this round. The
-      check passes for it locally.
+      check passes for it locally~~: resolved 2026-11-12, the step takes the ids from the plugin's
+      own factory (`oscairn-effects-privacy-host --list`) and fails if that lists none.
     - ~~The shelves miss the rate gate and their law is not found~~: resolved 2026-11-11 (section 15,
       "Rotary A: the shelves, and clipping in the probes").
     - **The reference clips the effect's output at about +8 dB** (known difference 41). It only shows

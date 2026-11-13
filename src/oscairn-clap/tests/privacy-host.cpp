@@ -365,11 +365,31 @@ static std::vector<Preset> discoverPresets(const clap_plugin_entry_t *entry, con
 
 int main(int argc, char **argv)
 {
+    // --list <plugin.clap>: print every plugin id the bundle's factory offers, one per line, so
+    // a caller (CI's privacy step) loops over the plugins themselves, not a list of its own.
+    if (argc == 3 && !std::strcmp(argv[1], "--list"))
+    {
+        auto lib = dlopen(argv[2], RTLD_NOW | RTLD_LOCAL);
+        auto entry = lib ? static_cast<const clap_plugin_entry_t *>(dlsym(lib, "clap_entry")) : nullptr;
+        auto f = entry && entry->init(argv[2])
+                     ? static_cast<const clap_plugin_factory_t *>(
+                           entry->get_factory(CLAP_PLUGIN_FACTORY_ID))
+                     : nullptr;
+        if (!f)
+        {
+            std::fprintf(stderr, "cannot load %s\n", argv[2]);
+            return 1;
+        }
+        for (uint32_t i = 0; i < f->get_plugin_count(f); ++i)
+            std::printf("%s\n", f->get_plugin_descriptor(f, i)->id);
+        entry->deinit();
+        return 0;
+    }
     if (argc < 3)
     {
         std::fprintf(stderr, "usage: %s plugin.clap plugin-id [--library id=folder]... "
-                             "[--state file]\n",
-                     argv[0]);
+                             "[--state file]\n       %s --list plugin.clap\n",
+                     argv[0], argv[0]);
         return 2;
     }
     std::string bundle = argv[1], id = argv[2], stateFile;
