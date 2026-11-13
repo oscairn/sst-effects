@@ -7,7 +7,7 @@
  * fixed L&R input feed. Feedback v / 63.5 per crossing, the two-tap feedback damping
  * g = 5 (1 - r) / 9 and the cosine/sine balance with the tempo family's linear position are
  * the family's laws, re-measured for this type (plan, section 15, "Tempo Stereo Delay"). The
- * time law is this type's own (stereoLineSamples, stereoNoteMs). The reference's four EQ parameters are left
+ * time law is the family's, with this type's offsets (stereoLineSamples, stereoNote). The reference's four EQ parameters are left
  * out as in the neighbouring delay modes (decision 23, re-checked for this type).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_TEMPOSTEREODELAY_H
@@ -19,20 +19,16 @@ namespace oscairn_fx::delay
 {
 // A line's length in 44.1 kHz samples (kept in seconds at other rates): the note time truncated
 // to 0.1 ms (the reference's displayed precision) plus the line's own offset in ms, by the
-// family's time law (tenthsSamples). The note time halves while the longer line would exceed
-// halveAbove samples. Every echo time the 02 28 renders measured (1 to 129,519 samples) fits
-// this; round(ms * 44.1) - 1 misses most of them by a sample.
-constexpr long halveAbove = 131072;
-inline long stereoLineSamples(double noteMs, double offsetMs)
+// family's time law (tenthsSamples). The note time halves while the longer line would reach
+// lineLimit samples (halvedNote). Every echo time the 02 28 renders measured (1 to 131,062
+// samples) fits this; round(ms * 44.1) - 1 misses most of them by a sample.
+inline long stereoLineSamples(long noteTenths, double offsetMs)
 {
-    return tenthsSamples(std::lround(offsetMs * 10) + (long)std::floor(noteMs * 10 + 1e-6));
+    return tenthsSamples(noteTenths + std::lround(offsetMs * 10));
 }
-inline double stereoNoteMs(int note, double tempo, double longestOffsetMs)
+inline long stereoNote(int note, double tempo, double longestOffsetMs)
 {
-    double ms = noteBeats[std::clamp(note, 0, 19)] * 60000 / std::clamp(tempo, 20.0, 999.0);
-    while (stereoLineSamples(ms, longestOffsetMs) > halveAbove)
-        ms /= 2;
-    return ms;
+    return halvedNote(noteTenths(note, tempo), std::lround(longestOffsetMs * 10), lineLimit);
 }
 
 template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, TempoStereoDelay>
@@ -56,8 +52,8 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
 
     static int bufferSamples(double rate)
     {
-        // the longer line stays at or under halveAbove samples, the shorter is 126 ms less
-        return (int)std::ceil(halveAbove / designRate * rate) + 2 * Damping::maxK + 8;
+        // every line stays under lineLimit samples
+        return (int)std::ceil(lineLimit / designRate * rate) + 2 * Damping::maxK + 8;
     }
     // Both lines loop at the note time plus Lag; the diffusion moves only where they are read
     // for the output, the left later and the right earlier by its ms.
@@ -65,7 +61,7 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
     void setLines(double tempo, double)
     {
         const double lagMs = this->last[lag], diffMs = this->last[diffusion];
-        const double note = stereoNoteMs((int)std::lround(this->last[delayTime]), tempo, lagMs + std::abs(diffMs));
+        const long note = stereoNote((int)std::lround(this->last[delayTime]), tempo, lagMs + std::abs(diffMs));
         this->secA = this->secB = (double)stereoLineSamples(note, lagMs) / designRate;
         this->outSecA = (double)stereoLineSamples(note, lagMs - diffMs) / designRate; // plays right
         this->outSecB = (double)stereoLineSamples(note, lagMs + diffMs) / designRate; // plays left

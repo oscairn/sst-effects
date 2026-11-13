@@ -2006,6 +2006,19 @@ TEST_CASE("Tempo cross delay: the measured routing, times and gains at 44.1 kHz"
         delayImpulse(44100, {{"Time L>R", 7}, {"Lag", -16}, {"High Damping", 1.0}, {"Input", 0}}, r);
         REQUIRE(only(7562)); // 1,875 - 160 tenths of a ms
     }
+    SECTION("Long notes halve while a line would reach 131,072 samples, as tcd_t17/18/19 measured")
+    {
+        auto first = [&](int note) {
+            delayImpulse(44100, {{"Time L>R", note}, {"High Damping", 1.0}, {"Input", 0}}, r, 2.6);
+            for (size_t i = 1; i + L < r.size(); ++i)
+                if (r[L + i] != 0)
+                    return i;
+            return (size_t)0;
+        };
+        REQUIRE(first(17) == 88198);  // 4 quarters, whole
+        REQUIRE(first(18) == 110247); // 5 quarters, whole
+        REQUIRE(first(19) == 66148);  // 6 quarters (132,297) plays 1,500 ms
+    }
     SECTION("Triplet and dotted notes follow the family's time law, as fx16 and fx18 measured")
     {
         // The first echo of line A (input L, on the right) at the reference's own sample; the
@@ -2337,8 +2350,8 @@ TEST_CASE("Cross delay: Mode 2 and the balance, as measured")
 
 TEST_CASE("Tempo stereo delay: every echo time measured on the 02 28 renders")
 {
-    // At 120 BPM each line is floor(ms * 44.0991) samples, ms = the note truncated to 0.1 ms
-    // (halved when the longer line would pass 131,072 samples) + Lag, + Diffusion on the left
+    // At 120 BPM each line is the family's time law of the note truncated to 0.1 ms (halved,
+    // as often as it takes, while the longer line would reach 131,072 samples) + Lag, + Diffusion on the left
     // and - Diffusion on the right; never under one sample. Each row is a render of the review
     // batch (night batch for 41.6 ms), {note, lag, diffusion, left echo, right echo}.
     struct Row
@@ -2353,7 +2366,8 @@ TEST_CASE("Tempo stereo delay: every echo time measured on the 02 28 renders")
                         {0, 0, 41, 3642, 26},         {0, 0, 63, 4612, 1},            {16, 0, 0, 66148, 66148},
                         {17, 0, 0, 88198, 88198},     {18, 0, 0, 110247, 110247},     {18, 63, 63, 115804, 110247},
                         {19, 0, 0, 66148, 66148},     {19, -15, 0, 65487, 65487},     {19, -40, 0, 130533, 130533},
-                        {19, -63, 0, 129519, 129519}, {19, -63, 63, 66148, 60592}};
+                        {19, -63, 0, 129519, 129519}, {19, -63, 63, 66148, 60592},
+                        {19, -28, 0, 131062, 131062}, {19, -27, 0, 64958, 64958}}; // the last two: ts_t19_lag36/37
     auto peak = [](const std::vector<float> &x) {
         size_t at = 0;
         for (size_t i = 1; i < x.size(); ++i)
@@ -2984,6 +2998,14 @@ TEST_CASE("Tempo mono delay: the taps, times and gains at 44.1 and 48 kHz")
         delayImpulseMode(6, "Tempo Mono Delay", 44100,
                          {{"Delay Time", 18}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, r5, 3.0, 120);
         REQUIRE(r5[L + 110247] == Approx(half).epsilon(1e-6));
+        // Slower host tempos: the line holds up to 262,143 samples, then the note halves
+        std::vector<float> r61, r60;
+        delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                         {{"Delay Time", 19}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, r61, 6.0, 61);
+        REQUIRE(r61[L + 260255] == Approx(half).epsilon(1e-6)); // 5,901.6 ms, whole
+        delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                         {{"Delay Time", 19}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, r60, 3.2, 60);
+        REQUIRE(r60[L + 132297] == Approx(half).epsilon(1e-6)); // 6,000 ms would be 264,594: halved
     }
     SECTION("Negative feedback flips the echo polarity once per loop")
     {

@@ -10,7 +10,8 @@
  *    output into B at unity and B's into A at fb |fb| (R Mode 2 the mirror), so each side repeats
  *    every two crossings and, at negative feedback, inverts once per repeat;
  *  - a line's length in samples at 44.1 kHz is the delay family's time law (tenthsSamples) of the
- *    note value at the tempo, cut to 0.1 ms, plus the lag (both lines), at most 65,535 samples;
+ *    note value at the tempo, cut to 0.1 ms, plus the lag (both lines); a line that would reach
+ *    131,072 samples halves its note until it fits (halvedNote);
  *  - high damping is a two-tap filter (1 - g) x[n] + g x[n-1] in the feedback paths only (the
  *    first echo is unfiltered), g = 5 (1 - ratio) / 9;
  *  - the dry and wet levels are cos and sin of (pi / 2) x, x = (balance + 63) / 126.
@@ -37,7 +38,6 @@
 namespace oscairn_fx::delay
 {
 constexpr double designRate = 44100;
-constexpr int maxSamples44 = 65535;
 
 // The longest line either delay mode reaches: the cross delay's 1638.3 ms; buffers size for it.
 constexpr double maxLineMs{1638.3};
@@ -75,6 +75,20 @@ inline long noteTenths(int note, double tempo)
     return (long)std::floor(noteBeats[std::clamp(note, 0, 19)] * 600000 / std::clamp(tempo, 20.0, 999.0) + 1e-6);
 }
 
+// The tempo modes' long notes: while a line (the note plus its longest offset, in tenths of a ms)
+// would reach `limit` samples, the note halves, as often as it takes. Each line of the cross and
+// stereo types holds less than 131,072 samples: the tempo cross type's 4 and 5 quarters at
+// 120 BPM play 88,198 and 110,247 samples and 6 quarters halves to 66,148 (tcd_t17/18/19), the
+// stereo type's 6 quarters with lag -28 plays 131,062 and with lag -27 halves to 64,958
+// (ts_t19_lag36/37). The mono type's one line holds less than 262,144 (monoLimit).
+constexpr long lineLimit = 131072;
+inline long halvedNote(long note, long offsetTenths, long limit)
+{
+    while (note > 0 && tenthsSamples(note + offsetTenths) >= limit)
+        note /= 2;
+    return note;
+}
+
 // High damping ratio r (0.1 to 1.0) to the two-tap coefficient: g = 5 (1 - r) / 9, so 0.1 puts
 // a zero at Nyquist and 1.0 is off (fx16, fx17: within 0.001 of a free fit at every value).
 inline double dampingCoefficient(double ratio) { return 5 * (1 - std::clamp(ratio, 0.1, 1.0)) / 9; }
@@ -89,12 +103,13 @@ inline double squaredBalancePosition(double v)
     return std::atan2(w * w, d * d) / (M_PI / 2);
 }
 
-// A tempo cross line's length in seconds: the note at the tempo plus the lag, by the family's
-// time law (the 44.1 kHz sample count, kept in seconds at other rates).
+// A tempo cross line's length in seconds: the note at the tempo, halved while the line would
+// reach lineLimit, plus the lag, by the family's time law (the 44.1 kHz sample count, kept in
+// seconds at other rates).
 inline double lineSeconds(int note, double tempo, double lagMs)
 {
-    const long n = tenthsSamples(noteTenths(note, tempo) + std::lround(lagMs * 10));
-    return (double)std::min<long>(n, maxSamples44) / designRate;
+    const long lag = std::lround(lagMs * 10);
+    return (double)tenthsSamples(halvedNote(noteTenths(note, tempo), lag, lineLimit) + lag) / designRate;
 }
 
 // A reader of a delay line at a fractional length: integer part from the buffer, the fraction
@@ -414,7 +429,7 @@ template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoC
 
     static int bufferSamples(double rate)
     {
-        return (int)std::ceil(maxSamples44 / designRate * rate) + 2 * Damping::maxK + 8;
+        return (int)std::ceil(lineLimit / designRate * rate) + 2 * Damping::maxK + 8;
     }
     void setLines(double tempo, double)
     {

@@ -14,8 +14,8 @@
  * inverted polarity when negative; the two-tap damping g = 5 (1 - r) / 9 in the feedback
  * path only, its delay taken off the loop so the output taps keep their time; the cosine/sine balance with the tempo types' linear angle position (measured
  * for this type at +-21). The time law is the stereo type's (the note time cut to 0.1 ms, plus
- * the tap's Lag and Diffusion in ms, then the family's tenthsSamples at 44.1 kHz) without its
- * halving: 6 quarters at 120 BPM repeat after 3,000 ms. At other rates the lines keep their
+ * the tap's Lag and Diffusion in ms, then the family's tenthsSamples at 44.1 kHz) with twice its
+ * halving limit: 6 quarters at 120 BPM repeat after 3,000 ms. At other rates the lines keep their
  * length in seconds via the first-order all-pass. The reference's four EQ parameters are not
  * built (plan, known difference 44).
  */
@@ -27,15 +27,16 @@
 
 namespace oscairn_fx::delay
 {
-// This type's line length: the stereo type's sample law (stereoLineSamples) without its halving
-// (the 6-quarter note plays its full 132,297 samples at 120 BPM), clamped there; what the
-// reference holds beyond 3,000 ms is unmeasured.
-constexpr long monoMaxSamples = 132297;
-inline double monoLineSeconds(int note, double tempo, double offsetMs)
+// This type's line holds twice the stereo type's: its note halves only when a tap would reach
+// monoLimit samples (halvedNote), so the 6-quarter note plays its full 132,297 samples at
+// 120 BPM (tmx_tmax), where the stereo type halves it. Only host tempos under about 62 BPM reach
+// the limit, which the recorder cannot (known difference 45).
+constexpr long monoLimit = 2 * lineLimit;
+inline long monoNote(int note, double tempo, double longestOffsetMs)
 {
-    const double ms = noteBeats[std::clamp(note, 0, 19)] * 60000 / std::clamp(tempo, 20.0, 999.0);
-    return (double)std::min(stereoLineSamples(ms, offsetMs), monoMaxSamples) / designRate;
+    return halvedNote(noteTenths(note, tempo), std::lround(longestOffsetMs * 10), monoLimit);
 }
+inline double monoLineSeconds(long note, double offsetMs) { return (double)stereoLineSamples(note, offsetMs) / designRate; }
 template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectTemplateBase<FXConfig>
 {
     enum params
@@ -62,8 +63,8 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
     }
     static constexpr int bufferSamples(double rate)
     {
-        // every tap is capped at monoMaxSamples by monoLineSeconds
-        return (int)std::ceil(monoMaxSamples / designRate * rate) + 2 * Damping::maxK + 8;
+        // every tap stays under monoLimit samples
+        return (int)std::ceil(monoLimit / designRate * rate) + 2 * Damping::maxK + 8;
     }
     static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate); }
     size_t heapBytes() const { return line.buf.size() * sizeof(float); }
@@ -152,12 +153,12 @@ template <typename FXConfig> struct TempoMonoDelay : sst::effects::core::EffectT
         }
         // The taps in seconds kept at the rate; the loop is shorter by the damping filter's
         // delay, so the output taps keep their time at every rate.
-        const int note = (int)std::lround(last[delayTime]);
-        secL = monoLineSeconds(note, lastTempo, last[lag] + last[diffusion]);
-        secR = monoLineSeconds(note, lastTempo, last[lag] - last[diffusion]);
+        const long note = monoNote((int)std::lround(last[delayTime]), lastTempo, last[lag] + std::abs(last[diffusion]));
+        secL = monoLineSeconds(note, last[lag] + last[diffusion]);
+        secR = monoLineSeconds(note, last[lag] - last[diffusion]);
         tapL.setLength(secL * rate);
         tapR.setLength(secR * rate);
-        line.setLength(monoLineSeconds(note, lastTempo, last[lag]) * rate - damp.K);
+        line.setLength(monoLineSeconds(note, last[lag]) * rate - damp.K);
     }
 
     double tempo() const
