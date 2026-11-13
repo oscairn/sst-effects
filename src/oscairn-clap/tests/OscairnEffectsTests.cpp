@@ -2393,11 +2393,11 @@ TEST_CASE("Tempo stereo delay: every echo time measured on the 02 28 renders")
             {"Delay Time", w.note}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", w.diff}, {"Lag", w.lag}, {"Mix", 63}};
         const double seconds = (std::max(w.left, w.right) + 4096) / 44100.;
         std::vector<float> r, rr;
-        delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, r, seconds, 120); // input L plays right
-        auto l = delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, rr, seconds, 120, true); // input R plays left
-        REQUIRE(peak(r) == w.right);
+        auto l = delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, r, seconds, 120); // input L plays left
+        delayImpulseMode(3, "Tempo Stereo Delay", 44100, set, rr, seconds, 120, true);   // input R plays right
         REQUIRE(peak(l) == w.left);
-        REQUIRE(r[L + w.right] == Approx(1.0).epsilon(1e-6));
+        REQUIRE(peak(rr) == w.right);
+        REQUIRE(l[L + w.left] == Approx(1.0).epsilon(1e-6));
     }
 }
 
@@ -2405,8 +2405,10 @@ TEST_CASE("Tempo stereo delay: the lines loop at the note plus Lag, Diffusion mo
 {
     // rs_dfb / rs_dfb2: with feedback, every later echo follows the first by the note plus Lag
     // on each channel (17,476 left / 11,919 right, then +14,698 each); feedback v x 516 / 32768 per
-    // repeat, its sign alternating when negative. The lines cross: input L's repeats alternate
-    // right, left, right, and a centred source gives both channels every repeat.
+    // repeat, its sign alternating when negative. The lines run side by side: input L's repeats
+    // all stay on the left (delay-eq-2026-11-12 ts_st_fb40: a left-only source, nothing on the
+    // right, -4.0 dB per repeat at feedback +40), and a centred source gives both channels every
+    // repeat.
     const double fb = -40 * fbStep;
     const long q = 14698;
     const std::vector<std::pair<const char *, double>> set{
@@ -2421,23 +2423,22 @@ TEST_CASE("Tempo stereo delay: the lines loop at the note plus Lag, Diffusion mo
         REQUIRE(nonzero == 4);
         for (int k = 0; k < 4; ++k)
         {
-            const bool onRight = (k % 2 == 0) != rightIn;
-            const auto &out = onRight ? r : l;
-            REQUIRE(out[L + (onRight ? 11919 : 17476) + q * k] == Approx(std::pow(fb, k)).epsilon(1e-6));
+            const auto &out = rightIn ? r : l;
+            REQUIRE(out[L + (rightIn ? 11919 : 17476) + q * k] == Approx(std::pow(fb, k)).epsilon(1e-6));
         }
     }
     SECTION("A right-input impulse at 48 kHz keeps its time in seconds")
     {
-        const double want = 17476. / 44100 * 48000;
+        const double want = 11919. / 44100 * 48000;
         std::vector<float> r48;
         auto l48 = delayImpulseMode(3, "Tempo Stereo Delay", 48000,
                                     {{"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 63}, {"Mix", 63}}, r48, 1.0, 120, true);
         size_t at = 0;
-        for (size_t i = 1; i < l48.size(); ++i)
-            if (std::abs(l48[i]) > std::abs(l48[at]))
+        for (size_t i = 1; i < r48.size(); ++i)
+            if (std::abs(r48[i]) > std::abs(r48[at]))
                 at = i;
         REQUIRE(std::abs((double)(at - L) - want) <= 1.0);
-        for (float v : r48)
+        for (float v : l48)
             REQUIRE(std::abs(v) < 1e-12);
     }
     SECTION("The dry and wet follow the tempo family's linear balance (measured at -21, +21, +48)")
@@ -2449,7 +2450,7 @@ TEST_CASE("Tempo stereo delay: the lines loop at the note plus Lag, Diffusion mo
             auto out = delayImpulseMode(3, "Tempo Stereo Delay", 44100,
                                         {{"Feedback", 0}, {"High Damping", 1.0}, {"Mix", v}}, rb, 0.6, 120);
             REQUIRE(out[L] == Approx(std::cos(M_PI / 2 * x)).margin(1e-7));
-            REQUIRE(rb[L + 14698] == Approx(std::sin(M_PI / 2 * x)).margin(1e-7));
+            REQUIRE(out[L + 14698] == Approx(std::sin(M_PI / 2 * x)).margin(1e-7)); // input L plays left
         }
     }
 }

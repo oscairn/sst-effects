@@ -2,9 +2,10 @@
  * Oscairn effects (doc/oscairn-plan.md). GPL-3.0-or-later, see ../OscairnEffects.cpp.
  *
  * A tempo-synced stereo delay: the cross delay's signal path (effects/TempoCrossDelay.h,
- * CrossCore) with one note length for both lines, a Lag on both and an L/R Diffusion that
- * lengthens the line playing left and shortens the one playing right by the same ms, and a
- * fixed L&R input feed. Feedback v x 516 / 32768 per crossing, the two-tap feedback damping
+ * CrossCore) with its two lines side by side instead of crossed (input L feeds the line that
+ * plays left, which loops into itself; R the mirror), one note length for both lines, a Lag on
+ * both and an L/R Diffusion that lengthens the left line's output tap and shortens the right's
+ * by the same ms. Feedback v x 516 / 32768 per crossing, the two-tap feedback damping
  * g = 5 (1 - r) / 9 and the cosine/sine balance with the tempo family's linear position are
  * the family's laws, re-measured for this type (plan, section 15, "Tempo Stereo Delay"). The
  * time law is the family's, with this type's offsets (stereoLineSamples, stereoNote). The reference's four EQ parameters are left
@@ -46,8 +47,11 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
     static constexpr int numParams{numParamsEnum};
     static constexpr const char *streamingName{"oscairn-tempo-stereo-delay"};
     static constexpr const char *displayName{"Tempo Stereo Delay"};
-    // No input-select parameter: input L feeds the line playing right, input R the one playing left.
+    // No input-select parameter: input L feeds the line that plays left and loops into itself,
+    // input R the right one; the lines do not cross (delay-eq-2026-11-12 ts_st and ts_st_fb40: a
+    // left-only source echoes on the left alone, at the feedback gain per repeat).
     static constexpr int inputFeed{inLR};
+    static constexpr bool parallelLines{true};
     using CrossCore<FXConfig, TempoStereoDelay>::CrossCore;
 
     static int bufferSamples(double rate)
@@ -63,8 +67,8 @@ template <typename FXConfig> struct TempoStereoDelay : CrossCore<FXConfig, Tempo
         const double lagMs = this->last[lag], diffMs = this->last[diffusion];
         const long note = stereoNote((int)std::lround(this->last[delayTime]), tempo, lagMs + std::abs(diffMs));
         this->secA = this->secB = (double)stereoLineSamples(note, lagMs) / designRate;
-        this->outSecA = (double)stereoLineSamples(note, lagMs - diffMs) / designRate; // plays right
-        this->outSecB = (double)stereoLineSamples(note, lagMs + diffMs) / designRate; // plays left
+        this->outSecA = (double)stereoLineSamples(note, lagMs + diffMs) / designRate; // plays left
+        this->outSecB = (double)stereoLineSamples(note, lagMs - diffMs) / designRate; // plays right
     }
     // The tempo family's balance (measured at -21, +21 and +48 for this type).
     static Balance balance(double v) { return tempoBalance(v); }

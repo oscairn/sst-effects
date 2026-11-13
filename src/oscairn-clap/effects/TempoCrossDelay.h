@@ -300,7 +300,8 @@ enum Input
 // The cross delay's signal path, shared by every mode. A mode (the CRTP argument) supplies its
 // parameter enum and table, `bufferSamples(rate)` and `setLines(tempo, rate)`, which sets secA
 // and secB, the two lines' lengths in seconds. A mode with `outputTaps` also sets outA and outB,
-// where each line is read for the output when that differs from its length in the loop.
+// where each line is read for the output when that differs from its length in the loop; a mode
+// with `parallelLines` does not cross its lines.
 template <typename FXConfig, template <typename> class Mode>
 struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
 {
@@ -349,7 +350,11 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             double pA = oA, pB = oB; // what each line plays: its loop read, or its own output tap
             if constexpr (requires { D::outputTaps; })
                 pA = a.out(tapA), pB = b.out(tapB);
-            const double fA = dampB.run(oB), fB = dampA.run(oA);
+            double fA, fB; // what feeds back into A and into B
+            if constexpr (parallel())
+                fA = dampA.run(oA), fB = dampB.run(oB); // each line into itself
+            else
+                fA = dampB.run(oB), fB = dampA.run(oA);
             const bool left = mode != inR && mode != inRMode2, right = mode == inR || mode == inLR || mode == inRMode2;
             double gA = fb, gB = fb; // into A from B, into B from A
             if (mode == inLMode2)
@@ -368,12 +373,15 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             }
             a.write((float)(xA + gA * fA));
             b.write((float)(xB + gB * fB));
-            L[i] = (float)(dry * l + wet * pB);
-            R[i] = (float)(dry * r + wet * pA);
+            L[i] = (float)(dry * l + wet * (parallel() ? pA : pB));
+            R[i] = (float)(dry * r + wet * (parallel() ? pB : pA));
         }
     }
 
   protected:
+    // A mode with `parallelLines` runs its lines side by side: A loops into itself and plays left,
+    // B into itself and plays right.
+    static constexpr bool parallel() { return requires { D::parallelLines; }; }
     // The input feed: the input-select parameter's value, or the mode's fixed choice when it
     // has no such parameter.
     int inputMode() const
@@ -427,7 +435,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
 
     Line a, b;
     Tap tapA, tapB; // the output reads of a mode with outputTaps
-    Damping dampA, dampB;           // dampA filters A's output on its way into B, dampB the reverse
+    Damping dampA, dampB;           // dampA filters A's output on its way back (into B, or A when parallel)
     std::array<std::array<double, 2>, Damping::maxK + 1> inDelay{};
     int inAt{0};
     bool designed{false};
