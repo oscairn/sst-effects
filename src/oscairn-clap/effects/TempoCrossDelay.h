@@ -7,8 +7,8 @@
  *    right input and plays on the left (R>L). Each line's output feeds the other line back
  *    through the feedback gain v / 63.5 (v the displayed -63..+63), so a left input ping-pongs;
  *  - input L feeds A only, R feeds B only, L&R feeds both. L Mode 2 feeds A only and sends A's
- *    output into B at unity and B's into A at the feedback gain squared (R Mode 2 the mirror),
- *    so each side repeats every two crossings;
+ *    output into B at unity and B's into A at fb |fb| (R Mode 2 the mirror), so each side repeats
+ *    every two crossings and, at negative feedback, inverts once per repeat;
  *  - a line's length in samples at 44.1 kHz is round(T * 44100) + round(lag * 44.1) - 1, T the
  *    note value at the tempo and lag in ms (both lines), at most 65,535 samples;
  *  - high damping is a two-tap filter (1 - g) x[n] + g x[n-1] in the feedback paths only (the
@@ -49,6 +49,16 @@ constexpr double noteBeats[20] = {1. / 12, 3. / 32, 1. / 8, 1. / 6, 3. / 16, 1. 
 // High damping ratio r (0.1 to 1.0) to the two-tap coefficient: g = 5 (1 - r) / 9, so 0.1 puts
 // a zero at Nyquist and 1.0 is off (fx16, fx17: within 0.001 of a free fit at every value).
 inline double dampingCoefficient(double ratio) { return 5 * (1 - std::clamp(ratio, 0.1, 1.0)) / 9; }
+
+// Dry/wet balance v (-63..63) to an equal-power crossfade position: the side being turned down
+// falls with the square of its distance to the end, ((63 - |v|) / 63)^2, the other stays at
+// full level, and the position is the angle of that dry/wet pair (the 02 00 renders, within
+// 0.01 dB from v = -55 to +59). The tempo modes keep their linear (v + 63) / 126.
+inline double squaredBalancePosition(double v)
+{
+    const double d = v > 0 ? (63 - v) / 63 : 1, w = v < 0 ? (63 + v) / 63 : 1;
+    return std::atan2(w * w, d * d) / (M_PI / 2);
+}
 
 // A line's length in seconds (the 44.1 kHz sample count, kept in seconds at other rates).
 inline double lineSeconds(int note, double tempo, double lagMs)
@@ -265,9 +275,9 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
             const bool left = mode != inR && mode != inRMode2, right = mode == inR || mode == inLR || mode == inRMode2;
             double gA = fb, gB = fb; // into A from B, into B from A
             if (mode == inLMode2)
-                gA = fb * fb, gB = 1;
+                gA = fb * std::abs(fb), gB = 1;
             else if (mode == inRMode2)
-                gA = 1, gB = fb * fb;
+                gA = 1, gB = fb * std::abs(fb);
             double xA = left ? l : 0, xB = right ? r : 0;
             if (const int K = dampA.K)
             {
@@ -307,7 +317,7 @@ struct CrossCore : sst::effects::core::EffectTemplateBase<FXConfig>
         lastTempo = tempo();
         const double rate = this->sampleRate();
         fb = std::lround(last[D::feedback]) / 63.5;
-        const double x = (std::lround(last[D::mix]) + 63) / 126.0;
+        const double x = std::clamp(D::balancePosition((double)std::lround(last[D::mix])), 0.0, 1.0);
         dry = std::cos(M_PI / 2 * x);
         wet = std::sin(M_PI / 2 * x);
         const double g = dampingCoefficient(last[D::damping]);
@@ -359,6 +369,8 @@ template <typename FXConfig> struct TempoCrossDelay : CrossCore<FXConfig, TempoC
         this->secA = lineSeconds((int)std::lround(this->last[timeLR]), tempo, this->last[lag]);
         this->secB = lineSeconds((int)std::lround(this->last[timeRL]), tempo, this->last[lag]);
     }
+    // The balance parameter's crossfade position (fx17, 02 10): straight from -63..63 to 0..1.
+    static double balancePosition(double v) { return (v + 63) / 126.0; }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {

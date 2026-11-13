@@ -1953,6 +1953,13 @@ TEST_CASE("Tempo cross delay: the measured routing, times and gains at 44.1 kHz"
         REQUIRE(r[L + q] == Approx(wet).epsilon(1e-6));
         REQUIRE(l2[L + 2 * q] == Approx(wet).epsilon(1e-6));
         REQUIRE(r[L + 3 * q] == Approx(wet * fb * fb).epsilon(1e-6));
+        // at negative feedback the squared leg inverts once per repeat (fx18 dho01, and the
+        // 2026-11-12 review batch's tcd_m2l_n37 / n20: ++--++)
+        auto l3 = delayImpulse(44100, {{"Feedback", -20}, {"High Damping", 1.0}, {"Input", 3}}, r);
+        REQUIRE(l3[L + 2 * q] == Approx(wet).epsilon(1e-6));
+        REQUIRE(r[L + 3 * q] == Approx(-wet * 20 * 20 / 63.5 / 63.5).epsilon(1e-6));
+        REQUIRE(l3[L + 4 * q] == Approx(-wet * 20 * 20 / 63.5 / 63.5).epsilon(1e-6));
+        REQUIRE(r[L + 5 * q] == Approx(wet * std::pow(20 / 63.5, 4)).epsilon(1e-6));
     }
     SECTION("Lag shortens or lengthens both lines; the tempo comes from the transport")
     {
@@ -2246,6 +2253,44 @@ TEST_CASE("Cross delay: the laws measured against the 02 00 renders")
 // ---- Converter frequency scales (decision 17) ----
 #include "converter/FrequencyScales.h"
 #include <chrono>
+
+TEST_CASE("Cross delay: Mode 2 and the balance, as measured")
+{
+    // measurements/qwen-night-2026-11-12/cross_delay_extra (cd_m2*, cd_mix_m48/m21/p21/p48)
+    // and qwen-night-2026-11-12-review/cross_delay (cd_mix_p10/m35/p35/m55/p55/p59).
+    // Mode 2: the fed line answers at unity, crosses at unity, then repeats at fb |fb| per two
+    // crossings: at -37 the reference's signs run ++--++ (cd_m2l_n37, cd_m2r_n37).
+    const size_t q = 22049; // 500.0 ms
+    const double g = -37. / 63.5 * (37. / 63.5);
+    std::vector<float> r;
+    auto l = delayImpulseMode(2, "Cross Delay", 44100,
+                              {{"Time L>R", 500}, {"Time R>L", 500}, {"Feedback", -37}, {"High Damping", 1.0},
+                               {"Mix", 63}, {"Input", 3}},
+                              r, 3.2);
+    REQUIRE(r[L + q] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(l[L + 2 * q] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(r[L + 3 * q] == Approx(g).epsilon(1e-6));
+    REQUIRE(l[L + 4 * q] == Approx(g).epsilon(1e-6));
+    REQUIRE(r[L + 5 * q] == Approx(g * g).epsilon(1e-6));
+    auto l2 = delayImpulseMode(2, "Cross Delay", 44100,
+                               {{"Time L>R", 500}, {"Time R>L", 500}, {"Feedback", -37}, {"High Damping", 1.0},
+                                {"Mix", 63}, {"Input", 4}},
+                               r, 3.2, 0, true);
+    REQUIRE(l2[L + q] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(r[L + 2 * q] == Approx(1.0).epsilon(1e-6));
+    REQUIRE(l2[L + 3 * q] == Approx(g).epsilon(1e-6));
+    // Balance: the reference's wet/dry in dB (echo against its own render's click), equal power.
+    const std::vector<std::pair<double, double>> measured = {
+        {-55, -35.86}, {-48, -24.94}, {-35, -14.09}, {-21, -7.05}, {10, 3.00},
+        {21, 7.04},    {35, 14.09},   {48, 24.93},   {55, 35.85},  {59, 47.89}};
+    for (auto [v, db] : measured)
+    {
+        auto out = delayImpulseMode(2, "Cross Delay", 44100, {{"Time L>R", 500}, {"Feedback", 0}, {"Mix", v}, {"Input", 0}}, r, 0.6);
+        INFO("Mix " << v);
+        REQUIRE(20 * std::log10(r[L + q] / out[L]) == Approx(db).margin(0.05));
+        REQUIRE(r[L + q] * r[L + q] + out[L] * out[L] == Approx(1.0).margin(1e-6));
+    }
+}
 
 TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
 {

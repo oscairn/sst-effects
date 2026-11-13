@@ -4,11 +4,14 @@
  * The cross delay without tempo sync: the same signal path as the tempo cross delay
  * (effects/TempoCrossDelay.h, CrossCore), its two line times in ms (0.1 to 1638.3) instead of
  * note lengths, and no lag. Measured against the 02 00 renders (measurements/
- * qwen-cross-delay-2026-11-11/results.md): the lines are round(ms * 44.1) - 1 samples
- * (msLineSeconds), every other law is the tempo mode's and holds here (crossing times, the
- * v / 63.5 feedback with inverted polarity when negative, the two-tap damping g = 5(1 - r)/9
- * in the feedback path only, the split L/R input feeds, the cos/sin balance), and the EQ
- * parameters change no render (≤ 0.001 dB), so this mode has none — as the tempo mode.
+ * qwen-cross-delay-2026-11-11/, qwen-night-2026-11-12/cross_delay_extra/ and
+ * qwen-night-2026-11-12-review/cross_delay/): the lines are round(ms * 44.1) - 1 samples
+ * (msLineSeconds); the feedback is v / 63.5 with inverted polarity when negative; the damping is
+ * the two-tap g = 5(1 - r)/9 in the feedback path only; the input feeds are split L/R; the
+ * balance turns the far side down by the square of its distance (squaredBalancePosition), not
+ * the tempo mode's linear position (plan, known difference 43). The reference's EQ parameters
+ * are not built: they act on the whole output, dry and wet alike, and their shelf law is not
+ * measured (plan decision 23).
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_CROSSDELAY_H
 #define OSCAIRN_CLAP_EFFECTS_CROSSDELAY_H
@@ -43,6 +46,7 @@ template <typename FXConfig> struct CrossDelay : CrossCore<FXConfig, CrossDelay>
         this->secA = msLineSeconds(this->last[timeLR]);
         this->secB = msLineSeconds(this->last[timeRL]);
     }
+    static double balancePosition(double v) { return squaredBalancePosition(v); }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
