@@ -71,9 +71,21 @@ jobs:
         with:
           path: .cpm-cache
           key: cpm-${{ hashFiles('CMakeLists.txt', 'cmake/*.cmake') }}
+      - name: CPU fingerprint
+        id: cpu
+        run: |
+          # sst-effects-test and the stock renderers build with -march=native on Linux, so a cached
+          # object only runs on a CPU with the same instructions: share ccache only between
+          # runners that support the same set (its own hash holds no CPU information).
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            cpu=$( { uname -m; sed -nE 's/^(model name|Model name|flags|Features)[[:space:]]*:[[:space:]]*(.*)/\2/p' /proc/cpuinfo | sort -u; } | sha256sum | cut -c1-16 )
+          else
+            cpu=$(uname -m) # no -march=native target builds on macOS
+          fi
+          echo "cpu=$cpu" >> "$GITHUB_OUTPUT"
       - uses: hendrikmuhs/ccache-action@v1.2.24
         with:
-          key: oscairn-effects-${{ matrix.os }}-${{ matrix.compiler }}-RelWithDebInfo-${{ matrix.sanitizer }}
+          key: oscairn-effects-${{ matrix.os }}-${{ matrix.compiler }}-RelWithDebInfo-${{ matrix.sanitizer }}-${{ steps.cpu.outputs.cpu }}
           max-size: 1000M
           evict-old-files: job
       - name: Configure
