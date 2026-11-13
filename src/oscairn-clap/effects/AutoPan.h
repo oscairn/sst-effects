@@ -28,7 +28,7 @@
 
 namespace oscairn_fx::rotary
 {
-// The auto pan type's three-band EQ: the indices of its seven parameters.
+// The three-band EQ of the auto pan and tremolo types: the indices of its seven parameters.
 struct InsertEqParams
 {
     int lowFreq, lowGain, highFreq, highGain, midFreq, midGain, midWidth;

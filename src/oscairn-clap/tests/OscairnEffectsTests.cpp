@@ -783,6 +783,18 @@ TEST_CASE("Processing never allocates")
         pan.render(inL, inR, r, {1, 37, 512}, {{5, sp, 9.0}, {700, dir, 3.0}, {9000, mg, 6.0}, {20000, mf, 3000.0}, {30000, mg, 0.0}});
         REQUIRE(allocations == 0);
     }
+    // Tremolo: depth and speed changes, a band switched in, and the input mode flip while playing.
+    {
+        Plugin tr("org.oscairn.effects.tremolo-rotary");
+        tr.set(1, 3);
+        tr.activate(48000);
+        const clap_id sp = paramIdByName(tr.p, "Tremolo", "LFO Speed"), am = paramIdByName(tr.p, "Tremolo", "AM Depth"),
+                      pm = paramIdByName(tr.p, "Tremolo", "PM Depth"), mg = paramIdByName(tr.p, "Tremolo", "Mid Gain"),
+                      im = paramIdByName(tr.p, "Tremolo", "Input Mode");
+        allocations = 0;
+        tr.render(inL, inR, r, {1, 37, 512}, {{5, sp, 9.0}, {700, am, 80.0}, {9000, pm, 60.0}, {20000, mg, 6.0}, {30000, mg, 0.0}, {40000, im, 0.0}});
+        REQUIRE(allocations == 0);
+    }
     // The counter works: an allocation while counting is seen.
     countAllocations = true;
     void *probe = ::operator new(16);
@@ -4084,7 +4096,7 @@ TEST_CASE("Rotary A: the low shelf acts on the rotor, the high shelf on the horn
     }
 }
 
-// ---- Auto Pan (plan, section 15, "Auto Pan") ----
+// ---- Auto Pan and Tremolo (plan, section 15, "Auto Pan" and "Tremolo") ----
 namespace
 {
 // A sine (0.25 peak) at freq through mode `modeId` of the rotary plugin, parameters by name; the right
@@ -4221,16 +4233,16 @@ TEST_CASE("Auto Pan: F/R swings the delay in the turn directions only, at 44.1, 
 
 TEST_CASE("The rotary plugin's insertion modes: Mono feeds both channels the input's mean, Stereo each its own")
 {
-    // A left-only source (batch autopan_c st_*: an element panned hard left): with Stereo
+    // A left-only source (batches autopan_c, trem_c st_*: an element panned hard left): with Stereo
     // the right output stays silent, with Mono both channels carry half the input.
-    for (auto [modeId, module] : {std::pair{2, "Auto Pan"}})
+    for (auto [modeId, module] : {std::pair{2, "Auto Pan"}, {3, "Tremolo"}})
         for (double mode : {0.0, 1.0})
         {
             auto o = modRender(44100, modeId, module, {{"Input Mode", mode}}, 0.5, 3000, true);
             double right = 0;
             for (size_t i = 0; i < o.r.size(); ++i)
                 right = std::max(right, (double)std::abs(o.r[i]));
-            const double gain = 1;
+            const double gain = modeId == 3 ? 1.2589 : 1; // Tremolo's +2 dB
             INFO(module << ", input mode " << mode << ": right peak " << right);
             if (mode == 1)
                 REQUIRE(right == 0);
@@ -4242,8 +4254,8 @@ TEST_CASE("The rotary plugin's insertion modes: Mono feeds both channels the inp
 TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, at 44.1 kHz and within the rate gate")
 {
     // First-order shelves (Rotary A's law) and a peak with Q = width x 10^(-|gain| / 40), modulation
-    // off: the reference's levels against its dry input (batch autopan_c eq*, a saw at velocity 50)
-    // within 0.05 dB at 44.1 kHz
+    // off: the reference's levels against its dry input (batches autopan_c and trem_c eq*, a saw at
+    // velocity 50; Tremolo 2 dB above Auto Pan at every setting) within 0.05 dB at 44.1 kHz
     // (tolerance proposed); at 48, 96 and 192 kHz within the rate gate of the 44.1 kHz levels.
     struct Setting { double loHz, loDb, hiHz, hiDb, midHz, midDb, width; std::vector<std::pair<double, double>> ref; };
     const std::vector<Setting> pan{
@@ -4255,7 +4267,16 @@ TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, a
         {250, 0, 5000, 0, 1600, 12, 0.7, {{110.00, 0.58}, {330.00, 3.57}, {990.00, 10.39}, {2970.00, 9.48}, {8910.01, 2.38}}},
         {250, 0, 5000, 0, 630, -12, 2, {{110.00, -0.48}, {330.00, -4.28}, {990.00, -6.35}, {2970.00, -0.70}, {8910.01, -0.06}}},
         {250, 0, 5000, 0, 4000, 6, 5, {{110.00, -0.00}, {330.00, 0.00}, {990.00, 0.03}, {2970.00, 1.04}, {8910.01, 0.11}}}};
-    for (auto [modeId, module, settings] : {std::tuple{2, "Auto Pan", &pan}})
+    const std::vector<Setting> trem{
+        {250, 12, 5000, 0, 1600, 0, 0.7, {{110.00, 13.29}, {330.00, 10.07}, {990.00, 4.76}, {2970.00, 2.42}, {8910.01, 2.03}}},
+        {250, -12, 5000, 0, 1600, 0, 0.7, {{110.00, -9.29}, {330.00, -6.07}, {990.00, -0.76}, {2970.00, 1.58}, {8910.01, 1.96}}},
+        {250, 0, 5000, 12, 1600, 0, 0.7, {{110.00, 2.03}, {330.00, 2.25}, {990.00, 3.81}, {2970.00, 8.73}, {8910.01, 13.08}}},
+        {250, 0, 5000, -12, 1600, 0, 0.7, {{110.00, 1.97}, {330.00, 1.75}, {990.00, 0.19}, {2970.00, -4.74}, {8910.01, -9.10}}},
+        {250, 0, 2000, 6, 1600, 0, 0.7, {{110.00, 2.04}, {330.00, 2.32}, {990.00, 3.99}, {2970.00, 6.86}, {8910.01, 7.88}}},
+        {250, 0, 5000, 0, 1600, 12, 0.7, {{110.00, 2.57}, {330.00, 5.56}, {990.00, 12.39}, {2970.00, 11.48}, {8910.01, 4.38}}},
+        {250, 0, 5000, 0, 630, -12, 2, {{110.00, 1.52}, {330.00, -2.28}, {990.00, -4.35}, {2970.00, 1.30}, {8910.01, 1.94}}},
+        {250, 0, 5000, 0, 4000, 6, 5, {{110.00, 2.00}, {330.00, 2.00}, {990.00, 2.03}, {2970.00, 3.04}, {8910.01, 2.11}}}};
+    for (auto [modeId, module, settings] : {std::tuple{2, "Auto Pan", &pan}, {3, "Tremolo", &trem}})
     {
         auto level = [&](double rate, const Setting &s, double hz) {
             auto o = modRender(rate, modeId, module,
@@ -4283,6 +4304,74 @@ TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, a
                     REQUIRE(std::abs(level(rate, s, hz) - at44) < (db > peak - 20 ? 0.05 : 0.5));
             }
         }
+    }
+}
+
+TEST_CASE("Tremolo: +2 dB at the LFO's peak, a sine AM to 1 - depth, at the set speed, at 44.1, 48 and 96 kHz")
+{
+    // Batches trem_b / trem_c (0.67 Hz): the gain's peak is 1.2589 (+2 dB, also with both depths 0),
+    // its trough 1 - AM depth times that (AM 64 and 127: 0.4959 and 0.000 of the peak), a raised
+    // cosine (no third harmonic); within 0.5% of the peak (tolerance proposed). Speed within 0.3%.
+    const double f = 0.67291;
+    for (double rate : {44100.0, 48000.0, 96000.0})
+        for (auto [am, trough] : {std::pair{0.0, 1.0}, {100.0 * 64 / 127, 0.4959}, {100.0, 0.0}})
+        {
+            auto o = modRender(rate, 3, "Tremolo", {{"LFO Speed", f}, {"AM Depth", am}}, 6.5);
+            const auto g = gainTrack(o.l, rate);
+            const double hi = *std::max_element(g.begin() + 100, g.end()), lo = *std::min_element(g.begin() + 100, g.end());
+            INFO(rate << " Hz, AM " << am << ": peak " << hi << ", trough " << lo);
+            REQUIRE(std::abs(hi / 1.2589 - 1) < 0.005);
+            REQUIRE(std::abs(lo / hi - trough) < 0.005);
+            if (am > 0)
+            {
+                const double third = std::abs(fundamental(g, 3 * f, 100)), first = std::abs(fundamental(g, f, 100));
+                REQUIRE(third / first < 0.01);
+                REQUIRE(std::abs(rotationHz(crossings(g, 100), 100, (double)g.size()) / f - 1) < 0.003);
+            }
+        }
+}
+
+TEST_CASE("Tremolo: PM swings the delay by 62 samples at 44.1 kHz at full depth, shortest at the gain's peak")
+{
+    // Batch trem_c pm4-pm124 (PM raw v moves the delay by 2 floor(v / 4) samples at 44.1 kHz, peak):
+    // the reference's peak swing at full depth is 1.411 ms on its fundamental and half way (16 of 31
+    // steps) 0.729 ms; within 1% at 44.1, 48 and 96 kHz (tolerance proposed). With AM and PM at
+    // full depth (ampm) the shortest delay comes at the gain's peak.
+    for (double rate : {44100.0, 48000.0, 96000.0})
+        for (auto [pct, ms] : {std::pair{100.0, 1.411}, {100.0 * 16 / 31, 0.729}})
+        {
+            auto o = modRender(rate, 3, "Tremolo", {{"LFO Speed", 0.67291}, {"PM Depth", pct}}, 4, 150);
+            const auto d = delayTrack(envelopeAt(o.l, rate, 150), 150);
+            const double swing = peakToPeak(d, 100, d.size()) / 2;
+            INFO(rate << " Hz, PM " << pct << " %: peak swing " << swing << " ms");
+            REQUIRE(std::abs(swing / ms - 1) < 0.01);
+        }
+    auto o = modRender(44100, 3, "Tremolo", {{"LFO Speed", 0.67291}, {"PM Depth", 100}, {"AM Depth", 50}}, 4, 150);
+    const auto z = envelopeAt(o.l, 44100, 150);
+    const auto d = delayTrack(z, 150);
+    std::vector<double> g;
+    for (auto &c : z)
+        g.push_back(std::abs(c));
+    const double lag = std::arg(fundamental(g, 0.67291, 100) / fundamental(d, 0.67291, 100)) * 180 / M_PI;
+    INFO("gain against delay: " << lag << " degrees");
+    REQUIRE(std::abs(std::abs(lag) - 180) < 2);
+}
+
+TEST_CASE("Tremolo: the phase difference puts the right channel ahead, for AM and PM alike")
+{
+    // Batches trem_b/c/d/e ph*: the right channel's LFO leads the left's by the phase difference
+    // (the converter snaps the platform's value to the reference's sixteen phases); within 1 degree.
+    const double f = 0.67291;
+    for (double deg : {-135.0, -45.0, 30.0, 90.0, 180.0})
+    {
+        auto o = modRender(44100, 3, "Tremolo", {{"LFO Speed", f}, {"AM Depth", 100}, {"LFO Phase Difference", deg}}, 6.5);
+        const double am = std::arg(fundamental(gainTrack(o.r, 44100), f, 100) / fundamental(gainTrack(o.l, 44100), f, 100)) * 180 / M_PI;
+        auto p = modRender(44100, 3, "Tremolo", {{"LFO Speed", f}, {"PM Depth", 100}, {"LFO Phase Difference", deg}}, 6.5, 150);
+        const double pm = std::arg(fundamental(delayTrack(envelopeAt(p.r, 44100, 150), 150), f, 100) /
+                                   fundamental(delayTrack(envelopeAt(p.l, 44100, 150), 150), f, 100)) * 180 / M_PI;
+        INFO(deg << " degrees: AM " << am << ", PM " << pm);
+        REQUIRE(std::abs(std::remainder(am - deg, 360)) < 1);
+        REQUIRE(std::abs(std::remainder(pm - deg, 360)) < 1);
     }
 }
 
@@ -4348,3 +4437,65 @@ TEST_CASE("Auto Pan: every parameter's value text parses back")
     REQUIRE(checked == 65); // five points on each of the mode's thirteen parameters, no vacuous pass
 }
 
+TEST_CASE("Tremolo state round-trips")
+{
+    Plugin a(rotaryId);
+    a.set(1, 3);
+    for (auto [n, v] : {std::pair{"LFO Speed", 3.2}, {"AM Depth", 60}, {"PM Depth", 35},
+                        {"Low Shelf Frequency", 125}, {"Low Shelf Gain", 4}, {"Mid Frequency", 900},
+                        {"Mid Gain", -3}, {"Mid Width", 2.5}, {"High Shelf Frequency", 6000},
+                        {"High Shelf Gain", 2}, {"LFO Phase Difference", -90}, {"Input Mode", 0}})
+        a.set(paramIdByName(a.p, "Tremolo", n), v);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin b(rotaryId);
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
+    auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 0; i < params->count(a.p); ++i)
+    {
+        clap_param_info_t info;
+        params->get_info(a.p, i, &info);
+        REQUIRE(a.get(info.id) == b.get(info.id));
+    }
+    std::vector<float> inL, inR, ra, rb;
+    signal(24000, inL, inR);
+    a.activate();
+    b.activate();
+    REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+}
+
+TEST_CASE("Tremolo: every parameter's value text parses back")
+{
+    Plugin pl(rotaryId);
+    pl.set(1, 3);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    int checked = 0;
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if ((info.id >> 8) != 3)
+            continue;
+        for (double t : {0., .25, .5, .75, 1.})
+        {
+            double v = info.min_value + t * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            char text[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, v, text, sizeof(text)));
+            double back = NAN;
+            INFO(info.name << " at " << v << ": \"" << text << "\"");
+            REQUIRE(params->text_to_value(pl.p, info.id, text, &back));
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                REQUIRE(back == v); // a label must select the value it came from
+            char again[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, back, again, sizeof(again)));
+            REQUIRE(!std::strcmp(text, again));
+            ++checked;
+        }
+    }
+    REQUIRE(checked == 60); // five points on each of the mode's twelve parameters, no vacuous pass
+}

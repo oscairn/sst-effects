@@ -378,7 +378,7 @@ inline void shelf(Biquad &f, double rate, double hz, double gainDb, bool high)
 // First-order shelves, bilinear at 44.1 kHz with K = tan(pi f / 44100): a boost puts the pole at
 // K and the zero at K x gain (low: towards DC; high: K / gain, towards Nyquist), a cut the zero
 // at K and the pole beyond it (the five-band shelf at slope 0.5 has the same response). Rotary A and
-// the auto pan mode use it.
+// the auto pan and tremolo modes use it.
 inline void firstOrderShelf(Biquad &b, double hz, double db, bool high)
 {
     const double K = std::tan(M_PI * std::min(hz, 0.49 * designRate) / designRate), A = std::pow(10.0, std::abs(db) / 20);
