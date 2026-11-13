@@ -559,6 +559,9 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     published build should get a new version, and be signed (`oscairn-sign`) with a key of Jacob's.
     Since 2026-11-05 a plugin's version is bumped when its sound or memory changes (Reverb 0.2.0
     with Hall A, 0.4.0 with its rebuild, 0.5.0 with its fixed filters); signing is still open.
+    Since 2026-11-12 (Jacob) a plugin's version also changes whenever its shipped binary does,
+    including when it changed only because it shares the bundle with a plugin that did: package
+    0.2.1 carries Reverb 0.5.3, EQ 0.1.3, Delay 0.2.1, Dynamics 0.2.3 and Tremolo & Rotary 0.2.1.
 25. **Decided (Jacob, 2026-11-05): fix the circuit-style compressor before shipping it. Done
     (2026-11-06):** rebuilt on the reference's structure (section 15, "Circuit compressor
     rebuilt on the reference's structure"). A fresh hold-out (fx26, 20 random settings, four
