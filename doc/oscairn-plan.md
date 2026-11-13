@@ -2336,7 +2336,26 @@ Structure, as the measurements show it:
 - In L/R the LFO is a sine: u = steepness x (0.069 - cos), clipped to [0, 1], so each channel is
   fully on for 48% of the period and falls with a steepness measured at every wave (0.85 at wave 0,
   rising smoothly to 1.644 at 17, then 1.93, 2.07, 2.55, 3.08, 3.64, 4.26, 5.13, 6.08, 7.09, 8.69 and
-  34 at 28, nearly a switch). At wave 0 the far channel only reaches 0.091 (lr_w0).
+  34 at 28, nearly a switch). At wave 0 the far channel only reaches 0.091 (lr_w0). Exactly
+  (batch autopan_lr, 2026-11-12: L/R depth 64 so neither gain reaches 0, the left/right gain ratio
+  sample by sample, fitted to 1e-4 of its logarithm): u = min(1, F^2 max(0, 0.46874 (1 - cos) -
+  0.4375)), F = (2730 + 32 n) / 2048 with n = 2 wave + 1 up to wave 17 (fitted 0.99, 18.98, 34.98 at
+  waves 0, 9, 17) and n = 45, 50, 65, 80, 95, 110, 130, 150, 170, 200 and 755 at waves 18-28 (fitted
+  within 0.4 of those; wave 28 754.6). So the threshold is 1/15 of the sine's range (the fitted 0.069)
+  and the steepness 0.46874 F^2 (0.852 at wave 0, 1.656 at 17, 9.29 at 27, 80.7 at 28: the old fits
+  ran low where a 9 ms window straddled the edges, known difference 51).
+- The output is the input one sample late, with no F/R; the F/R delay reads with linear
+  interpolation (batch autopan_lr's sample-by-sample ratio holds with the common one-sample delay;
+  the interpolation kind is not separable in these recordings: the plugin reads linearly, as Rotary
+  A's taps, whose waveform matches the reference's).
+- The LFO starts when the type loads (the plugin: at activation) a quarter turn before the left
+  channel's peak attenuation in L<>R (the left channel at half attenuation, rising), two samples on
+  at the first output (known difference 48; the reference's load instant is not visible in the
+  recordings, so the start is not measured against them).
+- An L/R depth change moves by at most 2^-12 per sample: frexp-scaled steps of 2^-14 x 2^(2 - e) of
+  the difference, a quarter of the rest near the end, so a full step takes about 140 ms (batch x
+  ap_lr_step, the depth stepped 0 to 127 by the wheel: the left gain 0.680, 0.521, 0.376, 0.197 at
+  50, 75, 100, 150 ms against the law's 0.663, 0.512, 0.365, 0.19 through a 9 ms window).
 - In the turn directions only, F/R depth adds a delay that grows with the same u: quieter is
   further away, a Doppler swing (fr127, fr64, fr8: 31, 16 and 2 steps of 4; none in L<>R, ap_fr,
   or L/R, fr127_d5). The level does not change with F/R depth alone.
@@ -2349,7 +2368,7 @@ Structure, as the measurements show it:
 | L/R depth: gain 1 - (v / 127) u | ap_depth, lr_d64 (v 64), the full-depth probes | depth 0.5040 fitted, 64 / 127 = 0.5039 |
 | Wave: u = min(1, (1 + w / 128)^2 (1 - triangle) / 2) | w0, w3, w10, w24, w28, ap_wave06, ap_wave15, ap_slow | slope within 0.3% of the law at every wave (above) |
 | Directions: phase offsets 0/180, 60/0, 0/60, 90/0, 0/90, 0/180 degrees (left/right) | dir1-4, dir1_w20, dir3_w20, w*, lr_* | within 0.05 degrees of the plugin's (L/R phase, the plugin against the reference) |
-| L/R: a sine with threshold 0.069 and a measured steepness per wave | lr_w0-28 (every wave) | model fit rms 0.24-0.87% of full gain per wave (wave 28: 1.7%) |
+| L/R: a sine with threshold 0.069 and a measured steepness per wave | lr_w0-28 (every wave) | model fit rms 0.24-0.87% of full gain per wave (wave 28: 1.7%); replaced 2026-11-12 by the slope law F = (2730 + 32 n) / 2048 above (autopan_lr: rms 6e-5 to 4e-4 of the log gain ratio per wave) |
 | F/R: delay up to 124 samples at 44.1 kHz times the F/R depth (4 floor(v / 4) samples), times u, in the turn directions only | fr127, fr64, fr8, fr127_d4w20, fr_lr_d3, ap_turn | fitted 123.5, 63.7, 7.96 samples for 124, 64, 8; the plugin's swing within 0.4% of the reference's through the same analysis (fr8: 3.7%, a 0.18 ms swing) |
 | EQ: first-order shelves, peak with Q = width x 10^(-abs(gain) / 40), coefficients in 16-bit steps | eq0-eq9, autopan_d mid* | every harmonic within 20 dB of the peak within 0.010 dB (eq0-eq9, mid315w2, mid1600w12, mid100w5, mid10kw3); without the steps the peak at 315 Hz, width 12 misses by 1.25 dB and at 100 Hz, width 5 by 2.70 dB |
 | Mono / Stereo | st_mono, st_stereo, st_mono_d3 | the right output silent with Stereo; Mono half the left input in both, within 0.14 dB |
@@ -2385,8 +2404,8 @@ unused):
 
 | Raw parameter | Plugin parameter | Law |
 | --- | --- | --- |
-| 1 LFO Speed (0-127) | LFO Speed, Hz | the Data List's table 1 at v (2.65 v / 63 for v <= 63, as Rotary A's slow speeds) |
-| 2 L/R Depth | L/R Depth, % | 100 v / 127 |
+| 1 LFO Speed (0-127) | LFO Speed, Hz | s(v), Rotary A's speed law (16 v x 44100 / 2^24 for v <= 63, 0.016% below 2.65 v / 63; section "Rotary A rebuilt on the measured structure") |
+| 2 L/R Depth | L/R Depth, % | 100 trunc(32768 v / 127) / 32768 (at most 0.003 points below 100 v / 127) |
 | 3 F/R Depth | F/R Depth, % | 100 floor(v / 4) / 31 |
 | 4 Pan Direction (0-5) | Pan Direction | v (L<>R, L>>R, L<<R, L turn, R turn, L/R) |
 | 5 LFO Wave (0-28) | LFO Wave | v |
@@ -2415,6 +2434,15 @@ coefficient steps (0.068 dB at 220 Hz for 315 Hz at width 12). Rotary A's contex
 is bit-identical (its renders at 44.1 and 96 kHz compared before and after, and its tests).
 Memory: 9,428 bytes per context at 44.1 kHz (two 1,024-sample lines), 68,468 at other rates (the
 EQ's matcher). Tremolo & Rotary plugin version 0.2.0 (decision 24).
+
+2026-11-12: "Auto Pan: direction L/R's slope per wave, and the LFO's start, sample for sample" (ten
+waves at L/R depth 64 against the measured F^2 within 0.003 of the gain, 0.006 at wave 28; fails
+with the old threshold law, 0.27, with the LFO starting at phase 0, 0.46, and with n = 750 at wave
+28, 0.009); "Auto Pan: the output is the input one sample late, and the F/R delay reads it
+linearly" (within 1e-6; -6.37 dB at 15 kHz for a held 0.496-sample fraction within 0.05 dB; fails
+with no delay, 0.036, and with the read rounded to whole samples, 6.35 dB); "Auto Pan: an L/R depth
+change moves at a bounded rate" (within 0.01 of the law at 10-250 ms, 44.1 and 96 kHz; fails with
+the depth stepping, 0.90). The direction L/R test above passes unchanged.
 
 ### Tremolo (built 2026-11-12)
 
@@ -2557,12 +2585,12 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 45 | Tempo Stereo and Tempo Mono Delay (02 28, 02 20), and Tempo Cross Delay (02 10): the longest lines | 02 28 halves the note time when the longer line would reach a threshold between 131,063 and 131,106 samples (ts_t19_lag36/37: 131,062 whole, 131,106 halved to 64,958); 02 10 halves each line at the same length (tcd_t17/18/19: 88,198 and 110,247 whole, 132,297 halved to 66,148). The plugin halves at 131,072 (2^17), as often as it takes. 02 20 does not halve at 132,297; the plugin's limit for its one line is 262,144, twice the stereo type's | Whether the notes halve more than once, and 02 20's own limit, are reached only at host tempos under about 60 BPM; the recorder's host runs at 120 BPM | Threshold measured to 44 samples; repeated halving and 02 20's limit inferred (2026-11-12; was a cap at 65,535 for 02 10 and a clamp at 132,297 for 02 20) | review batches `tempo_stereo` `rs_t19*`, `tempo_mono` `tmx_t18`, `tmx_tmax`; delay-eq-2026-11-12 `ts_t19_lag36/37`, `tcd_t17/18/19` | `halvedNote`, `lineLimit`, `monoLimit` |
 | 46 | Cross, L/R and L/C/R Delay (02 00, 02 40, 02 50): the ms time law's rounding | Was one sample (≤ 0.023 ms) where ms × 44.1 is not whole: round(ms × 44.1) − 1 against the reference's floor(ms × 10 × c), c between 4.40990 and 4.40994 (02 40: 0.1 / 11.3 / 29.1 / 57.9 ms are 4 / 498 / 1,283 / 2,553 samples; 1,111.1 / 1,414.1 / 1,555.5 / 1,638.3 ms are 48,998 / 62,360 / 68,596 / 72,247) | One time law for the family: floor(t × 18063 / 4096) for t tenths of a ms, the one 12-bit fixed-point factor inside both brackets (the tempo types' 4.409908–4.409915 too) | Resolved 2026-11-12: all six modes use `tenthsSamples`; every measured time of the six types fits it | delay_lr `lr_tmax`, `lr_hold_grid`; review batches `lr_law_a/b`, `delay_lcr`; delay_lcr `lcr_tmax`; qwen-cross-delay-2026-11-11 `cd_time_max` | `tenthsSamples`, `msLineSeconds` |
 | 47 | L/C/R and Tempo Mono Delay (02 50, 02 20): the line's feed with a true stereo input | None: both feed their one line the mean (l + r) / 2, as the plugin does. With an AWM2 saw panned hard left (a stereo signal at the insertion), wet only, both types echo on both channels at −5.93 dB against the source's left channel, where the one-channel feeds of 02 00, 02 10, 02 28 and 02 40 in the same batch sit at +0.09 dB: 6.02 dB lower, the mean | The click probes drive both channels alike (panned after the insertion) | Resolved 2026-11-12 (measured; no change) | delay-eq-2026-11-12 `lcr_st`, `tm_st`, `none_st`; `analyse.py` | `LcrDelay::processBlock`, `TempoMonoDelay::processBlock` |
-| 48 | Auto Pan, Tremolo: the LFO's phase at activation | The reference's LFO starts when the performance loads (in these probes about 0.45 s before the note; Tremolo then 214 degrees past its peak); the plugin's starts at its peak when the mode is activated | Not measured beyond the probes' onsets | Unmeasured | autopan_b, trem_b phases at three speeds | `initialize` |
-| 49 | Auto Pan, Tremolo: the modulated delay's centre | The reference's delay against its dry path is not measured (the types have no dry/wet mix); the plugin's tap is at least one sample, and with F/R or PM at 0 the input passes with no delay | Unmeasured | Unmeasured | — | `processBlock` |
+| 48 | Auto Pan, Tremolo: the LFO's phase at activation | The reference's LFO starts when the type loads (in these probes about 0.45 s before the note); Auto Pan's plugin LFO now starts at activation a quarter turn before the left channel's peak attenuation (two samples on), Tremolo's at its peak | The recordings do not show the load instant, so neither start is compared with them; Tremolo's relation of LFO phase to gain at load is not found | Auto Pan: set (2026-11-12), not measured; Tremolo: open | autopan_b, trem_b phases at three speeds | `initialize` |
+| 49 | Auto Pan, Tremolo: the modulated delay's centre | Auto Pan: the output is the input one sample late plus the F/R swing (2026-11-12; autopan_lr's sample ratios hold with it). Tremolo: with PM at 0 the input passes with no delay, with PM the tap is at least a sample; the reference's is not measured (the types have no dry/wet mix) | Unmeasured for Tremolo | Auto Pan resolved; Tremolo unmeasured | autopan_lr | `processBlock` |
 | 50 | (Resolved 2026-11-12.) The insertion modes: EQ mid band at low centres | Was 1.25 dB at 330 Hz (315 Hz, width 12, +12 dB), 0.19 dB at width 2, 2.70 dB at 110 Hz (100 Hz, width 5), 0.075 dB at 630 Hz; now every EQ probe within 0.010 dB | The coefficients are 16-bit words (1, 2 and 4 integer bits for the low shelf, peak and high shelf) with a rounding-sum correction; at low centres the steps move the peak | Resolved | autopan_c eq*, autopan_d mid*, trem_c eq*; scratch `eqq.py` | `eq::roundToSteps`, `insertEq` |
-| 51 | Auto Pan: direction L/R at its steepest waves | The steepness per wave is fitted from 9 ms analysis windows; at waves 24-28 the edges take a few milliseconds, and wave 28's steepness fits about as well anywhere from 34 to 65; pointwise gain errors up to 6 dB on the edges, rms within 1.6% of full gain | The analysis' time resolution | Partly resolved | autopan_d lr_w24-28; `lrfit2.py` | `lrSteepness` |
+| 51 | (Resolved 2026-11-12.) Auto Pan: direction L/R at its steepest waves | Was: steepness fitted from 9 ms windows, wave 28 anywhere from 34 to 65 | The slope law F = (2730 + 32 n) / 2048 with n measured per wave (autopan_lr, every wave's F^2 within 0.4 of a whole n; wave 28 n = 755) | Resolved | autopan_lr; scratch `lrfit.py`, `w28.py` | `lrSlope` |
 | 52 | Auto Pan: isolated spikes in the reference's turn directions | ho2 (R turn, F/R 70, L/R 112, high shelf +10 dB): single 20-sample windows off by up to 0.22 of full gain, 1.1% of the windows | Unknown; the flat-EQ F/R probes show none, and their noise between harmonics matches the plugin's within 0.5 dB | Unresolved | autopan_c ho2; `cmp.py` | — |
-| 53 | Auto Pan, Tremolo: parameter changes | Applied from the next block without smoothing (a depth, speed or direction change steps the gain or the delay); the reference's smoothing is not measured | Unmeasured | Unmeasured | — | `processBlock` |
+| 53 | Auto Pan, Tremolo: parameter changes | Auto Pan's L/R depth moves at a bounded rate (2026-11-12, batch x ap_lr_step); every other change (speed, direction, wave, F/R depth, EQ, and every Tremolo parameter) applies from the next block without smoothing; the reference's smoothing of those is not measured | Unmeasured beyond the L/R depth | L/R depth resolved; the rest unmeasured | batch x ap_lr_step | `processBlock` |
 | 54 | Auto Pan, Tremolo: the reference's output clip | Two probes with an EQ band at +12 dB clipped at full scale at the instrument's output (autopan_b ap_holdout3, trem_b tr_eq); whether the effect itself clips (as Rotary A's does, known difference 41) is not measured; the plugin does not clip | Unmeasured | Unmeasured | ap_holdout3, tr_eq | — |
 | 55 | Delay modes: the last hundredths of a dB in the EQ and the levels | The EQ's octave bands sit up to 0.029 dB off the first-order shelves (02 00 at D=W before the echo; 0.008–0.020 dB elsewhere, harmonics within 0.012 dB at the 95th percentile); the dry-only path is −0.001 dB and the wet-only echo −0.002 dB against unity, where the plugin is exact | Not found; below every gate (the EQ target is 0.1 dB) | Reported (2026-11-12) | delay-eq-2026-11-12; `analyse.py` | `OutputEq`, `msBalance`, `tempoBalance` |
 

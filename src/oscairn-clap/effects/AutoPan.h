@@ -11,11 +11,14 @@
  *    ahead; L turn and R turn: a quarter turn ahead);
  *  - per channel an attenuation u in [0, 1]: in directions L<>R to R turn, a triangle from 0 (the
  *    LFO's peak) to 1 (its trough) times (1 + wave / 128)^2, clipped at 1, so higher waves dwell
- *    longer at silence; in direction L/R, a sine's distance below a fixed threshold times a
- *    measured steepness per wave, clipped to [0, 1];
- *  - the channel's gain is 1 - (L/R depth) u; in the turn directions its delay also grows by the
- *    F/R depth times u (a Doppler swing: quieter is further away), the other directions have none.
- * Everything is in seconds and hertz, so every sample rate behaves as 44.1 kHz does.
+ *    longer at silence; in direction L/R, a sine's distance below a fixed threshold times a slope
+ *    per wave, clipped to [0, 1];
+ *  - the channel's gain is 1 - (L/R depth) u (a depth change moving at a bounded rate), and its
+ *    output is the input one sample late; in the turn directions the delay also grows by the F/R
+ *    depth times u (a Doppler swing: quieter is further away, linear interpolation), the other
+ *    directions have none.
+ * The LFO starts at activation (the reference's starts when the type loads). Everything is in
+ * seconds and hertz, so every sample rate behaves as 44.1 kHz does.
  */
 #ifndef OSCAIRN_CLAP_EFFECTS_AUTOPAN_H
 #define OSCAIRN_CLAP_EFFECTS_AUTOPAN_H
@@ -48,11 +51,12 @@ template <typename Last> void insertEq(std::array<eq::Biquad, 3> &bands, const L
 inline constexpr int panLineSize = 1024;
 // Full F/R depth: the delay grows by this much (124 samples at 44.1 kHz) at full attenuation.
 inline constexpr double frFullSeconds = 124 / 44100.0;
-// Direction L/R: the cosine below which a channel starts to fall, and the steepness per wave.
-inline constexpr double lrThreshold = 0.069;
-inline constexpr double lrSteepness[29] = {0.8499, 0.8897, 0.9304, 0.9716, 1.014, 1.057, 1.101, 1.146, 1.192, 1.239,
-                                           1.286,  1.335,  1.384,  1.434,  1.485, 1.537, 1.59,  1.644, 1.925, 2.074,
-                                           2.552,  3.075,  3.644,  4.256,  5.13,  6.08,  7.089, 8.685, 34.13};
+// The attenuation's slope factor F (u = min(1, F^2 x shape)): in directions L<>R to R turn 1 + wave / 128
+// on a triangle scaled by 0.99990; in direction L/R (2730 + 32 n) / 2048 on 0.46874 (1 - cos) - 0.4375,
+// n = 2 wave + 1 up to wave 17 and measured above (autopan_lr: every wave's F^2 within 0.4 of a whole n).
+inline constexpr double triScale = 2 * (32767.0 / 32768) * (16383.0 / 32768), lrScale = 0.46875 * 32767 / 32768, lrOffset = 0.4375;
+inline constexpr int lrSteps[11] = {45, 50, 65, 80, 95, 110, 130, 150, 170, 200, 755};
+inline double lrSlope(int wave) { return (2730 + 32 * (wave <= 17 ? 2 * wave + 1 : lrSteps[wave - 18])) / 2048.0; }
 
 template <typename FXConfig> struct AutoPan : eq::SeriesEq<FXConfig, 3, 13, AutoPan<FXConfig>>
 {
@@ -82,8 +86,11 @@ template <typename FXConfig> struct AutoPan : eq::SeriesEq<FXConfig, 3, 13, Auto
 
     void initialize()
     {
+        depthNow = NAN;
         Base::initialize();
-        phase = 0;
+        // The LFO starts when the type loads, at its peak attenuation's quarter turn before (L<>R: the
+        // left channel at half attenuation, rising), and has turned two samples by the first output.
+        phase = 0.25 + 2 * lfoHz / designRate;
         for (auto &c : line)
             std::fill(std::begin(c), std::end(c), 0.f);
         w = 0;
@@ -93,18 +100,28 @@ template <typename FXConfig> struct AutoPan : eq::SeriesEq<FXConfig, 3, 13, Auto
     {
         Base::processBlock(L, R); // the EQ
         const double inc = lfoHz / this->sampleRate(), swing = frSeconds * this->sampleRate();
+        const double per = designRate / this->sampleRate();
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
+            // A depth change moves at most 2^-12 per 44.1 kHz sample (a full step in about 140 ms).
+            if (const double d = depth - depthNow; std::abs(d) > 1e-8)
+            {
+                int e;
+                std::frexp(d, &e);
+                depthNow += std::min(0.25, 0x1p-14 * std::ldexp(1.0, 2 - e) * per) * d;
+            }
             const float in[2] = {mono ? 0.5f * (L[i] + R[i]) : L[i], mono ? 0.5f * (L[i] + R[i]) : R[i]};
             double out[2];
             for (int c = 0; c < 2; ++c)
             {
                 double x = phase + offset[c];
                 x -= std::floor(x);
-                const double u = std::clamp(lr ? lrK * (lrThreshold - std::cos(2 * M_PI * x)) : triK * 2 * std::min(x, 1 - x), 0.0, 1.0);
+                const double shape = lr ? lrScale * 2 * rotation(x + 0.75) - lrOffset : triScale * 2 * std::min(x, 1 - x);
+                const double u = std::clamp(slope2 * shape, 0.0, 1.0);
                 line[c][w] = in[c];
-                const double y = swing > 0 ? cubicRead(line[c], w, 1 + swing * u) : in[c];
-                out[c] = (1 - depth * u) * y;
+                // One sample, plus the swing (linear interpolation).
+                const double y = linearRead(line[c], w, 1 + swing * u);
+                out[c] = (1 - depthNow * u) * y;
             }
             L[i] = (float)out[0];
             R[i] = (float)out[1];
@@ -160,21 +177,23 @@ template <typename FXConfig> struct AutoPan : eq::SeriesEq<FXConfig, 3, 13, Auto
         this->gain = 1;
         lfoHz = std::max(0.f, l[lfoSpeed]);
         depth = std::clamp(l[lrDepth], 0.f, 100.f) / 100;
+        if (!(depthNow >= 0))
+            depthNow = depth;
         const int d = std::clamp((int)std::lround(l[direction]), 0, 5), wv = std::clamp((int)std::lround(l[wave]), 0, 28);
         // The channels' phase offsets in turns, by direction.
         static constexpr double offsets[6][2] = {{0, 0.5}, {1.0 / 6, 0}, {0, 1.0 / 6}, {0.25, 0}, {0, 0.25}, {0, 0.5}};
         offset[0] = offsets[d][0];
         offset[1] = offsets[d][1];
         lr = d == 5;
-        lrK = lrSteepness[wv];
-        triK = (1 + wv / 128.0) * (1 + wv / 128.0);
+        const double F = lr ? lrSlope(wv) : 1 + wv / 128.0;
+        slope2 = F * F;
         frSeconds = d == 3 || d == 4 ? frFullSeconds * std::clamp(l[frDepth], 0.f, 100.f) / 100 : 0;
         mono = std::lround(l[inputMode]) == 0;
     }
 
     float line[2][panLineSize]{};
     int w{0};
-    double phase{0}, lfoHz{0}, depth{0}, offset[2]{}, lrK{0}, triK{1}, frSeconds{0};
+    double phase{0}, lfoHz{0}, depth{0}, depthNow{NAN}, offset[2]{}, slope2{1}, frSeconds{0};
     bool lr{false}, mono{false};
 };
 } // namespace oscairn_fx::rotary

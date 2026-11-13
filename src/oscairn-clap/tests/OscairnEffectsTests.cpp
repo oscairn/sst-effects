@@ -4579,6 +4579,103 @@ TEST_CASE("Auto Pan: direction L/R follows a sine with a steepness per wave, as 
     }
 }
 
+TEST_CASE("Auto Pan: direction L/R's slope per wave, and the LFO's start, sample for sample")
+{
+    // Batch autopan_lr (L/R depth 64, so neither gain reaches 0; the left/right gain ratio sample by
+    // sample): each channel's gain is 1 - D min(1, F^2 max(0, 0.46874 (1 - cos) - 0.4375)), the right
+    // half a turn after the left, and F^2 per wave fitted to 1e-4 of the log ratio: the values below.
+    // The LFO starts at activation a quarter turn before the left channel's peak attenuation, two
+    // samples on. Here: the plugin's gains against that law within 0.003 (tolerance proposed; 0.006 at
+    // wave 28, where the LFO's 16-bit steps times F^2 = 172 show).
+    const double f = 16 * 16 * 44100.0 / 16777216, D = 16512.0 / 32768, Sl = 0.46875 * 32767 / 32768;
+    for (auto [wave, F2] : {std::pair{0, 1.8184}, {9, 2.6557}, {17, 3.5326}, {18, 4.1441}, {20, 5.5131}, {22, 7.9321}, {24, 11.3067},
+                            {26, 15.8848}, {27, 19.8212}, {28, 172.23}})
+    {
+        auto o = modRender(44100, 2, "Auto Pan", {{"LFO Speed", f}, {"L/R Depth", 100 * D}, {"Pan Direction", 5}, {"LFO Wave", wave}}, 3.0);
+        const double x0 = 0.25 + 2 * f / 44100;
+        double worst = 0;
+        for (size_t n = 1; n < o.l.size(); ++n)
+        {
+            const double in = 0.25 * std::sin(2 * M_PI * 3000 * (n - 1) / 44100.0);
+            if (std::abs(in) < 0.1)
+                continue;
+            for (int c = 0; c < 2; ++c)
+            {
+                const double x = x0 + n * f / 44100 + 0.5 * c;
+                const double g = 1 - D * std::min(1.0, F2 * std::max(0.0, Sl * (1 - std::cos(2 * M_PI * x)) - 0.4375));
+                worst = std::max(worst, std::abs((c ? o.r : o.l)[n] / in - g));
+            }
+        }
+        INFO("wave " << wave << ": worst gain error " << worst);
+        REQUIRE(worst < (wave == 28 ? 0.006 : 0.003));
+    }
+}
+
+TEST_CASE("Auto Pan: the output is the input one sample late, and the F/R delay reads it linearly")
+{
+    // With F/R at 0 each channel is its gain times the input one sample earlier. The LFO stopped
+    // (speed 0) in L turn at wave 15 and one F/R step: the right channel's delay holds at 1 + 4 x 0.62399
+    // samples, so at 15 kHz the linear read between two samples (0.496 of the way) costs
+    // 20 log10 |1 - f + f e^(-jw)| = -6.37 dB, the left (an integer delay, 5 samples) nothing; within 0.05 dB.
+    auto a = modRender(44100, 2, "Auto Pan", {{"LFO Speed", 1.3}, {"Pan Direction", 0}}, 0.5, 1000);
+    double worst = 0;
+    for (size_t n = 1; n < a.l.size(); ++n)
+        worst = std::max(worst, (double)std::abs(a.l[n] - (float)(0.25 * std::sin(2 * M_PI * 1000 * (n - 1) / 44100.0))));
+    INFO("one sample late: worst " << worst);
+    REQUIRE(worst < 1e-6);
+    auto o = modRender(44100, 2, "Auto Pan", {{"LFO Speed", 0}, {"Pan Direction", 3}, {"LFO Wave", 15}, {"F/R Depth", 100.0 / 31}}, 0.5, 15000);
+    auto rms = [](const std::vector<float> &y) {
+        double e = 0;
+        for (size_t i = 4410; i < y.size(); ++i)
+            e += (double)y[i] * y[i];
+        return 10 * std::log10(e / (y.size() - 4410) / (0.25 * 0.25 / 2));
+    };
+    const double u = std::min(1.0, std::pow(1 + 15 / 128.0, 2) * 2 * (32767.0 / 32768) * (16383.0 / 32768) * 0.5), fr = 4 * u - std::floor(4 * u);
+    const double want = 20 * std::log10(std::abs(1 - fr + fr * std::polar(1.0, -2 * M_PI * 15000 / 44100)));
+    INFO("right " << rms(o.r) << " dB (want " << want << "), left " << rms(o.l));
+    REQUIRE(std::abs(rms(o.r) - want) < 0.05);
+    REQUIRE(std::abs(rms(o.l)) < 0.05);
+}
+
+TEST_CASE("Auto Pan: an L/R depth change moves at a bounded rate")
+{
+    // Batch x ap_lr_step (L/R depth stepped 0 to 127 by the wheel, LFO at 0.042 Hz): the depth moves
+    // by at most 2^-12 per sample (frexp-scaled steps of 2^-14 x 2^(2 - e) of the rest), so a full step
+    // takes about 140 ms; the reference's left gain (attenuation 0.81) at 50 / 75 / 100 / 150 ms after
+    // the switch: 0.680, 0.521, 0.376, 0.197 (a 9 ms window, about 4 ms late), the law 0.663, 0.512,
+    // 0.365, 0.19. Here: the plugin's depth at those times within 0.01 of the law at 44.1 and 96 kHz
+    // (tolerance proposed), read from the gain with the LFO stopped (attenuation 0.5 at speed 0).
+    for (double rate : {44100.0, 96000.0})
+    {
+        Plugin pl(rotaryId);
+        pl.set(1, 2);
+        for (auto [n, v] : std::vector<std::pair<const char *, double>>{{"LFO Speed", 0}, {"L/R Depth", 0}, {"Pan Direction", 0}, {"LFO Wave", 0}})
+            pl.set(paramIdByName(pl.p, "Auto Pan", n), v);
+        pl.activate(rate);
+        const size_t n = (size_t)(0.6 * rate) + L, at = (size_t)(0.2 * rate);
+        std::vector<float> in(n, 0.25f), r;
+        auto l = pl.render(in, in, r, {64}, {{(uint32_t)at, paramIdByName(pl.p, "Auto Pan", "L/R Depth"), 100}}, false);
+        // The law, per 44.1 kHz sample.
+        double D = 0;
+        std::vector<double> law;
+        for (int k = 0; k < (int)(0.3 * 44100); ++k)
+        {
+            const double d = 1 - D;
+            int e;
+            std::frexp(d, &e);
+            D += std::min(0.25, 0x1p-14 * std::ldexp(1.0, 2 - e)) * d;
+            law.push_back(D);
+        }
+        for (double ms : {10.0, 50.0, 75.0, 100.0, 150.0, 250.0})
+        {
+            const size_t i = at + L + (size_t)(ms * rate / 1000);
+            const double depth = (1 - r[i] / 0.25) / 0.5; // the right channel's attenuation at speed 0 is 0.5
+            INFO(rate << " Hz, " << ms << " ms after the change: depth " << depth << ", law " << law[(size_t)(ms * 44.1)]);
+            REQUIRE(std::abs(depth - law[(size_t)(ms * 44.1)]) < 0.01);
+        }
+    }
+}
+
 TEST_CASE("Auto Pan: F/R swings the delay in the turn directions only, at 44.1, 48 and 96 kHz")
 {
     // R turn, wave 20 (whose plateaus let the swing be read from plateau to plateau), L/R depth 0:
