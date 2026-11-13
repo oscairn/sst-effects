@@ -219,7 +219,7 @@ reverb DSP:
 | Chorus | 6 | 4 | 1 | 1 | |
 | Flanger | 5 | 4 | 0 | 1 | yes |
 | Phaser | 5 | 3 | 0 | 2 | yes |
-| Tremolo & Rotary | 7 | 3 | 3 | 1 | |
+| Tremolo & Rotary | 7 | 2 | 3 | 2 | |
 | Distortion & Amp | 12 | 1 | 11 | 0 | |
 | Dynamics | 7 | 5 | 0 | 2 | yes |
 | Wah | 3 | 0 | 0 | 3 | |
@@ -227,7 +227,7 @@ reverb DSP:
 | Tech | 18 | 4 | 1 | 13 | yes |
 | EQ | VCM EQ 501 + Part 3-band, Part 2-band, Master 5-band | 0 (+3 EQs on sst-filters biquads) | 0 | 1 | |
 | Misc | 11 | 3 | 3 | 5 | yes |
-| **All 104 types** | | **35** | **23** | **46** | |
+| **All 104 types** | | **34** | **23** | **47** | |
 
 **Base** means an sst-effects effect (bus or voice) with a parameter mapping and, where the
 reference differs, a reference-matching mode. **Borrowed** means a block from another project
@@ -282,7 +282,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | TEMPO PHASER | 05 20 | Var,InsA/B,A/D |  | 144 | 39 | Phaser | base | sst Phaser, tempo-synced + mapping |
 | DYNAMIC PHASER | 05 30 | Var,InsA/B,A/D | yes | 18 | 9 | Phaser | base | sst Phaser + own envelope follower (side-chain) |
 | CONTROL PHASER | 05 18 | Var,InsA/B,A/D |  | 4 | 0 | Phaser | base | sst Phaser, manual sweep + mapping |
-| AUTO PAN | 06 00 | Var,InsA/B,A/D |  | 311 | 132 | Tremolo & Rotary | base | sst voice Tremolo (pan mode) + mapping |
+| AUTO PAN | 06 00 | Var,InsA/B,A/D |  | 311 | 132 | Tremolo & Rotary | written | own model fitted to renders, mode "Auto Pan" (built; section 15) |
 | TREMOLO | 06 10 | Var,InsA/B,A/D |  | 205 | 69 | Tremolo & Rotary | base | sst voice Tremolo + mapping |
 | ROTARY SPEAKER 1 | 06 20 | Var,InsA/B,A/D |  | 223 | 440 | Tremolo & Rotary | written | own two-rotor model fitted to renders, mode "Rotary A" (built; section 15, decision 28) |
 | ROTARY SPEAKER 2 | 06 30 | Var,InsA/B,A/D |  | 42 | 2 | Tremolo & Rotary | base | sst RotarySpeaker (separate horn/rotor speeds, mic angle) + mapping |
@@ -720,6 +720,7 @@ Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
 | Tempo Mono Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 531,376 / 578,176 / 1,154,164 | 0 | not measured |
 | Circuit Compressor | any | 120 | (new) | 792 | 0 | not measured |
 | Rotary A | 44.1 kHz / 48 and 96 kHz | 120 | (new) | 34,152 / 147,864 | 0 | not measured |
+| Auto Pan | 44.1 kHz / 48 and 96 kHz | 120 | (new) | 9,380 / 68,420 | 0 | not measured |
 
 "Context" is the context's own storage plus its effect (`sizeof`, arm64 macOS build), the same
 figure `resources` reports; since decision 20 it includes the effect's own heap allocations (the
@@ -2101,6 +2102,119 @@ shapes (known difference 44), rates other than 44.1 kHz (tested, not recorded), 
 feed with a true stereo source (known difference 47: every probe drives both channels with the
 same click).
 
+### Auto Pan (built 2026-11-12)
+
+Mode "Auto Pan" (id 2) of Oscairn FX Tremolo & Rotary, `effects/AutoPan.h`, for AUTO PAN (06 00).
+Measurements: batch autopan_b (14 renders: rates, depth, waves 6/15/20, L/R, L turn, F/R in L<>R,
+three hold-outs, one of them clipped at the instrument's output and not used), autopan_c (42: the
+wave law, the six directions, L/R at four waves, F/R in the turn directions, ten EQ settings at
+velocity 50, a stereo source, three hold-outs) and autopan_d (32: L/R at the other 23 waves, four
+more mid-band settings). The source is a held AN-X saw at 110 Hz (velocity 90, peaks 0.25; the EQ
+probes at velocity 50); for the stereo probes, an AWM2 saw element panned hard left, which is the
+only way found to give a part insertion a stereo input. Every recording was checked for samples at
+full scale: autopan_b's third hold-out (EQ at +12 dB) has 2,181 and is left out; nothing else
+touches it. Analysis drivers are kept outside the repositories (`cmp.py` renders the plugin from
+the reference's own dry note and compares, `apfit.py`, `lrfit2.py`, `frfit.py`, `eqfit.py`,
+`summary.py`, `rates.py`).
+
+Structure, as the measurements show it:
+
+- The three-band EQ first: first-order shelves, exactly Rotary A's law (bilinear at 44.1 kHz; the
+  five-band EQ's slope-0.5 shelf is the same response), and a peak with Q = width x 10^(-|gain| /
+  40) (the cookbook peak with the three-band EQ's effective Q, no widening). At L/R depth 0 the
+  effect is otherwise unity (ap_fr: 1.000 in both channels).
+- Mono feeds both channels the mean of the input, Stereo each channel its own (st_mono: both
+  channels at half the left input; st_stereo: the right output stays silent).
+- One LFO at the set speed in Hz. Each channel has its own attenuation u in [0, 1]; its gain is
+  1 - (L/R depth) u. The channels read the LFO at offsets set by the direction: the right half a
+  turn after the left in L<>R and L/R, the left a sixth of a turn ahead in L>>R, the right a sixth
+  ahead in L<<R, the left a quarter ahead in L turn, the right a quarter ahead in R turn (dir1-4:
+  -60.0, +60.0, -90.0, +90.0 degrees right against left; w0, ap_hardlr: 180.0).
+- In L<>R to R turn u is a triangle, 0 at the LFO's peak and 1 at its trough, times
+  (1 + wave / 128)^2 and clipped at 1: wave 0 is a linear crossfade (the gains sum to 1), higher
+  waves hold the far channel silent for longer (the fitted slope 2k: 1.003, 1.047, 1.096, 1.162,
+  1.248, 1.334, 1.409, 1.484 at waves 0, 3, 6, 10, 15, 20, 24, 28; the law gives 1, 1.047, 1.096,
+  1.162, 1.248, 1.337, 1.410, 1.484).
+- In L/R the LFO is a sine: u = steepness x (0.069 - cos), clipped to [0, 1], so each channel is
+  fully on for 48% of the period and falls with a steepness measured at every wave (0.85 at wave 0,
+  rising smoothly to 1.644 at 17, then 1.93, 2.07, 2.55, 3.08, 3.64, 4.26, 5.13, 6.08, 7.09, 8.69 and
+  34 at 28, nearly a switch). At wave 0 the far channel only reaches 0.091 (lr_w0).
+- In the turn directions only, F/R depth adds a delay that grows with the same u: quieter is
+  further away, a Doppler swing (fr127, fr64, fr8: 31, 16 and 2 steps of 4; none in L<>R, ap_fr,
+  or L/R, fr127_d5). The level does not change with F/R depth alone.
+- The speed is Hz as set and does not follow the transport (tempos 90, 120 and 150 on the rate
+  probes give the table's rates).
+
+| Law | Fitted on | Against the fitting renders |
+| --- | --- | --- |
+| Speed in Hz (the Data List's table 1) | ap_slow, ap_fast, ap_depth, ap_maxrate, every 0.67 Hz probe | -0.016% at 0.67, 2.19 and 39.7 Hz (phase drift over the render); ap_slow by the fit, -0.04% |
+| L/R depth: gain 1 - (v / 127) u | ap_depth, lr_d64 (v 64), the full-depth probes | depth 0.5040 fitted, 64 / 127 = 0.5039 |
+| Wave: u = min(1, (1 + w / 128)^2 (1 - triangle) / 2) | w0, w3, w10, w24, w28, ap_wave06, ap_wave15, ap_slow | slope within 0.3% of the law at every wave (above) |
+| Directions: phase offsets 0/180, 60/0, 0/60, 90/0, 0/90, 0/180 degrees (left/right) | dir1-4, dir1_w20, dir3_w20, w*, lr_* | within 0.05 degrees of the plugin's (L/R phase, the plugin against the reference) |
+| L/R: a sine with threshold 0.069 and a measured steepness per wave | lr_w0-28 (every wave) | model fit rms 0.24-0.87% of full gain per wave (wave 28: 1.7%) |
+| F/R: delay up to 124 samples at 44.1 kHz times the F/R depth (4 floor(v / 4) samples), times u, in the turn directions only | fr127, fr64, fr8, fr127_d4w20, fr_lr_d3, ap_turn | fitted 123.5, 63.7, 7.96 samples for 124, 64, 8; the plugin's swing within 0.4% of the reference's through the same analysis (fr8: 3.7%, a 0.18 ms swing) |
+| EQ: first-order shelves, peak with Q = width x 10^(-abs(gain) / 40) | eq0-eq9 | shelves within 0.032 dB, peaks at 630, 1600 and 4000 Hz within 0.075 dB; the peak at 315 Hz, width 12: 1.25 dB (known difference 50) |
+| Mono / Stereo | st_mono, st_stereo, st_mono_d3 | the right output silent with Stereo; Mono half the left input in both, within 0.14 dB |
+
+Whole-render comparison (`summary.py`): the plugin renders the reference's own dry note with the
+mapped settings, its LFO aligned to the reference's by one time shift per render; "rms" is the rms
+gain error per channel in fractions of full gain over the held note, "p99" the 99th percentile of
+the gain error in dB where both gains are above -20 dB (pointwise, so the steepest edges dominate
+it), "L/R phase" the right channel's LFO phase against the left's, reference minus plugin.
+
+| Set | rms | p99 | L/R phase | Delay swing | Level | Depth (max / min) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Fitting: rates, depth, waves in L<>R (11) | <= 0.3%; ap_maxrate 1.4% (39.7 Hz, the analysis window is a third of its period); ap_slow 4.5% (its longer release falls inside the window) | <= 0.32 dB; ap_maxrate 1.01 dB | <= 0.10 deg | — | <= 0.011 dB | <= 0.013 dB |
+| Fitting: directions (8) | <= 0.2% | <= 0.34 dB | <= 0.013 deg | <= 0.4% | <= 0.011 dB | <= 0.008 dB |
+| Fitting: L/R, all waves (31) | <= 1.6% | <= 1.67 dB | <= 0.05 deg | <= 0.2% | <= 0.003 dB | <= 0.14 dB |
+| Fitting: F/R (7) | <= 0.2% | <= 0.13 dB | <= 0.006 deg | <= 0.4% (fr8 3.7%) | <= 0.007 dB | — |
+| Hold-out ap_holdout1 (R turn, wave 27, F/R 115, L/R 119, Mono, EQ) | 0.3% | 0.35 dB | 0.008 deg | -0.12% | 0.006 dB | 0.08 dB |
+| Hold-out ap_holdout2 (L>>R, wave 2, 0.42 Hz, EQ) | 0.4% | 0.13 dB | 0.004 deg | — | 0.000 dB | 0.001 dB |
+| Hold-out ho0 (L>>R, L/R 18, F/R 65, EQ) | 0.0% | 0.01 dB | 0.005 deg | — | 0.001 dB | 0.003 dB |
+| Hold-out ho1 (L turn, 3.11 Hz, L/R 25, F/R 18, EQ) | 0.4% | 0.21 dB | 0.04 deg | +0.15% | 0.016 dB | 0.014 dB |
+| Hold-out ho2 (R turn, wave 14, L/R 112, F/R 70, high shelf +10 dB at 560 Hz) | 1.3% | 1.52 dB | 0.014 deg | +0.16% | 0.16 dB | 0.26 dB |
+| Hold-out EQ: mid 315 Hz w2 / 1.6 kHz w12 / 100 Hz w5 / 10 kHz w3 (autopan_d) | | 0.19 / 0.01 / 2.70 / 0.03 dB worst harmonic | | | | |
+
+So the rate (M4/M5 ±2%), L/R phase (±5 degrees), depth (±1 dB) and level (±0.5 dB) tolerances are
+met on every fitting render and every hold-out; the EQ (±0.5 dB) is met except the mid band at its
+lowest centres with a narrow width (315 Hz at width 12, 100 Hz at width 5; known difference 50).
+The pointwise p99 is above 1 dB only on the steep L/R waves and on ho2, at the edges: there a
+one-period analysis window straddles a fast gain change (known differences 51 and 52).
+
+**Mapping law for the converter** (raw value to plugin parameter; parameters 10, 14 and 16 are
+unused):
+
+| Raw parameter | Plugin parameter | Law |
+| --- | --- | --- |
+| 1 LFO Speed (0-127) | LFO Speed, Hz | the Data List's table 1 at v (2.65 v / 63 for v <= 63, as Rotary A's slow speeds) |
+| 2 L/R Depth | L/R Depth, % | 100 v / 127 |
+| 3 F/R Depth | F/R Depth, % | 100 floor(v / 4) / 31 |
+| 4 Pan Direction (0-5) | Pan Direction | v (L<>R, L>>R, L<<R, L turn, R turn, L/R) |
+| 5 LFO Wave (0-28) | LFO Wave | v |
+| 6, 8, 11 EQ Low / High / Mid Frequency | Low Shelf / High Shelf / Mid Frequency, Hz | the Data List's table 3 value at v |
+| 7, 9, 12 EQ Low / High / Mid Gain (52-76) | Low Shelf / High Shelf / Mid Gain, dB | v - 64 |
+| 13 EQ Mid Width (1-120) | Mid Width | v / 10 |
+| 15 Input Mode | Input Mode | 0 Mono, 1 Stereo |
+
+Plugin tests, each checked to fail with its law broken: "Auto Pan: the LFO speed, and the wave's
+clipped triangle, at 44.1, 48 and 96 kHz" (the reference's share of each period below half gain at
+waves 0, 15 and 28, within 0.005; fails with the wave ignored, 0.502 against 0.5996 at wave 15);
+"Auto Pan: the directions set the channels' phase offsets, as measured" (within 2 degrees; fails
+with every direction at L<>R's offsets, 180 against -60 degrees); "Auto Pan: direction L/R follows a
+sine with a steepness per wave, as measured" (below half gain and the floor at waves 0, 14, 20 and
+27; fails with one steepness for every wave and with the threshold at 0); "Auto Pan: F/R swings the
+delay in the turn directions only, at 44.1, 48 and 96 kHz" (2.8005 and 1.445 ms within 1%; fails
+with the swing in every direction and with 128 samples instead of 124, 2.868 ms); "The rotary
+plugin's insertion modes: Mono feeds both channels the input's mean, Stereo each its own" (fails
+with the input mode ignored); "The rotary plugin's insertion modes: the three-band EQ as measured,
+at 44.1 kHz and within the rate gate" (40 reference levels within 0.05 dB; fails with the peak's Q
+without the gain factor and with a cut's corner moved by the gain). "Processing never allocates"
+switches the speed, the direction and a band while playing; the state and value-text tests cover
+the mode's thirteen parameters. Rotary A's context is 34,204 bytes at 44.1 kHz now (the plugin's parameter values for the new mode). Rotary A shares the shelf design and the cubic tap read; its output
+is bit-identical (its renders at 44.1 and 96 kHz compared before and after, and its tests).
+Memory: 9,380 bytes per context at 44.1 kHz (two 1,024-sample lines), 68,420 at other rates (the
+EQ's matcher). Tremolo & Rotary plugin version 0.2.0 (decision 24).
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -2123,7 +2237,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
 | 13 | (Superseded by 23 for the built Hall A.) Hall reverb measurements; displayed time against measured decay; level and onset now measured (fx17: wet −2.89 / −3.23 dB re the dry click at factory settings, onset = initial delay + 48.4 ms) | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
-| 14 | Types not built | 94 of the 104 types (the five-band EQ, the cross delay, the tempo cross delay, the tempo stereo and tempo mono delays, the L/R and L/C/R delays, the hall reverb, the circuit-style compressor and the two-rotor rotary are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 14 | Types not built | 93 of the 104 types (the five-band EQ, the cross delay, the tempo cross delay, the tempo stereo and tempo mono delays, the L/R and L/C/R delays, the hall reverb, the circuit-style compressor, the two-rotor rotary and the auto pan are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
 | 15 | (Superseded by 26–29 for the built Circuit Compressor.) Compressor measurements fx7–fx23 | Static curve (fx7, fx13), steps (fx21–fx23): explained by a makeup gain set by the settings (section 15) | Reference behaviour | Built 2026-11-05 | fx7, fx13, fx21–fx23 | `effects/CircuitCompressor.h` |
 | 16 | Tempo cross delay at tempos other than 120 BPM | Not measured | The recorder's host is fixed at 120 BPM | The plugin follows the transport tempo by the note values (assumed) | — | `effects/TempoCrossDelay.h` |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
@@ -2157,6 +2271,13 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 45 | Tempo Stereo and Tempo Mono Delay (02 28, 02 20): the longest lines | 02 28 halves the note time when the longer line would pass a threshold between 130,533 and 131,637 samples (6 quarters at 120 BPM repeat after 66,148 samples, 4 and 5 quarters after 88,198 and 110,247 unhalved); the plugin halves above 131,072. 02 20 does not halve: its 6 quarters repeat after 132,297 samples; the plugin clamps there. Only host tempos under 120 BPM ask for longer notes, and the recorder's host runs at 120 BPM | Whether 02 28 halves more than once, and what 02 20 holds beyond 3,000 ms, are not reachable with this rig | Reported; the threshold inside the measured bracket is a choice | review batches `tempo_stereo` `rs_t19*`, `tempo_mono` `tmx_t18`, `tmx_tmax` | `stereoNoteMs`, `monoMaxSamples` |
 | 46 | Cross, L/R and L/C/R Delay (02 00, 02 40, 02 50): the ms time law's rounding | The reference's line lengths are floor(ms × 10 × c) samples with c between 4.40990 and 4.40994 (02 40: 0.1 / 11.3 / 29.1 / 57.9 ms are 4 / 498 / 1,283 / 2,553 samples, ours one fewer; 1,111.1 / 1,414.1 / 1,555.5 / 1,638.3 ms are 48,998 / 62,360 / 68,596 / 72,247, ours one more; every 02 50 time probed, the range ends included, and 02 00's 1,638.3 ms echo fit it too); ours is round(ms × 44.1) − 1. The two agree where ms × 44.1 is whole and differ by one sample (≤ 0.023 ms) elsewhere, inside the 0.1 ms gate. The tempo stereo and tempo mono delays measure the same factor and ship it (c = 4.40991, section 15) | The reference's own ms-to-samples conversion; `msLineSeconds` is shared by the three modes | Reported; inside the gate; moving the three modes to the floor law is open (it changes the landed Cross Delay's times by a sample) | delay_lr `lr_tmax`, `lr_hold_grid`; review batches `lr_law_a/b`, `delay_lcr`; delay_lcr `lcr_tmax`; qwen-cross-delay-2026-11-11 `cd_time_max` | `msLineSeconds` |
 | 47 | L/C/R and Tempo Mono Delay (02 50, 02 20): the line's feed with a true stereo input | Both modes feed their one line the mean (l + r) / 2. Every probe drives the effect with the same click on both channels (the part's pan sits after the insertions, known difference 22), so the mean, a left-only and a right-only feed give the same render; a summed feed is ruled out (it would put the echo 6 dB over the click at D=W, measured 0.00 dB in lcr_r_dw, lcr_hold_mix and tm_base) | The rig cannot deliver a stereo effect input | Unresolved; needs a source with different content on the two channels before the effect | review delay_lcr `lcr_r_dw`; delay_lcr `lcr_hold_mix`; tempo_mono `tm_base` | `LcrDelay::processBlock`, `TempoMonoDelay::processBlock` |
+| 48 | Auto Pan: the LFO's phase at activation | The reference's LFO starts when the performance loads (in these probes about 0.45 s before the note); the plugin's starts at its peak when the mode is activated | Not measured beyond the probes' onsets | Unmeasured | autopan_b phases at three speeds | `initialize` |
+| 49 | Auto Pan: the modulated delay's centre | The reference's delay against its dry path is not measured (the type has no dry/wet mix); the plugin's tap is at least one sample, and with F/R at 0 the input passes with no delay | Unmeasured | Unmeasured | — | `processBlock` |
+| 50 | Auto Pan: EQ mid band at low centres | 315 Hz (index 24): fitted centre 310.5-312.5 Hz (-0.8 to -1.5%), so 1.25 dB at 330 Hz at width 12 and +12 dB, 0.19 dB at width 2; 100 Hz (index 14) at width 5: fitted centre about 110 Hz, 2.70 dB at 110 Hz; 630 Hz +0.3% (0.075 dB); 1.6, 4 and 10 kHz exact | The converter uses the printed frequency; the reference's centre at these indices differs, perhaps with the width (as known difference 9) | Unresolved; next: a mid sweep over index and width | autopan_c eq7, eq9, autopan_d mid*; `eqfit.py` | converter (table 3) |
+| 51 | Auto Pan: direction L/R at its steepest waves | The steepness per wave is fitted from 9 ms analysis windows; at waves 24-28 the edges take a few milliseconds, and wave 28's steepness fits about as well anywhere from 34 to 65; pointwise gain errors up to 6 dB on the edges, rms within 1.6% of full gain | The analysis' time resolution | Partly resolved | autopan_d lr_w24-28; `lrfit2.py` | `lrSteepness` |
+| 52 | Auto Pan: isolated spikes in the reference's turn directions | ho2 (R turn, F/R 70, L/R 112, high shelf +10 dB): single 20-sample windows off by up to 0.22 of full gain, 1.1% of the windows | Unknown; the flat-EQ F/R probes show none, and their noise between harmonics matches the plugin's within 0.5 dB | Unresolved | autopan_c ho2; `cmp.py` | — |
+| 53 | Auto Pan: parameter changes | Applied from the next block without smoothing (a depth, speed or direction change steps the gain or the delay); the reference's smoothing is not measured | Unmeasured | Unmeasured | — | `processBlock` |
+| 54 | Auto Pan: the reference's output clip | A probe with an EQ band at +12 dB clipped at full scale at the instrument's output (autopan_b ap_holdout3); whether the effect itself clips (as Rotary A's does, known difference 41) is not measured; the plugin does not clip | Unmeasured | Unmeasured | ap_holdout3 | — |
 
 ## 17. Oscairn porting checklist (decision 22)
 

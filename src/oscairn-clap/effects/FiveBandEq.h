@@ -375,6 +375,22 @@ inline void shelf(Biquad &f, double rate, double hz, double gainDb, bool high)
               -2 * ((G - 1) + (G + 1) * c), (G + 1) + (G - 1) * c - s2);
 }
 
+// First-order shelves, bilinear at 44.1 kHz with K = tan(pi f / 44100): a boost puts the pole at
+// K and the zero at K x gain (low: towards DC; high: K / gain, towards Nyquist), a cut the zero
+// at K and the pole beyond it (the five-band shelf at slope 0.5 has the same response). Rotary A and
+// the auto pan mode use it.
+inline void firstOrderShelf(Biquad &b, double hz, double db, bool high)
+{
+    const double K = std::tan(M_PI * std::min(hz, 0.49 * designRate) / designRate), A = std::pow(10.0, std::abs(db) / 20);
+    // As (c1 s + c0) / (d1 s + d0), s = (1 - 1/z) / (1 + 1/z).
+    double c1 = 1, c0 = K, d1 = 1, d0 = K;
+    if (!high)
+        (db >= 0 ? c0 : d0) = K * A;
+    else
+        (db >= 0 ? c1 : d1) = A;
+    b.set(c1 + c0, c0 - c1, 0, d1 + d0, d0 - d1, 0);
+}
+
 // First-order bilinear low- and high-pass sections at hz (prewarped).
 // A unity-peak band-pass (constant 0 dB peak gain) at hz with Q, for the five-band network: the
 // Q is kept as the 44.1 kHz design's at other rates (peakingQAt).

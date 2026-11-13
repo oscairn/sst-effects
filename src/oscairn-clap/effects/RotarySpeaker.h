@@ -73,6 +73,17 @@ template <size_t N> double micStep(const MicStep (&steps)[N], double deg)
             a = s.angle;
     return a;
 }
+// The ring `line` read d samples behind its write position w (4-point cubic; d >= 1).
+template <int Size> double cubicRead(const float (&line)[Size], int w, double d)
+{
+    static_assert((Size & (Size - 1)) == 0, "a power of two");
+    const int n = (int)d;
+    const double f = d - n;
+    auto at = [&](int j) { return (double)line[(w - j) & (Size - 1)]; };
+    const double xm = at(n - 1), x0 = at(n), x1 = at(n + 1), x2 = at(n + 2);
+    const double c1 = 0.5 * (x1 - xm), c2 = xm - 2.5 * x0 + 2 * x1 - 0.5 * x2, c3 = 0.5 * (x2 - xm) + 1.5 * (x0 - x1);
+    return ((c3 * f + c2) * f + c1) * f + x0;
+}
 // A power of two above twice the largest swing, plus the interpolator, at 768 kHz.
 inline constexpr int lineSize = 4096;
 
@@ -269,13 +280,7 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
     // A tap at angle ph: the line read at base + swing * sin(ph) (4-point cubic), times the AM gain.
     double tap(const Rotor &r, double ph, double base, double swing, double am, int k) const
     {
-        const double d = base + swing * std::sin(ph);
-        const int n = (int)d;
-        const double f = d - n;
-        auto at = [&](int j) { return (double)r.line[(r.w - j) & (lineSize - 1)]; };
-        const double xm = at(n - 1), x0 = at(n), x1 = at(n + 1), x2 = at(n + 2);
-        const double c1 = 0.5 * (x1 - xm), c2 = xm - 2.5 * x0 + 2 * x1 - 0.5 * x2, c3 = 0.5 * (x2 - xm) + 1.5 * (x0 - x1);
-        const double x = ((c3 * f + c2) * f + c1) * f + x0;
+        const double x = cubicRead(r.line, r.w, base + swing * std::sin(ph));
         return x * (1 - am * (1 - std::cos(ph + amLead[k])) / 2);
     }
 
@@ -292,8 +297,8 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
             else
                 xover[k].set(1, -2, 1, 1 + K / q + K * K, 2 * (K * K - 1), 1 - K / q + K * K);
         }
-        shelf(shelves[0], last[lowFreq], last[lowGain], false);
-        shelf(shelves[1], last[highFreq], last[highGain], true);
+        eq::firstOrderShelf(shelves[0], last[lowFreq], last[lowGain], false);
+        eq::firstOrderShelf(shelves[1], last[highFreq], last[highGain], true);
         matched = fs != designRate;
         if (matched)
             for (int k = 0; k < 2; ++k)
@@ -302,21 +307,6 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
                 shelfMatch[k].set(d);
             }
     }
-    // First-order shelves, bilinear at 44.1 kHz with K = tan(pi f / 44100): a boost puts the pole at
-    // K and the zero at K x gain (low: towards DC; high: K / gain, towards Nyquist), a cut the zero
-    // at K and the pole beyond it.
-    static void shelf(eq::Biquad &b, double hz, double db, bool high)
-    {
-        const double K = std::tan(M_PI * std::min(hz, 0.49 * designRate) / designRate), A = std::pow(10.0, std::abs(db) / 20);
-        // As (c1 s + c0) / (d1 s + d0), s = (1 - 1/z) / (1 + 1/z).
-        double c1 = 1, c0 = K, d1 = 1, d0 = K;
-        if (!high)
-            (db >= 0 ? c0 : d0) = K * A;
-        else
-            (db >= 0 ? c1 : d1) = A;
-        b.set(c1 + c0, c0 - c1, 0, d1 + d0, d0 - d1, 0);
-    }
-
     void update()
     {
         bool changed = false;

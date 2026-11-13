@@ -34,6 +34,7 @@
 #include "effects/HallReverb.h"
 #include "effects/CircuitCompressor.h"
 #include "effects/RotarySpeaker.h"
+#include "effects/AutoPan.h"
 
 #include <algorithm>
 #include <array>
@@ -284,14 +285,15 @@ const std::vector<Category> &categories()
         dynamics.finish();
         c.push_back(std::move(dynamics));
 
-        // Rotary speakers, and later the tremolo and auto-pan types (plan, section 6).
+        // Rotary speakers and the auto pan; later the tremolo and the other rotary types (plan, section 6).
         Category rotary{{CLAP_VERSION_INIT, "org.oscairn.effects.tremolo-rotary", "Oscairn FX Tremolo & Rotary",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.0",
                          "Tremolos and rotary speakers, one mode per design", rotaryFeatures},
                         {},
                         1,
                         {}};
         rotary.modes.push_back(mode<oscairn_fx::rotary::RotarySpeaker>(1, "Rotary A"));
+        rotary.modes.push_back(mode<oscairn_fx::rotary::AutoPan>(2, "Auto Pan"));
         rotary.finish();
         c.push_back(std::move(rotary));
         return c;

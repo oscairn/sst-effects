@@ -455,7 +455,8 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
         pl.p->on_main_thread(pl.p);
         REQUIRE(pl.host.infoRescans == 2);
         const int mixes = check(first);
-        REQUIRE(mixes == 1); // Reverb 2's Mix; the five-band EQ's Output Level
+        REQUIRE(mixes == (std::strcmp(id, "org.oscairn.effects.tremolo-rotary") ? 1 : 0)); // Reverb 2's Mix; the five-band EQ's
+        // Output Level; neither rotary mode has one (the reference's types give no dry/wet control there)
         // a state load that selects another mode rescans too
         Buffer buf;
         pl.set(1, other); // in flush while active: reported at the next callback
@@ -768,6 +769,18 @@ TEST_CASE("Processing never allocates")
                       lg = paramIdByName(rot.p, "Rotary A", "Low Shelf Gain");
         allocations = 0;
         rot.render(inL, inR, r, {1, 37, 512}, {{5, sp, 1.0}, {700, dep, 90.0}, {9000, lg, -6.0}, {20000, sp, 0.0}});
+        REQUIRE(allocations == 0);
+    }
+    // Auto Pan: the LFO speed, the directions, and a band switched in (the rate matcher's swap)
+    // while playing.
+    {
+        Plugin pan("org.oscairn.effects.tremolo-rotary");
+        pan.set(1, 2);
+        pan.activate(48000);
+        const clap_id sp = paramIdByName(pan.p, "Auto Pan", "LFO Speed"), dir = paramIdByName(pan.p, "Auto Pan", "Pan Direction"),
+                      mg = paramIdByName(pan.p, "Auto Pan", "Mid Gain"), mf = paramIdByName(pan.p, "Auto Pan", "Mid Frequency");
+        allocations = 0;
+        pan.render(inL, inR, r, {1, 37, 512}, {{5, sp, 9.0}, {700, dir, 3.0}, {9000, mg, 6.0}, {20000, mf, 3000.0}, {30000, mg, 0.0}});
         REQUIRE(allocations == 0);
     }
     // The counter works: an allocation while counting is seen.
@@ -4070,3 +4083,268 @@ TEST_CASE("Rotary A: the low shelf acts on the rotor, the high shelf on the horn
         }
     }
 }
+
+// ---- Auto Pan (plan, section 15, "Auto Pan") ----
+namespace
+{
+// A sine (0.25 peak) at freq through mode `modeId` of the rotary plugin, parameters by name; the right
+// input silent if `leftOnly`. Latency removed, as rotaryRender.
+RotaryOut modRender(double rate, int modeId, const char *module, std::vector<std::pair<const char *, double>> set, double seconds,
+                    double freq = 3000, bool leftOnly = false)
+{
+    Plugin pl(rotaryId);
+    pl.set(1, modeId);
+    for (auto &[n, v] : set)
+        pl.set(paramIdByName(pl.p, module, n), v);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + L;
+    std::vector<float> in(n), inR(n);
+    for (size_t i = 0; i < n; ++i)
+    {
+        in[i] = (float)(0.25 * std::sin(2 * M_PI * freq * i / rate));
+        inR[i] = leftOnly ? 0 : in[i];
+    }
+    RotaryOut o;
+    o.rate = rate;
+    o.l = pl.render(in, inR, o.r, {64}, {}, false);
+    o.l.erase(o.l.begin(), o.l.begin() + L);
+    o.r.erase(o.r.begin(), o.r.begin() + L);
+    return o;
+}
+// The gain per millisecond (the envelope at freq over the input's, half its 0.25 peak).
+std::vector<double> gainTrack(const std::vector<float> &y, double rate, double freq = 3000)
+{
+    std::vector<double> g;
+    for (auto &z : envelopeAt(y, rate, freq))
+        g.push_back(std::abs(z) / 0.125);
+    return g;
+}
+// The fundamental of a per-millisecond track at f Hz over the whole periods from `from` ms.
+std::complex<double> fundamental(const std::vector<double> &x, double f, size_t from)
+{
+    const size_t n = (size_t)(std::floor((x.size() - from) * f / 1000) * 1000 / f);
+    std::complex<double> z = 0;
+    for (size_t i = 0; i < n; ++i)
+        z += x[from + i] * std::polar(1.0, -2 * M_PI * f * (double)i / 1000);
+    return z * (2.0 / (double)n);
+}
+// The fraction of the whole periods from `from` ms during which x is below `level`.
+double fractionBelow(const std::vector<double> &x, double f, size_t from, double level)
+{
+    const size_t n = (size_t)(std::floor((x.size() - from) * f / 1000) * 1000 / f);
+    size_t k = 0;
+    for (size_t i = 0; i < n; ++i)
+        k += x[from + i] < level;
+    return (double)k / (double)n;
+}
+} // namespace
+
+TEST_CASE("Auto Pan: the LFO speed, and the wave's clipped triangle, at 44.1, 48 and 96 kHz")
+{
+    // L<>R at full L/R depth (batch autopan_c / autopan_b, 0.67 Hz): each channel's gain is
+    // 1 - min(1, (1 + wave / 128)^2 (1 - triangle) / 2), so a higher wave keeps the channel silent
+    // longer. The reference's share of each period below half gain: 0.500 (wave 0), 0.5996 (15),
+    // 0.6634 (28); within 0.005 (tolerance proposed). The speed in Hz as set, within 0.3%.
+    const double f = 0.67291;
+    for (double rate : {44100.0, 48000.0, 96000.0})
+        for (auto [wave, below] : {std::pair{0, 0.500}, {15, 0.5996}, {28, 0.6634}})
+        {
+            auto o = modRender(rate, 2, "Auto Pan", {{"LFO Speed", f}, {"L/R Depth", 100}, {"Pan Direction", 0}, {"LFO Wave", wave}}, 7.5);
+            const auto gl = gainTrack(o.l, rate), gr = gainTrack(o.r, rate);
+            const double hz = rotationHz(crossings(gl, 100), 100, (double)gl.size());
+            const double fl = fractionBelow(gl, f, 100, 0.5), fr = fractionBelow(gr, f, 100, 0.5);
+            INFO(rate << " Hz, wave " << wave << ": " << hz << " Hz, below half " << fl << " / " << fr);
+            REQUIRE(std::abs(hz / f - 1) < 0.003);
+            REQUIRE(std::abs(fl - below) < 0.005);
+            REQUIRE(std::abs(fr - below) < 0.005);
+            if (wave == 0) // a linear crossfade: the gains sum to 1
+                for (size_t i = 100; i < gl.size(); ++i)
+                    REQUIRE(std::abs(gl[i] + gr[i] - 1) < 0.01);
+        }
+}
+
+TEST_CASE("Auto Pan: the directions set the channels' phase offsets, as measured")
+{
+    // The right channel's gain against the left's, in degrees of the LFO (batch autopan_c dir1-4,
+    // w0, lr_w0): L<>R and L/R 180, L>>R -60, L<<R +60, L turn -90, R turn +90; within 2 degrees.
+    const double f = 0.67291;
+    const double want[6] = {180, -60, 60, -90, 90, 180};
+    for (int d = 0; d < 6; ++d)
+    {
+        auto o = modRender(44100, 2, "Auto Pan", {{"LFO Speed", f}, {"L/R Depth", 100}, {"Pan Direction", d}, {"LFO Wave", 0}}, 6.5);
+        const double got = std::arg(fundamental(gainTrack(o.r, 44100), f, 100) / fundamental(gainTrack(o.l, 44100), f, 100)) * 180 / M_PI;
+        const double err = std::remainder(got - want[d], 360);
+        INFO("direction " << d << ": " << got << " degrees");
+        REQUIRE(std::abs(err) < 2);
+    }
+}
+
+TEST_CASE("Auto Pan: direction L/R follows a sine with a steepness per wave, as measured")
+{
+    // Each channel falls once the LFO's cosine is below 0.069, in proportion to a measured steepness
+    // per wave; the reference's share of each period below half gain (batch autopan_c/d lr_w*):
+    // 0.3259 (wave 0, whose floor is 0.091), 0.4134 (14), 0.4593 (20), 0.5040 (27); within 0.005.
+    const double f = 0.67291;
+    for (auto [wave, below, floor] : {std::tuple{0, 0.3259, 0.091}, {14, 0.4134, 0.0}, {20, 0.4593, 0.0}, {27, 0.5040, 0.0}})
+    {
+        auto o = modRender(44100, 2, "Auto Pan", {{"LFO Speed", f}, {"L/R Depth", 100}, {"Pan Direction", 5}, {"LFO Wave", wave}}, 6.5);
+        const auto gl = gainTrack(o.l, 44100);
+        const double fl = fractionBelow(gl, f, 100, 0.5), lo = *std::min_element(gl.begin() + 100, gl.end());
+        INFO("wave " << wave << ": below half " << fl << ", floor " << lo);
+        REQUIRE(std::abs(fl - below) < 0.005);
+        REQUIRE(std::abs(lo - floor) < 0.01);
+    }
+}
+
+TEST_CASE("Auto Pan: F/R swings the delay in the turn directions only, at 44.1, 48 and 96 kHz")
+{
+    // R turn, wave 20 (whose plateaus let the swing be read from plateau to plateau), L/R depth 0:
+    // each channel's delay grows with its attenuation, by 124 samples at 44.1 kHz at full F/R depth.
+    // The reference's swing (batch autopan_c fr127_d4w20 and fr64: F/R 127 and 64, i.e. 31 and 16
+    // steps of 4): 2.8005 and 1.445 ms; within 1% (tolerance proposed). No swing at L<>R or L/R.
+    for (double rate : {44100.0, 48000.0, 96000.0})
+        for (auto [pct, ms] : {std::pair{100.0, 2.8005}, {100.0 * 16 / 31, 1.445}})
+        {
+            auto o = modRender(rate, 2, "Auto Pan", {{"LFO Speed", 0.67291}, {"Pan Direction", 4}, {"F/R Depth", pct}, {"LFO Wave", 20}}, 4, 150);
+            const auto d = delayTrack(envelopeAt(o.l, rate, 150), 150);
+            const double swing = peakToPeak(d, 100, d.size());
+            INFO(rate << " Hz, F/R " << pct << " %: swing " << swing << " ms");
+            REQUIRE(std::abs(swing / ms - 1) < 0.01);
+        }
+    for (int dir : {0, 5})
+    {
+        auto o = modRender(44100, 2, "Auto Pan", {{"LFO Speed", 0.67291}, {"Pan Direction", dir}, {"F/R Depth", 100}}, 3, 150);
+        const auto d = delayTrack(envelopeAt(o.l, 44100, 150), 150);
+        REQUIRE(peakToPeak(d, 100, d.size()) < 0.001);
+    }
+}
+
+TEST_CASE("The rotary plugin's insertion modes: Mono feeds both channels the input's mean, Stereo each its own")
+{
+    // A left-only source (batch autopan_c st_*: an element panned hard left): with Stereo
+    // the right output stays silent, with Mono both channels carry half the input.
+    for (auto [modeId, module] : {std::pair{2, "Auto Pan"}})
+        for (double mode : {0.0, 1.0})
+        {
+            auto o = modRender(44100, modeId, module, {{"Input Mode", mode}}, 0.5, 3000, true);
+            double right = 0;
+            for (size_t i = 0; i < o.r.size(); ++i)
+                right = std::max(right, (double)std::abs(o.r[i]));
+            const double gain = 1;
+            INFO(module << ", input mode " << mode << ": right peak " << right);
+            if (mode == 1)
+                REQUIRE(right == 0);
+            else
+                REQUIRE(std::abs(right / (0.125 * gain) - 1) < 0.01);
+        }
+}
+
+TEST_CASE("The rotary plugin's insertion modes: the three-band EQ as measured, at 44.1 kHz and within the rate gate")
+{
+    // First-order shelves (Rotary A's law) and a peak with Q = width x 10^(-|gain| / 40), modulation
+    // off: the reference's levels against its dry input (batch autopan_c eq*, a saw at velocity 50)
+    // within 0.05 dB at 44.1 kHz
+    // (tolerance proposed); at 48, 96 and 192 kHz within the rate gate of the 44.1 kHz levels.
+    struct Setting { double loHz, loDb, hiHz, hiDb, midHz, midDb, width; std::vector<std::pair<double, double>> ref; };
+    const std::vector<Setting> pan{
+        {250, 12, 5000, 0, 1600, 0, 0.7, {{110.00, 11.29}, {330.00, 8.07}, {990.00, 2.76}, {2970.00, 0.42}, {8910.01, 0.04}}},
+        {250, -12, 5000, 0, 1600, 0, 0.7, {{110.00, -11.29}, {330.00, -8.07}, {990.00, -2.76}, {2970.00, -0.42}, {8910.01, -0.04}}},
+        {250, 0, 5000, 12, 1600, 0, 0.7, {{110.00, 0.03}, {330.00, 0.25}, {990.00, 1.81}, {2970.00, 6.73}, {8910.01, 11.08}}},
+        {250, 0, 5000, -12, 1600, 0, 0.7, {{110.00, -0.03}, {330.00, -0.25}, {990.00, -1.81}, {2970.00, -6.74}, {8910.01, -11.10}}},
+        {250, 0, 2000, 6, 1600, 0, 0.7, {{110.00, 0.04}, {330.00, 0.32}, {990.00, 1.99}, {2970.00, 4.86}, {8910.01, 5.88}}},
+        {250, 0, 5000, 0, 1600, 12, 0.7, {{110.00, 0.58}, {330.00, 3.57}, {990.00, 10.39}, {2970.00, 9.48}, {8910.01, 2.38}}},
+        {250, 0, 5000, 0, 630, -12, 2, {{110.00, -0.48}, {330.00, -4.28}, {990.00, -6.35}, {2970.00, -0.70}, {8910.01, -0.06}}},
+        {250, 0, 5000, 0, 4000, 6, 5, {{110.00, -0.00}, {330.00, 0.00}, {990.00, 0.03}, {2970.00, 1.04}, {8910.01, 0.11}}}};
+    for (auto [modeId, module, settings] : {std::tuple{2, "Auto Pan", &pan}})
+    {
+        auto level = [&](double rate, const Setting &s, double hz) {
+            auto o = modRender(rate, modeId, module,
+                               {{"Low Shelf Frequency", s.loHz}, {"Low Shelf Gain", s.loDb}, {"High Shelf Frequency", s.hiHz},
+                                {"High Shelf Gain", s.hiDb}, {"Mid Frequency", s.midHz}, {"Mid Gain", s.midDb}, {"Mid Width", s.width}},
+                               0.6, hz);
+            double e = 0;
+            const size_t a = (size_t)(0.2 * rate), b = o.l.size();
+            for (size_t i = a; i < b; ++i)
+                e += (double)o.l[i] * o.l[i];
+            return 10 * std::log10(e / (b - a) / (0.25 * 0.25 / 2));
+        };
+        for (auto &s : *settings)
+        {
+            double peak = -1e9;
+            for (auto [hz, db] : s.ref)
+                peak = std::max(peak, db);
+            for (auto [hz, db] : s.ref)
+            {
+                const double at44 = level(44100, s, hz);
+                INFO(module << ": low " << s.loDb << " dB, high " << s.hiHz << " Hz " << s.hiDb << " dB, mid " << s.midHz << " Hz "
+                            << s.midDb << " dB width " << s.width << ", at " << hz << " Hz: " << at44 << ", reference " << db);
+                REQUIRE(std::abs(at44 - db) < 0.05);
+                for (double rate : {48000.0, 96000.0, 192000.0})
+                    REQUIRE(std::abs(level(rate, s, hz) - at44) < (db > peak - 20 ? 0.05 : 0.5));
+            }
+        }
+    }
+}
+
+TEST_CASE("Auto Pan state round-trips")
+{
+    Plugin a(rotaryId);
+    a.set(1, 2);
+    for (auto [n, v] : {std::pair{"LFO Speed", 3.2}, {"L/R Depth", 80}, {"F/R Depth", 35}, {"Pan Direction", 3}, {"LFO Wave", 6},
+                           {"Low Shelf Frequency", 125}, {"Low Shelf Gain", 4}, {"Mid Frequency", 900}, {"Mid Gain", -3}, {"Mid Width", 2.5},
+                           {"High Shelf Frequency", 6000}, {"High Shelf Gain", 2}, {"Input Mode", 0}})
+        a.set(paramIdByName(a.p, "Auto Pan", n), v);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin b(rotaryId);
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
+    auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 0; i < params->count(a.p); ++i)
+    {
+        clap_param_info_t info;
+        params->get_info(a.p, i, &info);
+        REQUIRE(a.get(info.id) == b.get(info.id));
+    }
+    std::vector<float> inL, inR, ra, rb;
+    signal(24000, inL, inR);
+    a.activate();
+    b.activate();
+    REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+}
+
+TEST_CASE("Auto Pan: every parameter's value text parses back")
+{
+    Plugin pl(rotaryId);
+    pl.set(1, 2);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    int checked = 0;
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if ((info.id >> 8) != 2)
+            continue;
+        for (double t : {0., .25, .5, .75, 1.})
+        {
+            double v = info.min_value + t * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            char text[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, v, text, sizeof(text)));
+            double back = NAN;
+            INFO(info.name << " at " << v << ": \"" << text << "\"");
+            REQUIRE(params->text_to_value(pl.p, info.id, text, &back));
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                REQUIRE(back == v); // a label must select the value it came from
+            char again[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, back, again, sizeof(again)));
+            REQUIRE(!std::strcmp(text, again));
+            ++checked;
+        }
+    }
+    REQUIRE(checked == 65); // five points on each of the mode's thirteen parameters, no vacuous pass
+}
+
