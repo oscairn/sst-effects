@@ -2685,7 +2685,7 @@ git push origin oscairn-v0.2.0
 ```
 
 The [release workflow](../.github/workflows/release.yml) builds the single-file `.clap` for each
-platform (`macos-arm64`, `linux-arm64`), runs upstream's tests, ours and the privacy check, and the
+platform (`macos-arm64`, `linux-arm64`, `linux-x86_64`), runs upstream's tests, ours and the privacy check, and the
 device dependency checks, and creates a GitHub Release holding `oscairn-effects-<platform>.clap`,
 `licenses.tar.gz` and `oscairn-release.json`. The tag version must match the package version; the
 release fails if it does not. To try the workflow without a tag, run it manually
