@@ -215,7 +215,7 @@ reverb DSP:
 | Plugin | Modes (types) | Base | Borrowed | Written | Side-chain input |
 | --- | --- | --- | --- | --- | --- |
 | Reverb | 16 (15 reverbs + Early Reflection) | 4 | 2 | 10 | |
-| Delay | 9 | 2 | 2 | 5 | |
+| Delay | 9 | 1 | 2 | 6 | |
 | Chorus | 6 | 4 | 1 | 1 | |
 | Flanger | 5 | 4 | 0 | 1 | yes |
 | Phaser | 5 | 3 | 0 | 2 | yes |
@@ -227,7 +227,7 @@ reverb DSP:
 | Tech | 18 | 4 | 1 | 13 | yes |
 | EQ | VCM EQ 501 + Part 3-band, Part 2-band, Master 5-band | 0 (+3 EQs on sst-filters biquads) | 0 | 1 | |
 | Misc | 11 | 3 | 3 | 5 | yes |
-| **All 104 types** | | **36** | **23** | **45** | |
+| **All 104 types** | | **35** | **23** | **46** | |
 
 **Base** means an sst-effects effect (bus or voice) with a parameter mapping and, where the
 reference differs, a reference-matching mode. **Borrowed** means a block from another project
@@ -259,7 +259,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | SHIMMER REVERB | 01 60 | Rev |  | 50 | 1 | Reverb | base | sst Reverb2 + own pitch shifter in the feedback path |
 | CROSS DELAY | 02 00 | Var,InsA/B,A/D |  | 358 | 149 | Delay | written | own cross delay, the tempo mode's core with ms times (built; section 15) |
 | TEMPO CROSS DELAY | 02 10 | Var,InsA/B,A/D |  | 1426 | 787 | Delay | written | own cross delay fitted to renders (built; section 15) |
-| TEMPO DELAY MONO | 02 20 | Var,InsA/B,A/D |  | 84 | 61 | Delay | base | sst Delay, mono routing + mapping |
+| TEMPO DELAY MONO | 02 20 | Var,InsA/B,A/D |  | 84 | 61 | Delay | written | own one-line two-tap delay, loop = note time + lag, taps ± diffusion, fitted to renders (built; section 15) |
 | TEMPO DELAY STEREO | 02 28 | Var,InsA/B,A/D |  | 361 | 165 | Delay | written | own cross delay with one note time, lag on the loop and ± diffusion on the outputs, fitted to renders (built; section 15) |
 | CONTROL DELAY | 02 30 | Var,InsA/B,A/D |  | 39 | 1 | Delay | base | sst Delay with a smoothed, controllable time + mapping |
 | DELAY LR | 02 40 | Var,InsA/B,A/D,Mas |  | 233 | 108 | Delay | written | own one-line-per-channel delay, four ms times, fitted to renders (built; section 15) |
@@ -547,9 +547,9 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
 23. **Open: the delay's equalizer parameters.** The tempo cross delay's EQ parameters (low and high
     frequency and gain) had no effect on any render (fx16), so the mode leaves them out. If the
     converter must round-trip every raw value (M7), they can be added as parameters that do nothing.
-    Since 2026-11-12 this is in doubt: on 02 00, 02 28, 02 40 and 02 50 the EQ shelves the whole
-    output, dry and wet alike, which a comparison inside one render cannot see (known difference
-    44); whether to model it is open.
+    Since 2026-11-12 this is in doubt: on 02 00, 02 20, 02 28, 02 40 and 02 50 the EQ shelves the
+    whole output, dry and wet alike, which a comparison inside one render cannot see (known
+    difference 44); whether to model it is open.
 24. **Open: plugin version and signing.** The plugins reported version 0.1.0 whatever changed;
     Oscairn keys its measurements by ID and version and keeps a store build per version, so each
     published build should get a new version, and be signed (`oscairn-sign`) with a key of Jacob's.
@@ -712,11 +712,12 @@ Per context, as the plugins report it, in RFC 0025's draft breakdown (bytes):
 | Two-band EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,088 | 1,088 / 59,032 | 0 | not measured |
 | Three-band EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,368 | 1,152 / 60,192 | 0 | not measured |
 | Master EQ, after decision 20 | 44.1 kHz / 48 and 96 kHz | 16 → 120 | 57,992 | 1,344 / 62,568 | 0 | not measured |
-| Tempo Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 528,156 / 574,524 / 1,145,172 | 0 | not measured |
-| Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 581,876 / 632,988 / 1,262,092 | 0 | not measured |
-| Tempo Stereo Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 1,052,452 / 1,145,188 / 2,286,492 | 0 | not measured |
-| L/R Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 581,308 / 632,420 / 1,261,524 | 0 | not measured |
-| L/C/R Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 291,188 / 316,744 / 631,296 | 0 | not measured |
+| Tempo Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 528,180 / 574,548 / 1,145,196 | 0 | not measured |
+| Cross Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 581,900 / 633,012 / 1,262,116 | 0 | not measured |
+| Tempo Stereo Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 1,052,476 / 1,145,212 / 2,286,516 | 0 | not measured |
+| L/R Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 581,332 / 632,444 / 1,261,548 | 0 | not measured |
+| L/C/R Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 291,212 / 316,768 / 631,320 | 0 | not measured |
+| Tempo Mono Delay | 44.1 / 48 / 96 kHz | 120 | (new) | 531,376 / 578,176 / 1,154,164 | 0 | not measured |
 | Circuit Compressor | any | 120 | (new) | 792 | 0 | not measured |
 | Rotary A | 44.1 kHz / 48 and 96 kHz | 120 | (new) | 34,152 / 147,864 | 0 | not measured |
 
@@ -2023,6 +2024,83 @@ the input delayed by the damping's length.
 Unverified for this type: the line's feed with a true stereo input (known difference 47), the EQ's
 shelf laws (known difference 44), and rates other than 44.1 kHz against renders (none recorded).
 
+### Tempo Mono Delay (built 2026-11-12, measured 2026-11-12)
+
+Mode "Tempo Mono Delay" of Oscairn FX Delay (`org.oscairn.effects.delay`, mode 6),
+`effects/TempoMonoDelay.h`: ONE recirculating line. The mono-mean input feeds the line, which
+feeds itself back through the family's two-tap damping every note time plus Lag, and is read for
+the left channel L/R Diffusion later than that and for the right channel L/R Diffusion earlier,
+so each channel's echoes sit on {time + lag ± diffusion + k × (time + lag)}. Measured against two
+batches of the reference type 02 20: `measurements/qwen-night-2026-11-12/tempo_mono/` (13
+renders; analysis `analyse.py`, gate `results.md`) and the review batch
+`measurements/qwen-night-2026-11-12-review/tempo_mono/` (11 renders, every one with the dry
+click in it, so every time is measured inside one render against its own click, known
+difference 12). The first batch's wet-only renders (balance D<W63 cuts the dry completely) carry
+no click: they gave the echo spacings and the left-right gap, and their absolute positions only
+against the recorder's lead-in, which varies by more than 90 ms between renders; the review
+batch replaced every conclusion that rested on that.
+
+Raw mapping for the converter (TEMPO DELAY MONO, Data List p. 160; both batches' pfms were
+written with these laws and every render matched them):
+
+| ins_a param | raw | plugin parameter |
+| --- | --- | --- |
+| 1 Delay Time | Table #13 index 0–19 | Tempo Mono Delay/Delay Time (the same index) |
+| 2 Feedback Level | v + 64 (1–127 = −63..+63) | Tempo Mono Delay/Feedback |
+| 3 Feedback High Damp | ratio × 10 (1–10 = 0.1–1.0) | Tempo Mono Delay/High Damping |
+| 4 L/R Diffusion | 64 + ms (1–127 = −63..+63 ms, as printed) | Tempo Mono Delay/L/R Diffusion (ms) |
+| 5 Lag | 64 + ms (1–127 = −63..+63 ms) | Tempo Mono Delay/Lag (ms) |
+| 10 Dry/Wet Balance | v + 64 (1–127, 64 = D=W) | Tempo Mono Delay/Mix (same order) |
+| 13–16 EQ low/high freq+gain | Data List p. 160 / Table #3 | none: they act on the whole output and the mode does not build them (known difference 44) |
+
+| Law | Probe | Against renders |
+| --- | --- | --- |
+| One line, both channels on one grid with no diffusion: echoes at the note time and every multiple after it | tm_base, tm_t150 | 22,049-sample spacing, five echoes per channel, L = R to 0.00 dB, ours identical |
+| Line length floor(ms × 44.0991) samples at 44.1 kHz, ms = the note time truncated to 0.1 ms plus Lag and ± Diffusion (the tempo stereo type's law, without its halving) | tm_base, tm_tmin, tmx_t18, tmx_tmax | 22,049 (quarter), 1,834 (1/32 triplet, "41.6 ms"; the untruncated cross law gives 1,837), and 5 and 6 quarters 110,247 and 132,297 samples after the click and again between echoes 1 and 2, all exact (round(ms × 44.1) − 1 gives 110,249 / 132,299) |
+| No halving: the line holds the full 3,000 ms | tmx_tmax | first echo 132,297 samples after the render's own click; the stereo type halves 6 quarters to 66,148 (known difference 45) |
+| Feedback v / 63.5 per loop, negatives decay alike and flip polarity once per loop | tm_base, tm_fbmax, tm_fbneg, tm_tmin | −11.98 / −0.07 dB per loop (law −11.97 / −0.07), sign pattern +−+− at v = −63, ours within 0.01 dB |
+| Damping two-tap g = 5(1 − r)/9, feedback path only (echo 1 unfiltered) | tm_dampmin, tm_damphalf | every octave band 125 Hz–16 kHz within 0.05 dB of the reference |
+| Lag: 1 ms per raw step on the loop and both taps | tmx_lagn, tmx_lagp, tm_lagneg | echoes at 19,271 / 24,827 samples (22,049 ∓ round(63 × 44.1)) on both channels and repeating at that same spacing; ours identical |
+| L/R Diffusion: 1 ms per raw step on each tap, the left later and the right earlier than the loop, which it does not move | tmx_diffp, tmx_diffn, tm_diffpos, tm_diffneg | at raw +63 the left echo at 24,827 and the right at 19,271 samples, both repeating every 22,049; raw −63 mirrors it; the gap is 5,556 samples (two roundings of 63 ms), ours identical |
+| Balance: the tempo types' linear position x = (v + 63)/126, equal power | tm_base, tm_tmin, tmx_mixp21, tmx_mixm21 | wet/dry 0.00 / +4.77 / −4.77 dB at D=W / ±21 (02 00's position would give ±7.04); the wet end cuts the dry |
+| Host tempo drives the grid, the performance tempo does not | tm_t150 vs tm_base | the grid stays 22,049 samples, not 17,639 |
+| The EQ parameters act on the whole output, not in the loop | tm_eq vs tm_damphalf; tmx_eqlo, tmx_eqhi, tmx_eqflat | the loop's per-band drop moves ≤ 0.03 dB up to 4 kHz (0.12 / 0.29 dB at 8 / 16 kHz) and echo/click stays 0.00 dB in every band, but the click itself changes shape: high 16 kHz −12 dB takes 7.4 dB off its 16 kHz band, low 2.0 kHz +12 dB lifts 125 Hz–1 kHz by 10–13 dB against 16 kHz, against a scatter (s.d. over 13 EQ-free renders) of 0.6–0.84 dB from 2 kHz up and 2.3–4.2 dB below 1 kHz (known difference 44) |
+
+Results: on the night batch, worst 0.05 dB (damping, 16 kHz; tm_eq's loop drop is 0.28 dB off at 16 kHz, the reference's own +0.29 dB against tm_damphalf) and 0 samples on every lag; the
+review batch, which the plugin was then corrected to, matches to 0 samples and 0.01 dB. Hold-outs: none are left unfitted. The
+night batch's three (tm_tmax, tm_lagneg, tm_eq) each turned out to need the review batch to be
+read, and the review batch changed the code (the diffusion law), so all its renders count as
+fitting renders.
+
+The review batch changed two laws. The time law is now the tempo stereo type's floor(ms ×
+44.0991), which the review batch's 5- and 6-quarter echoes need (round(ms × 44.1) − 1 put them 2
+samples late) and which every other time of both batches fits too. Diffusion: the first version held the left tap at the note
+time, shortened the right tap by the whole gap and read the raw step as 2 ms (range −126..126 ms),
+because the wet-only renders showed only the gap. With the click in the render the two taps
+split symmetrically about the loop, so the parameter is now the printed −63..+63 ms (default
+8 ms, the factory bank's most common raw 72) and moves each tap by its value. Lag was already
+right (the loop follows it); the unhalved 6-quarter line, read at first from the lead-in alone,
+is confirmed.
+
+The line is one buffer read three times: the loop at the note plus Lag and the two output taps.
+At rates other than 44.1 kHz only the loop is shortened by the damping filter's 32-sample delay,
+so the output taps keep their time.
+
+Tests: the four "Tempo mono delay" cases hold the 22,049-sample grid on both channels at 44.1 kHz
+and, with the loop, in seconds at 48 to 192 kHz, the 1,834-sample truncation, the 110,247- and
+132,297-sample long notes, the feedback decays and polarity, the linear balance at five positions,
+the symmetric diffusion (24,827 / 19,271) with the loop at the note time, the lag on the loop and
+both taps (19,271, repeating at 19,271), the host tempo, the two-tap damping, the state round trip
+and the value texts. Each fails one case when its law is changed: the night diffusion law, a loop
+without the lag, round(ms × 44.1) − 1, the cross delay's balance, and the damping filter's delay
+left in the loop (or taken off an output tap) at other rates.
+
+Unverified for this type: the line beyond 3,000 ms, which only host tempos under 120 BPM reach
+(known difference 45), the EQ's
+shapes (known difference 44), rates other than 44.1 kHz (tested, not recorded), and the line's
+feed with a true stereo source (known difference 47: every probe drives both channels with the
+same click).
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -2045,7 +2123,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
 | 13 | (Superseded by 23 for the built Hall A.) Hall reverb measurements; displayed time against measured decay; level and onset now measured (fx17: wet −2.89 / −3.23 dB re the dry click at factory settings, onset = initial delay + 48.4 ms) | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
-| 14 | Types not built | 95 of the 104 types (the five-band EQ, the tempo cross delay, the cross delay, the tempo stereo delay, the L/R and L/C/R delays, the hall reverb, the circuit-style compressor and the two-rotor rotary are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 14 | Types not built | 94 of the 104 types (the five-band EQ, the cross delay, the tempo cross delay, the tempo stereo and tempo mono delays, the L/R and L/C/R delays, the hall reverb, the circuit-style compressor and the two-rotor rotary are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
 | 15 | (Superseded by 26–29 for the built Circuit Compressor.) Compressor measurements fx7–fx23 | Static curve (fx7, fx13), steps (fx21–fx23): explained by a makeup gain set by the settings (section 15) | Reference behaviour | Built 2026-11-05 | fx7, fx13, fx21–fx23 | `effects/CircuitCompressor.h` |
 | 16 | Tempo cross delay at tempos other than 120 BPM | Not measured | The recorder's host is fixed at 120 BPM | The plugin follows the transport tempo by the note values (assumed) | — | `effects/TempoCrossDelay.h` |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
@@ -2075,10 +2153,10 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 41 | Rotary A: the reference's output clip | The reference clips each channel after the taps at 2.51 times a full-scale dry signal's level there (about +8 dB; batch c `e_jacob_hot_vol40`, flat tops at ±0.388 at part volume 40); the plugin does not clip | Not modelled | Proposed for Jacob (decision 28): a hard clip at that level; not added | batch c `e_jacob_hot_vol40`, `e_dry_two_hot_vol40`; `task1.py` | `RotarySpeaker::processBlock` |
 | 42 | Rotary A: residuals measured on clipped recordings | AM fundamentals in the steady table (r_mic, r_rate, c_mic, c_ho, c_jacob) are 0.1-2.0 dB low in the reference from clipping; rates, pitch deviations and phases unaffected | Probes too hot (two tones at velocity 100-127) | Re-measured clean for the probes listed in section 15; the rest not repeated | batch c `e_*` against batch a/b; `task1.py` | — |
 | 43 | Cross Delay (02 00) balance: the reference's wet/dry is 40·log10((63 − \|v\|) / 63) dB (±7.04 at ±21, ±24.93 at ±48, ±35.85 at ±55); the tempo type 02 10 is linear, tan((π/2)(v + 63)/126) (±4.77 / ±14.46; fx17, and the review batch's click probes `tcd_mix_p21/m48`: +4.77 / −14.46) — the two types differ | Ratios match at ten positions within 0.01 dB; the absolute normalisation (equal power, as shipped, or the far side at unity, 3 dB louder at D=W) is not measured | Renders measure only the in-render ratio (known difference 12) | Shipped per type: `squaredBalancePosition` for 02 00, the linear position for the tempo mode; normalisation unverified | cross_delay_extra `cd_mix_*`, review cross_delay `cd_mix_*`, `tcd_mix_*`, fx17 `d_bal*` | `squaredBalancePosition` |
-| 44 | Delay modes: the EQ parameters | Not built in any delay mode, but they act: on 02 00, 02 28, 02 40 and 02 50 the EQ shelves the whole output, dry and wet alike, and nothing in the loop. With the EQ on, echo-to-click and echo-to-echo ratios inside a render stay within the method's noise (≤ 0.02 dB per octave band), while the click's own spectrum follows the EQ against same-batch renders without it: high shelf 16.0 kHz −12 dB gives −7.1 to −8.3 dB at 16 kHz and −2.5 to −4.0 dB at 8 kHz (02 00 cd_eq, 02 28 ts_eq, 02 40 lr_eq_dw, 02 50 lcr_r_eqdw), against a scatter of 0.8–1.5 dB there. Below 1 kHz the click's own scatter (2–5 dB) hides a low shelf at 32 Hz | Decision 23's evidence (fx16) and the first passes compared echoes or loops with the click inside one render, which an EQ on the whole output leaves unchanged; the shelves' frequency and gain laws are not measured | Open for Jacob (decision 23): build an output EQ per type after a fitting batch (a tone or noise source, not the click), or keep it out | qwen-cross-delay-2026-11-11 `cd_eq`; tempo_stereo `ts_eq`; delay_lr `lr_eq`, review `lr_eq_dw` vs `lr_pair_dw`; delay_lcr `lcr_eq`, review `lcr_r_eqdw`, `lcr_r_eqwet` | none (parameters not built) |
-| 45 | Tempo Stereo Delay (02 28): the longest lines | 02 28 halves the note time when the longer line would pass a threshold between 130,533 and 131,637 samples (6 quarters at 120 BPM repeat after 66,148 samples, 4 and 5 quarters after 88,198 and 110,247 unhalved); the plugin halves above 131,072. Only host tempos under 120 BPM ask for longer notes, and the recorder's host runs at 120 BPM | Whether 02 28 halves more than once is not reachable with this rig | Reported; the threshold inside the measured bracket is a choice | review batch `tempo_stereo` `rs_t19*` | `stereoNoteMs` |
-| 46 | Cross, L/R and L/C/R Delay (02 00, 02 40, 02 50): the ms time law's rounding | The reference's line lengths are floor(ms × 10 × c) samples with c between 4.40990 and 4.40994 (02 40: 0.1 / 11.3 / 29.1 / 57.9 ms are 4 / 498 / 1,283 / 2,553 samples, ours one fewer; 1,111.1 / 1,414.1 / 1,555.5 / 1,638.3 ms are 48,998 / 62,360 / 68,596 / 72,247, ours one more; every 02 50 time probed, the range ends included, and 02 00's 1,638.3 ms echo fit it too); ours is round(ms × 44.1) − 1. The two agree where ms × 44.1 is whole and differ by one sample (≤ 0.023 ms) elsewhere, inside the 0.1 ms gate. The tempo stereo delay measures the same factor and ships it (c = 4.40991, section 15) | The reference's own ms-to-samples conversion; `msLineSeconds` is shared by the three modes | Reported; inside the gate; moving the three modes to the floor law is open (it changes the landed Cross Delay's times by a sample) | delay_lr `lr_tmax`, `lr_hold_grid`; review batches `lr_law_a/b`, `delay_lcr`; delay_lcr `lcr_tmax`; qwen-cross-delay-2026-11-11 `cd_time_max` | `msLineSeconds` |
-| 47 | L/C/R Delay (02 50): the line's feed with a true stereo input | The mode feeds its one line the mean (l + r) / 2. Every probe drives the effect with the same click on both channels (the part's pan sits after the insertions, known difference 22), so the mean, a left-only and a right-only feed give the same render; a summed feed is ruled out (it would put the echo 6 dB over the click at D=W, measured 0.00 dB in lcr_r_dw and lcr_hold_mix) | The rig cannot deliver a stereo effect input | Unresolved; needs a source with different content on the two channels before the effect | review delay_lcr `lcr_r_dw`; delay_lcr `lcr_hold_mix` | `LcrDelay::processBlock` |
+| 44 | Delay modes: the EQ parameters | Not built in any delay mode, but they act: on 02 00, 02 20, 02 28, 02 40 and 02 50 the EQ shelves the whole output, dry and wet alike, and nothing in the loop. With the EQ on, echo-to-click and echo-to-echo ratios inside a render stay within the method's noise (≤ 0.03 dB per octave band up to 4 kHz), while the click's own spectrum follows the EQ against same-batch renders without it: high shelf 16.0 kHz −12 dB gives −7.1 to −8.3 dB at 16 kHz and −2.5 to −4.0 dB at 8 kHz (02 00 cd_eq, 02 20 tm_eq, 02 28 ts_eq, 02 40 lr_eq_dw, 02 50 lcr_r_eqdw), against a scatter of 0.6–1.5 dB there; 02 20's low shelf 2.0 kHz +12 dB raises 125 Hz–1 kHz by 10–13 dB against 16 kHz (tmx_eqlo). Below 1 kHz the click's own scatter (2–5 dB) hides a low shelf at 32 Hz | Decision 23's evidence (fx16) and the first passes compared echoes or loops with the click inside one render, which an EQ on the whole output leaves unchanged; the shelves' frequency and gain laws are not measured | Open for Jacob (decision 23): build an output EQ per type after a fitting batch (a tone or noise source, not the click), or keep it out | qwen-cross-delay-2026-11-11 `cd_eq`; tempo_mono `tm_eq`, review `tmx_eqlo/eqhi/eqflat`; tempo_stereo `ts_eq`; delay_lr `lr_eq`, review `lr_eq_dw` vs `lr_pair_dw`; delay_lcr `lcr_eq`, review `lcr_r_eqdw`, `lcr_r_eqwet` | none (parameters not built) |
+| 45 | Tempo Stereo and Tempo Mono Delay (02 28, 02 20): the longest lines | 02 28 halves the note time when the longer line would pass a threshold between 130,533 and 131,637 samples (6 quarters at 120 BPM repeat after 66,148 samples, 4 and 5 quarters after 88,198 and 110,247 unhalved); the plugin halves above 131,072. 02 20 does not halve: its 6 quarters repeat after 132,297 samples; the plugin clamps there. Only host tempos under 120 BPM ask for longer notes, and the recorder's host runs at 120 BPM | Whether 02 28 halves more than once, and what 02 20 holds beyond 3,000 ms, are not reachable with this rig | Reported; the threshold inside the measured bracket is a choice | review batches `tempo_stereo` `rs_t19*`, `tempo_mono` `tmx_t18`, `tmx_tmax` | `stereoNoteMs`, `monoMaxSamples` |
+| 46 | Cross, L/R and L/C/R Delay (02 00, 02 40, 02 50): the ms time law's rounding | The reference's line lengths are floor(ms × 10 × c) samples with c between 4.40990 and 4.40994 (02 40: 0.1 / 11.3 / 29.1 / 57.9 ms are 4 / 498 / 1,283 / 2,553 samples, ours one fewer; 1,111.1 / 1,414.1 / 1,555.5 / 1,638.3 ms are 48,998 / 62,360 / 68,596 / 72,247, ours one more; every 02 50 time probed, the range ends included, and 02 00's 1,638.3 ms echo fit it too); ours is round(ms × 44.1) − 1. The two agree where ms × 44.1 is whole and differ by one sample (≤ 0.023 ms) elsewhere, inside the 0.1 ms gate. The tempo stereo and tempo mono delays measure the same factor and ship it (c = 4.40991, section 15) | The reference's own ms-to-samples conversion; `msLineSeconds` is shared by the three modes | Reported; inside the gate; moving the three modes to the floor law is open (it changes the landed Cross Delay's times by a sample) | delay_lr `lr_tmax`, `lr_hold_grid`; review batches `lr_law_a/b`, `delay_lcr`; delay_lcr `lcr_tmax`; qwen-cross-delay-2026-11-11 `cd_time_max` | `msLineSeconds` |
+| 47 | L/C/R and Tempo Mono Delay (02 50, 02 20): the line's feed with a true stereo input | Both modes feed their one line the mean (l + r) / 2. Every probe drives the effect with the same click on both channels (the part's pan sits after the insertions, known difference 22), so the mean, a left-only and a right-only feed give the same render; a summed feed is ruled out (it would put the echo 6 dB over the click at D=W, measured 0.00 dB in lcr_r_dw, lcr_hold_mix and tm_base) | The rig cannot deliver a stereo effect input | Unresolved; needs a source with different content on the two channels before the effect | review delay_lcr `lcr_r_dw`; delay_lcr `lcr_hold_mix`; tempo_mono `tm_base` | `LcrDelay::processBlock`, `TempoMonoDelay::processBlock` |
 
 ## 17. Oscairn porting checklist (decision 22)
 

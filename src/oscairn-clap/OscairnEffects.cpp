@@ -30,6 +30,7 @@
 #include "effects/TempoStereoDelay.h"
 #include "effects/LRDelay.h"
 #include "effects/LcrDelay.h"
+#include "effects/TempoMonoDelay.h"
 #include "effects/HallReverb.h"
 #include "effects/CircuitCompressor.h"
 #include "effects/RotarySpeaker.h"
@@ -269,6 +270,7 @@ const std::vector<Category> &categories()
         delay.modes.push_back(mode<oscairn_fx::delay::TempoStereoDelay>(3, "Tempo Stereo Delay"));
         delay.modes.push_back(mode<oscairn_fx::delay::LRDelay>(4, "L/R Delay"));
         delay.modes.push_back(mode<oscairn_fx::delay::LcrDelay>(5, "L/C/R Delay"));
+        delay.modes.push_back(mode<oscairn_fx::delay::TempoMonoDelay>(6, "Tempo Mono Delay"));
         delay.finish();
         c.push_back(std::move(delay));
 

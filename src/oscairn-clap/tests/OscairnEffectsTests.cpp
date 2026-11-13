@@ -2898,6 +2898,231 @@ TEST_CASE("L/C/R delay: every parameter's value text parses back")
     REQUIRE(checked == 40); // five points on each of the mode's eight parameters, no vacuous pass
 }
 
+// ---- Tempo mono delay (one line, two taps, loop = note time plus Lag; plan, section 15) ----
+
+TEST_CASE("Tempo mono delay: the taps, times and gains at 44.1 and 48 kHz")
+{
+    // One recirculating line (effects/TempoMonoDelay.h): with no diffusion and no lag the
+    // mono-mean input answers on both channels at the note time and repeats at that spacing
+    // (this set has no separate feedback time). The time law is the TEMPO DELAY pair's:
+    // trunc(T ms, 0.1) x 44.1 rounded, minus 1 (tempo_stereo ts_base / ts_tmin): the quarter
+    // default (raw 11) at 120 BPM is 500.0 ms -> 22,049 samples; its 1/32 triplet "41.6 ms" ->
+    // 1,834. Feedback v / 63.5 per loop; the tempo types' linear balance position. A left
+    // impulse of 1 feeds the line 0.5 (the mono mean; difference 48).
+    const size_t q = 22049;
+    const double fb = 40 / 63.5, half = 0.5;
+    const std::vector<std::pair<const char *, double>> set{
+        {"Feedback", 40}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}};
+    std::vector<float> r;
+    auto l = delayImpulseMode(6, "Tempo Mono Delay", 44100, set, r, 3.5, 120);
+    REQUIRE(std::abs(l[L]) < 1e-12); // dry off (cos(pi/2) is 6e-17, not zero)
+    REQUIRE(l[L + q] == Approx(half).epsilon(1e-6));
+    REQUIRE(r[L + q] == Approx(half).epsilon(1e-6)); // no diffusion: both taps answer together
+    REQUIRE(l[L + 2 * q] == Approx(half * fb).epsilon(1e-6)); // loop spacing = the delay time
+    REQUIRE(r[L + 3 * q] == Approx(half * fb * fb).epsilon(1e-6));
+    for (size_t i = 1; i < 4 * q; ++i)
+        if (i % q)
+            REQUIRE((l[L + i] == 0 && r[L + i] == 0));
+    SECTION("The 1/32 triplet lands at 1,834 samples (the truncation, not the cross law)")
+    {
+        std::vector<float> r0;
+        auto l0 = delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                                   {{"Delay Time", 0}, {"Feedback", 40}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, r0, 0.3, 120);
+        REQUIRE(r0[L + 1834] == Approx(half).epsilon(1e-6)); // floor(41.6 ms x 44.0991); the cross law gives 1,837
+        REQUIRE(l0[L + 1834] == Approx(half).epsilon(1e-6)); // both taps answer together, on both channels
+    }
+    SECTION("The line holds 3,000 ms: repeats 132,297 samples apart, not halved as the stereo type's")
+    {
+        std::vector<float> rt;
+        auto lt = delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                                   {{"Delay Time", 19}, {"Feedback", 16}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, rt, 7.0, 120);
+        // 6 quarters = 3,000 ms; the reference repeats 132,297 samples after its click and after
+        // its first echo (review batch tmx_tmax), floor(3,000 x 44.0991)
+        REQUIRE(rt[L + 132297] == Approx(half).epsilon(1e-6));
+        REQUIRE(lt[L + 2 * 132297] == Approx(half * 16 / 63.5).epsilon(1e-6));
+        std::vector<float> r5; // 5 quarters: 110,247 (tmx_t18), round(ms x 44.1) - 1 gives 110,249
+        delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                         {{"Delay Time", 18}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, r5, 3.0, 120);
+        REQUIRE(r5[L + 110247] == Approx(half).epsilon(1e-6));
+    }
+    SECTION("Negative feedback flips the echo polarity once per loop")
+    {
+        std::vector<float> rn;
+        auto ln = delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                                   {{"Feedback", -63}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}}, rn, 2.5, 120);
+        REQUIRE(ln[L + q] == Approx(half).epsilon(1e-6));
+        REQUIRE(ln[L + 2 * q] == Approx(-half * 63 / 63.5).epsilon(1e-6));
+        REQUIRE(rn[L + 3 * q] == Approx(half * 63 / 63.5 * 63 / 63.5).epsilon(1e-6));
+    }
+    SECTION("At 48 to 192 kHz the taps and the loop keep their length in seconds")
+    {
+        for (double rate : {48000.0, 88200.0, 96000.0, 176400.0, 192000.0})
+        {
+            const double want = 22049. / 44100 * rate; // fractional read
+            std::vector<float> rr;
+            auto lr = delayImpulseMode(6, "Tempo Mono Delay", rate,
+                                       {{"Feedback", 40}, {"High Damping", 0.5}, {"L/R Diffusion", 0}, {"Mix", 63}}, rr, 1.2, 120);
+            auto peakIn = [&](double from, double to) {
+                size_t p = (size_t)(L + from);
+                for (size_t i = p; i < (size_t)(L + to); ++i)
+                    if (std::abs(lr[i]) > std::abs(lr[p]))
+                        p = i;
+                return (double)(p - L);
+            };
+            INFO("rate " << rate);
+            REQUIRE(std::abs(peakIn(0.5 * want, 1.5 * want) - want) <= 1.0);
+            REQUIRE(std::abs(peakIn(1.5 * want, 2.5 * want) - 2 * want) <= 1.0); // the loop
+        }
+    }
+    SECTION("The dry and wet follow the tempo types' linear position")
+    {
+        for (int v : {-48, -21, 0, 21, 48})
+        {
+            const double x = (v + 63) / 126.0;
+            auto out = delayImpulseMode(6, "Tempo Mono Delay", 44100,
+                                        {{"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", v}}, r, 0.6, 120);
+            REQUIRE(out[L] == Approx(std::cos(M_PI / 2 * x)).margin(1e-7));
+            REQUIRE(r[L + q] == Approx(0.5 * std::sin(M_PI / 2 * x)).margin(1e-7));
+        }
+    }
+}
+
+TEST_CASE("Tempo mono delay: L/R Diffusion splits the taps around the loop, Lag moves all three")
+{
+    // Review batch (dry in every render, feedback +40): Diffusion +63 puts the left echo at
+    // 24,827 samples and the right at 19,271, both repeating every 22,049 (tmx_diffp; tmx_diffn
+    // mirrors it); Lag -63 / +63 puts both echoes at 19,271 / 24,827 and repeats at that same
+    // spacing (tmx_lagn / tmx_lagp). So the loop runs at time + lag and the taps sit +-diffusion
+    // around it, 1 ms per printed ms each.
+    auto echoAt = [&](const std::vector<float> &x) {
+        size_t peak = 0;
+        for (size_t i = 1; i < x.size(); ++i)
+            if (std::abs(x[i]) > std::abs(x[peak]))
+                peak = i;
+        return (long)(peak - L);
+    };
+    const std::vector<std::pair<const char *, double>> base{
+        {"Delay Time", 11}, {"Feedback", 0}, {"High Damping", 1.0}, {"L/R Diffusion", 0}, {"Mix", 63}};
+    auto set = base;
+    set.emplace_back("L/R Diffusion", 63); // raw 127
+    std::vector<float> r0, r;
+    auto l0 = delayImpulseMode(6, "Tempo Mono Delay", 44100, base, r0, 1.0, 120);
+    auto l = delayImpulseMode(6, "Tempo Mono Delay", 44100, set, r, 1.0, 120);
+    const long q = 22049; // quarter at 120 BPM
+    REQUIRE(echoAt(l0) == q);
+    REQUIRE(echoAt(r0) == q);
+    REQUIRE(echoAt(l) == q + 2778); // round(63 x 44.1) later on the left
+    REQUIRE(echoAt(r) == q - 2778); // and earlier on the right
+    SECTION("The loop follows Lag and not Diffusion")
+    {
+        auto fed = set;
+        fed.emplace_back("Feedback", 40);
+        std::vector<float> rf;
+        auto lf = delayImpulseMode(6, "Tempo Mono Delay", 44100, fed, rf, 1.5, 120);
+        const double g = 40 / 63.5; // tmx_diffp: 24,827 and 19,271, both repeating every 22,049
+        REQUIRE(lf[L + q + 2778] == Approx(0.5).epsilon(1e-6));
+        REQUIRE(lf[L + 2 * q + 2778] == Approx(0.5 * g).epsilon(1e-6));
+        REQUIRE(rf[L + q - 2778] == Approx(0.5).epsilon(1e-6));
+        REQUIRE(rf[L + 2 * q - 2778] == Approx(0.5 * g).epsilon(1e-6));
+        auto lagged = base;
+        lagged.emplace_back("Lag", -63);
+        std::vector<float> rl;
+        auto ll = delayImpulseMode(6, "Tempo Mono Delay", 44100, lagged, rl, 1.0, 120);
+        REQUIRE(echoAt(ll) == q - 2778); // tmx_lagn: 19,271 on both channels
+        REQUIRE(echoAt(rl) == q - 2778);
+        lagged.emplace_back("Feedback", 40);
+        auto lg = delayImpulseMode(6, "Tempo Mono Delay", 44100, lagged, rl, 1.5, 120);
+        REQUIRE(lg[L + 2 * (q - 2778)] == Approx(0.5 * g).epsilon(1e-6)); // repeats at 19,271
+    }
+    SECTION("Host tempo moves the grid")
+    {
+        std::vector<float> r150;
+        auto l150 = delayImpulseMode(6, "Tempo Mono Delay", 44100, base, r150, 1.0, 150);
+        REQUIRE(echoAt(l150) == 17639); // 400.0 ms at 150 BPM: round(4000 x 4.41) - 1
+    }
+    SECTION("Damping is the two-tap in the feedback path; the first echo is unfiltered")
+    {
+        const std::vector<std::pair<const char *, double>> damp{
+            {"Delay Time", 11}, {"Feedback", 40}, {"High Damping", 0.1}, {"L/R Diffusion", 0}, {"Mix", 63}};
+        std::vector<float> rd;
+        auto ld = delayImpulseMode(6, "Tempo Mono Delay", 44100, damp, rd, 4.0, 120);
+        const double g = 5 * (1 - 0.1) / 9; // the two taps are decorrelated by the 500 ms gap:
+        double e1 = 0, e2 = 0;              // echo 2's energy is echo 1's x fb^2 x ((1-g)^2 + g^2)
+        for (size_t i = q; i < 2 * q; ++i)
+            e1 += (double)ld[L + i] * ld[L + i];
+        for (size_t i = 2 * q; i < 3 * q; ++i)
+            e2 += (double)ld[L + i] * ld[L + i];
+        const double f = 40 / 63.5; // feedback's own drop, on top of the filter's
+        REQUIRE(e2 == Approx(e1 * f * f * ((1 - g) * (1 - g) + g * g)).epsilon(0.02));
+        REQUIRE(ld[L + 2 * q] != 0); // the second echo exists (echo 1 came from the raw input)
+    }
+}
+
+TEST_CASE("Tempo mono delay state round-trips")
+{
+    Plugin a(delayId);
+    a.set(1, 6);
+    for (auto [n, v] : {std::pair{"Delay Time", 7}, {"Feedback", -21}, {"High Damping", 0.4},
+                        {"L/R Diffusion", 31.5}, {"Lag", -9}, {"Mix", 12}})
+        a.set(paramIdByName(a.p, "Tempo Mono Delay", n), v);
+    Buffer buf;
+    REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+    Plugin b(delayId);
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+    Buffer again;
+    REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+    REQUIRE(again.data == buf.data);
+    auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 0; i < params->count(a.p); ++i)
+    {
+        clap_param_info_t info;
+        params->get_info(a.p, i, &info);
+        REQUIRE(a.get(info.id) == b.get(info.id));
+    }
+    std::vector<float> inL, inR, ra, rb;
+    signal(24000, inL, inR);
+    a.activate();
+    b.activate();
+    REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+}
+
+TEST_CASE("Tempo mono delay: every parameter's value text parses back")
+{
+    Plugin pl(delayId);
+    pl.set(1, 6);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    int checked = 0;
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if ((info.id >> 8) != 6)
+            continue;
+        for (double t : {0., .25, .5, .75, 1.})
+        {
+            double v = info.min_value + t * (info.max_value - info.min_value);
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                v = std::round(v);
+            char text[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, v, text, sizeof(text)));
+            double back = NAN;
+            INFO(info.name << " at " << v << ": \"" << text << "\"");
+            REQUIRE(params->text_to_value(pl.p, info.id, text, &back));
+            if (info.flags & CLAP_PARAM_IS_STEPPED)
+                REQUIRE(back == v); // a label must select the value it came from
+            char again[256];
+            REQUIRE(params->value_to_text(pl.p, info.id, back, again, sizeof(again)));
+            REQUIRE(!std::strcmp(text, again));
+            ++checked;
+        }
+    }
+    REQUIRE(checked == 30); // five points on each of the mode's six parameters, no vacuous pass
+}
+
+// ---- Converter frequency scales (decision 17) ----
+#include "converter/FrequencyScales.h"
+#include <chrono>
+
 TEST_CASE("Frequency scales: the measured tables and their nearest formulas")
 {
     namespace sc = oscairn_fx::scales;
