@@ -270,7 +270,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | 2 MODULATOR | 03 10 | Var,InsA/B,A/D |  | 529 | 335 | Chorus | written | the four-tap network, mode "Dual Modulator" (built; section 15) |
 | SPX CHORUS | 03 20 | Var,InsA/B,A/D |  | 239 | 110 | Chorus | written | the four-tap network, mode "Chorus B" (built; section 15) |
 | SYMPHONIC | 03 30 | Var,InsA/B,A/D |  | 158 | 35 | Chorus | written | the four-tap network, mode "Chorus C" (built; section 15) |
-| ENSEMBLE DETUNE | 03 40 | Var,InsA/B,A/D |  | 384 | 187 | Chorus | written | own two-voice pitch shifter (measured 2026-11-15, not built; section 15) |
+| ENSEMBLE DETUNE | 03 40 | Var,InsA/B,A/D |  | 384 | 187 | Chorus | written | own two-voice pitch network, mode "Ensemble Detune" (built; section 15) |
 | GS1 ENSEMBLE & TREMOLO | 03 50 | Var,InsA/B,A/D |  | 52 | 0 | Chorus | borrowed | Surge XT BBD Ensemble (GPL-3.0) + sst Tremolo |
 | VCM FLANGER | 04 00 | Var,InsA/B,A/D |  | 210 | 116 | Flanger | written | own circuit-style flanger on the Surge XT BBD line |
 | CLASSIC FLANGER | 04 10 | Var,InsA/B,A/D |  | 124 | 224 | Flanger | base | sst Flanger + mapping |
@@ -2556,7 +2556,7 @@ Modes "Chorus A" (id 1), "Chorus B" (2), "Dual Modulator" (3) and "Chorus C" (4)
 Oscairn FX Chorus (`org.oscairn.effects.chorus`), `effects/ChorusFamily.h`, for the reference's types 03 00,
 03 20, 03 10 and 03 30. A new plugin because the bundle
 holds one plugin per category (section 6) and these four share one network, unlike the Tremolo &
-Rotary plugin's modes. Type 03 40 is measured but not built (below).
+Rotary plugin's modes. Type 03 40 is its fifth mode (below).
 Measurements: `fx-types-2026-11-15/` in the measurements folder, one folder per type code (its
 `INDEX.md` lists every take): per type the defaults, each parameter swept singly, two EQ settings,
 the stereo source, the owner's stored values on the bus he uses them on (insertion, and the variation
@@ -2655,13 +2655,67 @@ Chorus C 104,800; Chorus A at 44.1 kHz 96,000; Tremolo for comparison 53,100. Fe
 lines are empty, a block costs 18,600 (the wrapper; with three EQ bands on 37,000), and the plugin
 returns `CLAP_PROCESS_SLEEP`.
 
-**Type 03 40, not built.** Measured (defaults, every parameter swept, EQ, owner's values,
-null takes) and its structure partly determined: two voices, each a pitch shifter of two taps on a saw LFO
-with crossfading windows, the left voice detuned up and the right down by the same cents (words
-about (2^(c / 1200) - 1) x 65536), each voice's initial delay by the family's time law, Spread an
-equal-power pan of the two voices (words 11585 / 11585 at 0 to 16383 / 0 at 63), the two-band EQ
-(low and high shelves), the balance as Chorus A's at 0 dB. The windows' shape and the saw's speed are
-not yet determined well enough to build it honestly.
+### Ensemble Detune (built 2026-11-15)
+
+Mode "Ensemble Detune" (id 5) of Oscairn FX Chorus, `effects/PitchNetwork.h`, for the reference's type
+03 40. Measurements: `fx-types-2026-11-15/0340-ensemble-detune/` (its `INDEX.md`).
+
+Structure, as the null takes show it:
+
+- a first-order low shelf and a first-order high shelf on the input (the insertion types' design,
+  `eq::firstOrderShelf`), dry and wet alike, their coefficients held in 16-bit words with 2 and 4
+  integer bits (`eq::roundToSteps`);
+- two lines, left and right, each fed its own channel clipped to [-1, 1) and held as a float (no
+  word mask), no feedback;
+- per line a voice of two taps, read with linear interpolation at an age of 1 + the initial delay
+  plus (|d| + d s) / 2 and (2|d| + d s') / 2 samples, s a saw in [-1, 1) (the platform's 16-bit saw,
+  step 256 per 2^24 turns per 44.1 kHz sample, one ramp every 65,536 samples, started at phase 0,
+  advanced before it is read) and s' the same saw half a turn on; each tap's age moves by d / 65536
+  per sample, so the voice plays 1 - d / 65536 times the input's pitch;
+- the taps' gains: a crossfade window W = clip(2 (|s'| - 0.25), 0, 32767/32768) (|u| = 1 read as
+  32767/32768), the first tap W + b B and the second (32767/32768 - W) + b B, where B = clip(2 (|wrap(f +
+  s)| - 0.75), 0, 32767/32768) is a bump at one crossover, f = -0.5 sign(d), b = 0.375 (both 0 at detune
+  0); the right voice's first gain is clipped to [-1, 1), the left one's is not; each voice's sum clipped;
+- outputs: L = clip(4 (wet x clip(2 (n v_L + r v_R)) + dry x in_L)), R the same with the voices swapped;
+  n and r the spread words; wet and dry Chorus A's balance words at 0 dB.
+
+| Law | Value |
+| --- | --- |
+| Ramp word d (left voice at -c cents, right at +c; Detune c = raw - 64) | trunc(65536 - 65536 r + 1/2) in single precision, r = 2^(c / 1200) rounded to a float (fused multiply-subtract); +10 cents: left 377, right -379; +50: 1866, -1919 |
+| Initial delays | the family's time law, floor(t x 18063 / 4096) for t tenths of a ms (Table #2 gives the ms), plus one sample |
+| Spread p (0-63) | n = (dry/wet word at 64 + p) >> 1, r = (word at 64 - p) >> 1: 11585 / 11585 at 0, 15175 / 6175 at 32, 16383 / 0 at 63 |
+| Glides | the depth, bump, spread and balance words glide by 2^-9 of the gap per 44.1 kHz sample (the chorus family's mix glide; assumed, not probed); the initial delays jump |
+
+Null takes, residual against the take over 0.05-2.5 s after the note (centred / hard-left AWM2 saw at
+D=W; the plugin's ramp started at the take's phase, found by search; `analyse.py`): defaults -109.3 /
+-109.4 dB; detune -50 cents -97.9 / -99.7; +50 cents -98.0 / -96.6; initial delays 6.4 / 1.6 ms -110.5 /
+-110.3; spread 0 -109.1 / -109.5; spread 63 -109.5 / -109.4. Levels within 0.01 dB. The two EQ settings
+(dry only through the shelves, a 55 Hz saw): every harmonic to 16.4 kHz within 0.000 dB of the
+reference's ratio to the dry take. Steady sine takes (`features.py`): levels within 0.13 dB, envelope
+rate and depth as the reference's; on the variation bus the type plays wet only (envelope as the
+wet-only render), the bus 5.96 dB below the insertion at send and return 127, as the family.
+
+**Mapping law for the converter** (Mix as the family's: a stored 0 plays as 1 on an insertion; on the
+variation bus Mix +63):
+
+| Type | Plugin parameters (raw parameter: law) |
+| --- | --- |
+| 03 40 → Ensemble Detune | Detune 1: v - 64 cents; Initial Delay L 2: Table #2 at v, ms; Initial Delay R 3: Table #2 at v, ms; Spread 4: v; Mix 10: clamp(v - 64, -63, 63); Low Shelf Frequency 11: Table #3 at v, Hz; Low Shelf Gain 12: v - 64 dB; High Shelf Frequency 13: Table #3 at v, Hz; High Shelf Gain 14: v - 64 dB |
+
+Plugin tests, each checked to fail with its law broken: "Ensemble Detune: the initial delays, the taps'
+complementary windows and the spread words, at 44.1, 48 and 96 kHz" (fails with the spread words
+swapped, and without the extra sample); "Ensemble Detune: the windows sum to one but for a bump of
+0.375 times a folded saw on each tap where they cross" (fails with the bump's phase flipped, and with
+its weight at zero); "Ensemble Detune: the left voice plays down and the right up by the cents, through
+the ramp word" (fails with the voices swapped, and with the word rounded); the family's silence test
+takes the mode. Memory per context: 66,964 bytes at 44.1 kHz, 124,908 at 48 kHz, 190,444 at 96 kHz (two
+lines of 8,192 floats at 44.1 and 48 kHz, 16,384 at 96 kHz, plus the shelves' matcher away from 44.1
+kHz). Cost (`scripts/cost-a53.sh`, 48 kHz, noise in): 58,000 instructions per block, 67,200 with both
+shelves on; fed silence 17,400, and the plugin sleeps.
+
+The pitch-change type 0D 40 shares this network's structure in the reference; built on it, it would
+also need feedback from each voice into both lines, the input's cross-feed into the lines, the raw
+input on the outputs, a ramp speed set by its parameters, and its own laws and measurements.
 
 ## 16. Known differences from the reference
 
@@ -2685,7 +2739,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 11 | Reverb 1 keeps upstream's buffer sizes (2.2 MB per context) | Not a difference from the reference; a stock mode | Its output depends on the buffer size (predelay beyond the mask) | Deliberate (stock exact) | `tests/StockRender.cpp` | `include/sst/effects/Reverb1.h` |
 | 12 | Hall reverb renders: level differs between identical renders | 11.6 dB between two identical renders (fx10); onsets differ by up to 70 ms | Found (fx15): the source, not the reverb. The dry click itself varies by 26 dB across four identical renders (−36.7, −31.8, −10.7, −26.6 dB): the AN-X oscillator runs free, so its phase under the very short envelope differs at each note. The click's shape changes too, so subtracting a click template does not separate the reverb, and fx15's levels and onsets are not usable either | Measurement fix still open: oscillator phase reset (fx16) did not make the click repeatable (energies −0.7, −7.6, −8.7 dB over three renders); next a source without an oscillator under a short envelope | fx10, fx15, fx16 `click*`; `fit_rev.py`, `fit_rev2.py`, `fit_fx16.py click` | none (measurement) |
 | 13 | (Superseded by 23 for the built Hall A.) Hall reverb measurements; displayed time against measured decay; level and onset now measured (fx17: wet −2.89 / −3.23 dB re the dry click at factory settings, onset = initial delay + 48.4 ms) | Mid-band (1 kHz) T60 for reverb time indices 0 / 8 / 16 / 24 / 32 / 40 / 48 / 56 / 64 / 69 at room size 29: 0.85 / 0.90 / 1.75 / 2.42 / 2.9 / 3.53 / 4.07 / 4.82 / 6.02 / 8.39 s (fx16; displayed 0.3 / … / 18.0 s); room size 0 / 8 / 15 / 22 / 31 at time 32: 0.84 / 1.25 / 1.76 / 2.37 / 3.06 s; time and room do not scale separately (time 8: room 0 / 15 give 0.22 / 0.66 s; time 56: 1.94 / 3.21 s); high ratio 0.1 shortens 4 kHz to about 0.75 of the low bands (fx16) and 8 kHz to about 0.4 (fx10). Levels and onsets not measured (known difference 12) | Reference behaviour | To be fitted when the reverb mode is built | fx10, fx15, fx16 `rv_*`; `fit_fx16.py rev` | none yet |
-| 14 | Types not built | 88 of the 104 types (the five-band EQ, the cross delay, the tempo cross delay, the tempo stereo and tempo mono delays, the L/R and L/C/R delays, the hall reverb, the circuit-style compressor, the two-rotor rotary, the auto pan, the tremolo and four chorus types are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
+| 14 | Types not built | 87 of the 104 types (the five-band EQ, the cross delay, the tempo cross delay, the tempo stereo and tempo mono delays, the L/R and L/C/R delays, the hall reverb, the circuit-style compressor, the two-rotor rotary, the auto pan, the tremolo and five chorus types are built), plus the Part three-band and two-band EQs and the Master EQ, which are built | Not reached yet | Planned (section 12) | — | — |
 | 15 | (Superseded by 26–29 for the built Circuit Compressor.) Compressor measurements fx7–fx23 | Static curve (fx7, fx13), steps (fx21–fx23): explained by a makeup gain set by the settings (section 15) | Reference behaviour | Built 2026-11-05 | fx7, fx13, fx21–fx23 | `effects/CircuitCompressor.h` |
 | 16 | Tempo cross delay at tempos other than 120 BPM | Not measured | The recorder's host is fixed at 120 BPM | The plugin follows the transport tempo by the note values (assumed) | — | `effects/TempoCrossDelay.h` |
 | 17 | Stock FloatyDelay and Phaser are not repeatable; Phaser and RotarySpeaker read uninitialized memory | Not a difference from the reference; stock behaviour | Clock-seeded generators; missing initialisation | Decision 15; not yet modes | `tests/StockRender.cpp` | upstream headers |
@@ -2733,7 +2787,10 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 59 | Chorus family: the LFOs' start | The reference's LFOs start when the type loads, the plugin's at activation, so their phase against a note differs (the null takes search it) | As Auto Pan's (48) | Deliberate | — | `Network::processBlock` |
 | 60 | Chorus family on the variation bus | The reference plays every type of the family wet only there, whatever the stored balance; the plugin does not know its slot, so the converter sets Mix +63 | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `owner*_varwet_sine`; `features.py` | converter |
 | 61 | Chorus family at rates other than 44.1 kHz | Delays kept in seconds (read between samples) and LFO steps scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Chorus A: the taps sit…" at 48 and 96 kHz | `Network` |
-| 62 | Type 03 40 | Not built | The windows and the saw's speed not determined | Planned | fx-types-2026-11-15 `0340` | — |
+| 62 | (Resolved 2026-11-15.) Type 03 40 | Built: null takes -97 to -110 dB | — | Resolved | fx-types-2026-11-15 `0340` | `effects/PitchNetwork.h` |
+| 63 | Ensemble Detune: not modelled | The shelves' coefficient glide after a change and their internal clips (x4 and x16 sections, above full scale only); the glide of the network's words is the family's mix glide, not probed by a parameter change; the ramps start at activation, not when the type loads (as 59) | Null takes -97 to -110 dB without them | Deliberate | — | `PitchNetwork` |
+| 64 | Ensemble Detune at rates other than 44.1 kHz | Delays kept in seconds (read between samples), the ramp's step scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Ensemble Detune: the initial delays…" at 48 and 96 kHz | `PitchNetwork` |
+| 65 | Ensemble Detune on the variation bus | Wet only there, whatever the stored balance (as 60) | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `0340` `var_def_sine`; `features.py` | converter |
 
 ## 17. Oscairn porting checklist (decision 22)
 
