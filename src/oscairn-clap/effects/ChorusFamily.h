@@ -380,6 +380,9 @@ inline sst::basic_blocks::params::ParamMetaData inputParam(int dflt)
 // The family's speed step, 2^-24 turns per 44.1 kHz sample, as the converter's speeds give it.
 inline double speedHz(int step) { return step * rotary::designRate / 16777216; }
 
+// The depth word floor(8192 v / 127) the platform's LFO depths use.
+inline int depthWord(int v) { return (int)std::floor(8192.0 * v / 127); }
+
 #define OSCAIRN_CHORUS_COMMON_PARAMS lowFreq, lowGain, highFreq, highGain, midFreq, midGain, midWidth, mix
 
 // Chorus A: four taps, triangle LFOs on B and A (120 and 240 degrees), sine LFOs on C and D (300 and
@@ -447,6 +450,190 @@ template <typename FXConfig> struct ChorusA : Network<FXConfig, 13, ChorusA<FXCo
     }
 };
 
+// Chorus B: four sine-LFO taps (0, 120, 240 and 240 degrees), C and D 64 samples behind B and A,
+// each line fed back from B or A alone; the wet 1 dB down.
+template <typename FXConfig> struct ChorusB : Network<FXConfig, 13, ChorusB<FXConfig>>
+{
+    enum params
+    {
+        lfoSpeed,
+        lfoDepth,
+        feedback,
+        delayOffset,
+        OSCAIRN_CHORUS_COMMON_PARAMS,
+        inputMode,
+        numParamsEnum
+    };
+    static constexpr int numParams{numParamsEnum};
+    static constexpr const char *streamingName{"oscairn-chorus-b"};
+    static constexpr const char *displayName{"Chorus B"};
+    using Base = Network<FXConfig, 13, ChorusB<FXConfig>>;
+    using Base::Base;
+    friend typename Base::Base;
+
+    sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
+    {
+        switch (idx)
+        {
+        case lfoSpeed: return speedParam((float)speedHz(192));
+        case lfoDepth: return intParam("LFO Depth", 0, 127, 23);
+        case feedback: return intParam("Feedback", -63, 63, 0);
+        case delayOffset: return offsetParam(0.1f);
+        case mix: return intParam("Mix", -63, 63, 63);
+        case inputMode: return inputParam(1);
+        default: return eqParam(idx - lowFreq);
+        }
+    }
+
+  private:
+    void design(double)
+    {
+        auto &l = this->last;
+        auto &s = this->set;
+        this->common(l[lfoSpeed], l[mix], -1, std::lround(l[inputMode]) == 0, {lowFreq, lowGain, highFreq, highGain, midFreq, midGain, midWidth});
+        const double pm = depthWord(2 * std::clamp((int)std::lround(l[lfoDepth]), 0, 127)) * word;
+        const int age = tenthsToSamples(l[delayOffset]) + 1;
+        const int phases[4] = {0, 5, 11, 11};
+        for (int t = 0; t < 4; ++t)
+        {
+            s.wave[t] = Lfo::sine, s.phaseCode[t] = phases[t];
+            auto &tp = s.tap[t];
+            tp.lfo = t, tp.clamped = t < 2, tp.am = 0, tp.pm = pm;
+            tp.age = age + (t < 2 ? 0 : 64);
+        }
+        const double fb = std::clamp((int)std::lround(l[feedback]), -63, 63) * 376 * word;
+        s.fbLB = s.fbRA = fb;
+        s.fbLC = s.fbRD = 0;
+        s.outB = s.outC0 = s.outA = s.outD = top;
+        s.outC1 = 0;
+    }
+};
+
+// Dual Modulator: one tap per channel, B on the left and A on the right, triangle LFOs half a turn
+// apart, with AM (1 - depth x LFO) and feedback from each tap into its line; the wet 3 dB up.
+template <typename FXConfig> struct DualModulator : Network<FXConfig, 14, DualModulator<FXConfig>>
+{
+    enum params
+    {
+        lfoSpeed,
+        amDepth,
+        pmDepth,
+        feedback,
+        delayOffset,
+        OSCAIRN_CHORUS_COMMON_PARAMS,
+        inputMode,
+        numParamsEnum
+    };
+    static constexpr int numParams{numParamsEnum};
+    static constexpr const char *streamingName{"oscairn-dual-modulator"};
+    static constexpr const char *displayName{"Dual Modulator"};
+    using Base = Network<FXConfig, 14, DualModulator<FXConfig>>;
+    using Base::Base;
+    friend typename Base::Base;
+
+    sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
+    {
+        switch (idx)
+        {
+        case lfoSpeed: return speedParam((float)speedHz(96));
+        case amDepth: return intParam("AM Depth", 0, 127, 0);
+        case pmDepth: return intParam("PM Depth", 0, 127, 54);
+        case feedback: return intParam("Feedback", -63, 63, 13);
+        case delayOffset: return offsetParam(17.1f);
+        case mix: return intParam("Mix", -63, 63, -63);
+        case inputMode: return inputParam(0);
+        default: return eqParam(idx - lowFreq);
+        }
+    }
+
+  private:
+    void design(double)
+    {
+        auto &l = this->last;
+        auto &s = this->set;
+        this->common(l[lfoSpeed], l[mix], 3, std::lround(l[inputMode]) == 0, {lowFreq, lowGain, highFreq, highGain, midFreq, midGain, midWidth});
+        const double pm = depthWord(2 * std::clamp((int)std::lround(l[pmDepth]), 0, 127)) * word;
+        const int a = std::clamp((int)std::lround(l[amDepth]), 0, 127);
+        const double am = -std::trunc(32768.0 * a / 127) * word;
+        const int age = tenthsToSamples(l[delayOffset]) + 1;
+        const int phases[4] = {0, 8, 0, 0};
+        for (int t = 0; t < 4; ++t)
+        {
+            s.wave[t] = Lfo::triangle, s.phaseCode[t] = phases[t];
+            auto &tp = s.tap[t];
+            tp.lfo = t, tp.clamped = t < 2, tp.am = am, tp.pm = pm;
+            tp.age = age + (t < 2 ? 0 : 64);
+        }
+        const double fb = std::clamp((int)std::lround(l[feedback]), -63, 63) * 376 * word;
+        s.fbLB = s.fbRA = fb;
+        s.fbLC = s.fbRD = 0;
+        s.outB = s.outA = top;
+        s.outC0 = s.outD = s.outC1 = 0;
+    }
+};
+
+// Chorus C: three taps on one line fed the mean of the input, B, A and C at 0, 120 and 240 degrees of
+// a sine LFO, each with a triangle folded from a saw at eight times the speed (a third of its turn
+// apart); B and C on the left, A and C on the right; the wet 1 dB down.
+template <typename FXConfig> struct ChorusC : Network<FXConfig, 12, ChorusC<FXConfig>>
+{
+    enum params
+    {
+        lfoSpeed,
+        lfoDepth,
+        delayOffset,
+        OSCAIRN_CHORUS_COMMON_PARAMS,
+        numParamsEnum
+    };
+    static constexpr int numParams{numParamsEnum};
+    static constexpr const char *streamingName{"oscairn-chorus-c"};
+    static constexpr const char *displayName{"Chorus C"};
+    using Base = Network<FXConfig, 12, ChorusC<FXConfig>>;
+    using Base::Base;
+    friend typename Base::Base;
+
+    sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
+    {
+        switch (idx)
+        {
+        case lfoSpeed: return speedParam((float)speedHz(176));
+        case lfoDepth: return intParam("LFO Depth", 0, 127, 25);
+        case delayOffset: return offsetParam(0.1f);
+        case mix: return intParam("Mix", -63, 63, -63);
+        default: return eqParam(idx - lowFreq);
+        }
+    }
+
+  private:
+    void design(double)
+    {
+        auto &l = this->last;
+        auto &s = this->set;
+        this->common(l[lfoSpeed], l[mix], -1, true, {lowFreq, lowGain, highFreq, highGain, midFreq, midGain, midWidth});
+        const int v = std::clamp((int)std::lround(l[lfoDepth]), 0, 127);
+        const double pm = depthWord((5 * v) >> 3) * word, tri = depthWord((3 * v) >> 3) * word;
+        const int s0 = tenthsToSamples(l[delayOffset]);
+        const int phases[4] = {0, 5, 11, 0};
+        const int ages[4] = {s0 + 2, s0 + 130, s0 + 66, 1};
+        const double triPhase[4] = {0, 21845 * word, -21846 * word, 0};
+        for (int t = 0; t < 4; ++t)
+        {
+            s.wave[t] = Lfo::sine, s.phaseCode[t] = phases[t];
+            auto &tp = s.tap[t];
+            tp.lfo = t, tp.clamped = t < 2, tp.am = 0;
+            tp.pm = t < 3 ? pm : 0;
+            tp.triGain = t < 3 ? tri : 0;
+            tp.triPhase = triPhase[t];
+            tp.age = ages[t];
+            tp.right = false;
+        }
+        s.fastStepMul = 8;
+        s.fastPhaseCode = 12;
+        s.fbLB = s.fbLC = s.fbRA = s.fbRD = 0;
+        s.outB = s.outC0 = s.outA = s.outC1 = top;
+        s.outD = 0;
+    }
+};
 #undef OSCAIRN_CHORUS_COMMON_PARAMS
 } // namespace oscairn_fx::chorus
 

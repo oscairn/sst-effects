@@ -799,7 +799,7 @@ TEST_CASE("Processing never allocates")
         REQUIRE(allocations == 0);
     }
     // The chorus modes: speed, depth, feedback, offset, mix, a band and the input mode while playing.
-    for (auto [mode, module, depth] : {std::tuple{1, "Chorus A", "PM Depth"}})
+    for (auto [mode, module, depth] : {std::tuple{1, "Chorus A", "PM Depth"}, {2, "Chorus B", "LFO Depth"}, {3, "Dual Modulator", "AM Depth"}, {4, "Chorus C", "LFO Depth"}})
     {
         Plugin ch("org.oscairn.effects.chorus");
         ch.set(1, mode);
@@ -5070,6 +5070,47 @@ TEST_CASE("Chorus A: the taps sit at the offset plus the depth laws times their 
     REQUIRE(std::abs(tapAt(f.l, 437 + 184 + 657 * 0.06712341).first - (437 + 184 + 657 * 0.06712341)) < 1.01);
 }
 
+TEST_CASE("Chorus C: three taps on one line, each swung by its sine and a triangle folded from an eight-times saw")
+{
+    // Type 03 30 at depth 25, offset 0.1 ms, held at the start: B, A and C at 2, 130 and 66 samples past
+    // the offset's 4, swung by 60.44 samples on sines at 0, 120 and 240 degrees and by 36.25 on
+    // triangles folded from a saw starting at 270 degrees, a third of its turn apart. B and C play on
+    // the left, A and C on the right (the input's mean feeds the line).
+    auto o = chorusRun(44100, 4, "Chorus C", {{"LFO Speed", 0}, {"LFO Depth", 25}, {"Delay Offset", 0.1}, {"Mix", 63}}, impulse(44100, 0.05), true);
+    const double wet = 7300 * 4 / 32768.0 * 32767 / 32768 * 0.5;
+    for (auto [x, age] : {std::pair{&o.l, 54.34375}, {&o.l, 80.099175}, {&o.r, 220.588509}, {&o.r, 80.099175}})
+    {
+        const auto [c, s] = tapAt(*x, age);
+        INFO("tap expected at " << age << ", found at " << c << " (sum " << s << ")");
+        REQUIRE(std::abs(c - age) < 0.01);
+        REQUIRE(std::abs(s - wet) < 1e-6);
+    }
+    // Moving, the fold runs at eight times the slow LFOs' speed: at depth 8 (B swings 20.1 samples
+    // on its sine and 12.06 on its fold, clear of C) impulses every 25 ms find B where the two LFOs
+    // put it, the saw at 8 x 190 steps per sample from 270 degrees, within 0.05 sample.
+    using oscairn_fx::chorus::Lfo;
+    std::vector<float> clicks((size_t)(44100 * 0.6));
+    for (int k = 0; k < 18; ++k)
+        clicks[2000 + k * 1102] = 0.25f;
+    auto m = chorusRun(44100, 4, "Chorus C", {{"LFO Speed", 190 * 44100 / 16777216.0}, {"LFO Depth", 8}, {"Mix", 63}}, clicks, true);
+    for (int k = 0; k < 18; ++k)
+    {
+        const int at = 2000 + k * 1102;
+        auto ageAt = [&](int n) {
+            const uint32_t slow = (uint32_t)(190u * (n + 1)) & 0xffffff, fastP = (uint32_t)(12582912u + 1520u * (n + 1)) & 0xffffff;
+            const double sine = ((Lfo::word16(Lfo::sine, slow) + 32768) & 0xffff) / 65536.0, saw = Lfo::word16(Lfo::saw, fastP) / 32768.0;
+            double u = saw + 1;
+            u -= 2 * std::floor(u / 2);
+            return 6 + 2048 * (193 / 32768.0 * std::abs(u - 1) + 322 / 32768.0 * std::min(sine, 32767 / 32768.0));
+        };
+        const double expect = ageAt(at + (int)ageAt(at));
+        std::vector<float> win(m.l.begin() + at, m.l.begin() + at + 60);
+        const double c = tapAt(win, expect).first;
+        INFO("click " << k << ": B expected at " << expect << ", found at " << c);
+        REQUIRE(std::abs(c - expect) < 0.05);
+    }
+}
+
 TEST_CASE("Chorus family: the balance words and each mode's wet level")
 {
     // Dry and wet are quarter-scale words of the platform's dry/wet curve (round-half-down of
@@ -5086,7 +5127,8 @@ TEST_CASE("Chorus family: the balance words and each mode's wet level")
         double line;
         int wetMid, wetFull;
     };
-    for (auto c : {Case{1, "Chorus A", "PM Depth", 437, 2, stereoUnit, 5792, 8191}})
+    for (auto c : {Case{1, "Chorus A", "PM Depth", 437, 2, stereoUnit, 5792, 8191}, Case{2, "Chorus B", "LFO Depth", 5, 1, stereoUnit, 5162, 7300},
+                   Case{3, "Dual Modulator", "PM Depth", 755, 1, 1, 8181, 11570}, Case{4, "Chorus C", "LFO Depth", 6, 1, 1, 5162, 7300}})
         for (auto [mix, dryWord, wetWord] : {std::tuple{-63, 8191, 0}, {0, 5792, c.wetMid}, {63, 0, c.wetFull}})
         {
             auto o = chorusRun(44100, c.mode, c.module, {{"LFO Speed", 0}, {c.depth, 0}, {"Mix", (double)mix}}, impulse(44100, 0.03));
@@ -5097,12 +5139,38 @@ TEST_CASE("Chorus family: the balance words and each mode's wet level")
         }
 }
 
-TEST_CASE("Chorus A: feedback from B and C into the left line, at v x 250 / 32768 each")
+TEST_CASE("Dual Modulator: AM is 1 - depth x the LFO, the right tap's triangle half a turn after the left's")
 {
-    // Held LFOs, depth 0, a left-only impulse: B and C sit at the offset's age a (437) and both feed
-    // the left line, so at 2a both taps carry both taps' loop: four times the one-tap echo.
+    // Type 03 10 at AM 127: each tap's gain falls from 1 to 0 as its triangle LFO rises; the left and
+    // right taps' triangles are half a turn apart, so on a steady input the two gains sum to one.
+    std::vector<float> dc((size_t)(44100 * 2.5), 0.25f);
+    auto o = chorusRun(44100, 3, "Dual Modulator", {{"LFO Speed", 1.3}, {"AM Depth", 127}, {"PM Depth", 0}, {"Feedback", 0}, {"Mix", 63}}, dc);
+    const double g = 11570 * 4 / 32768.0 * 32767 / 32768 * 0.25;
+    double lo = 1, hi = 0, worst = 0;
+    for (size_t n = 4410; n < o.l.size(); ++n)
+    {
+        lo = std::min(lo, o.l[n] / g), hi = std::max(hi, o.l[n] / g);
+        worst = std::max(worst, std::abs((o.l[n] + o.r[n]) / g - 1));
+    }
+    INFO("left gain " << lo << " to " << hi << ", left + right off one by " << worst);
+    REQUIRE(lo < 0.001);
+    REQUIRE(hi > 0.999);
+    REQUIRE(worst < 1e-3);
+}
+
+TEST_CASE("Chorus A and B: feedback from the mode's taps into each line, at the mode's scale")
+{
+    // Held LFOs, depth 0, a left-only impulse: B sits at the offset's age a (437), Chorus B's C 64
+    // later, Chorus A's C with B. Chorus B feeds the left line from B alone at v x 376 / 32768, so its
+    // first echo at 2a is B through the loop once; Chorus A feeds it from B and C at v x 250 / 32768
+    // each, so at 2a both taps carry both taps' loop: four times the one-tap echo at its scale.
     using oscairn_fx::rotary::lineWord;
     const double top = 32767 / 32768.0;
+    auto b = chorusRun(44100, 2, "Chorus B", {{"LFO Speed", 0}, {"LFO Depth", 0}, {"Delay Offset", 9.9}, {"Feedback", 40}, {"Mix", 63}}, impulse(44100, 0.1), true);
+    const double wb = 7300 * 4 / 32768.0 * top;
+    REQUIRE(std::abs(tapAt(b.l, 437).second - wb * stereoUnit) < 1e-6);
+    const double fbB = 40 * 376 / 32768.0;
+    REQUIRE(std::abs(tapAt(b.l, 874).second - wb * lineWord(fbB * stereoUnit)) < 1e-6);
     auto a = chorusRun(44100, 1, "Chorus A", {{"LFO Speed", 0}, {"PM Depth", 0}, {"Delay Offset", 9.9}, {"Feedback", 40}, {"Mix", 63}}, impulse(44100, 0.1), true);
     const double wa = 8191 * 4 / 32768.0 * top, fbA = 40 * 250 / 32768.0;
     REQUIRE(std::abs(tapAt(a.l, 874).second - 2 * wa * lineWord(2 * fbA * stereoUnit)) < 1e-6);
@@ -5112,9 +5180,9 @@ TEST_CASE("Chorus family: Mono feeds one line the input's mean and every tap rea
 {
     // A left-only impulse in Stereo reaches only the left output; in Mono the right output's taps (A
     // and D) read the left line, fed half the left input.
-    for (auto [mode, module] : {std::pair{1, "Chorus A"}})
+    for (auto [mode, module] : {std::pair{1, "Chorus A"}, {2, "Chorus B"}, {3, "Dual Modulator"}})
     {
-        const char *depth = "PM Depth";
+        const char *depth = mode == 2 ? "LFO Depth" : "PM Depth";
         auto st = chorusRun(44100, mode, module, {{"LFO Speed", 0}, {depth, 0}, {"Mix", 63}, {"Input Mode", 1}}, impulse(44100, 0.1), true);
         auto mo = chorusRun(44100, mode, module, {{"LFO Speed", 0}, {depth, 0}, {"Mix", 63}, {"Input Mode", 0}}, impulse(44100, 0.1), true);
         double es = 0, em = 0, el = 0;
@@ -5138,7 +5206,7 @@ TEST_CASE("Chorus family: fed silence, every mode settles to exact silence")
         r = r * 1664525u + 1013904223u;
         x[n] = (float)((double)r / 4294967296.0 - 0.5);
     }
-    for (auto [mode, module, fb] : {std::tuple{1, "Chorus A", "Feedback"}})
+    for (auto [mode, module, fb] : {std::tuple{1, "Chorus A", "Feedback"}, {2, "Chorus B", "Feedback"}, {3, "Dual Modulator", "Feedback"}, {4, "Chorus C", ""}})
     {
         std::vector<std::pair<const char *, double>> set{{"Mix", 0}};
         if (*fb)
@@ -5155,7 +5223,7 @@ TEST_CASE("Chorus family: fed silence, every mode settles to exact silence")
 
 TEST_CASE("Chorus modes' state round-trips, and every parameter's value text parses back")
 {
-    for (int mode = 1; mode <= 1; ++mode)
+    for (int mode = 1; mode <= 4; ++mode)
     {
         Plugin a(chorusId);
         a.set(1, mode);

@@ -311,6 +311,9 @@ const std::vector<Category> &categories()
                         1,
                         {}};
         chorus.modes.push_back(mode<oscairn_fx::chorus::ChorusA>(1, "Chorus A"));
+        chorus.modes.push_back(mode<oscairn_fx::chorus::ChorusB>(2, "Chorus B"));
+        chorus.modes.push_back(mode<oscairn_fx::chorus::DualModulator>(3, "Dual Modulator"));
+        chorus.modes.push_back(mode<oscairn_fx::chorus::ChorusC>(4, "Chorus C"));
         chorus.finish();
         c.push_back(std::move(chorus));
         return c;
