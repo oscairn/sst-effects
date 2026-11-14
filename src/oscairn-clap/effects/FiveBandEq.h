@@ -163,6 +163,14 @@ template <int N> class MatchedCascade final : public Job
         if (S.fade == 0)
             if (const Result *r = S.results.fresh() ? S.results.read() : nullptr; r && r->gen > S.applied)
                 apply(*r, true);
+        if (S.fade == 0 && S.cur.empty())
+        {
+            // No sections: each sample passes unchanged, times the gain.
+            if (gain != 1)
+                for (int i = 0; i < n; ++i)
+                    L[i] = (float)(L[i] * gain), R[i] = (float)(R[i] * gain);
+            return;
+        }
         for (int i = 0; i < n; ++i)
         {
             const float l = S.cur.run(0, L[i]), r = S.cur.run(1, R[i]);
@@ -200,6 +208,13 @@ template <int N> class MatchedCascade final : public Job
     {
         Biquad sec[N][3];
         int cnt[N]{};
+        bool empty() const
+        {
+            for (int s = 0; s < N; ++s)
+                if (cnt[s])
+                    return false;
+            return true;
+        }
         inline float run(int ch, float x)
         {
             for (int s = 0; s < N; ++s)

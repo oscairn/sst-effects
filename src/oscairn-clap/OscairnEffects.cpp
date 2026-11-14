@@ -349,6 +349,9 @@ struct Context
     uint32_t shownMode; // main thread: the mode whose parameters the host last saw unhidden
     std::atomic<size_t> fxBytes{0};
     std::atomic<uint32_t> fxMode{0}; // the mode of fx
+    std::atomic<uint32_t> valuesVersion{0}; // bumped after every change of values
+    const Effect *loadedFx{nullptr};        // audio thread: the effect and version loadValues last saw
+    uint32_t loadedVersion{0};
     bool active{false};
     alignas(16) float inL[block]{}, inR[block]{}, outL[block]{}, outR[block]{};
     uint32_t pos{0};
@@ -436,6 +439,7 @@ bool setValue(Context &s, clap_id id, double value)
     }
     const auto &md = s.cat.meta(s.cat.params[p]);
     s.values[p].store(std::clamp((float)value, md.minVal, md.maxVal), std::memory_order_relaxed);
+    s.valuesVersion.fetch_add(1, std::memory_order_release);
     return true;
 }
 
@@ -474,7 +478,13 @@ void runBlock(Context &s)
     float inPeak = 0, outPeak = 0;
     for (int i = 0; i < block; ++i)
         inPeak = std::max({inPeak, std::abs(s.inL[i]), std::abs(s.inR[i])});
-    loadValues(s, *s.fx);
+    // The values only change with a parameter change or another effect: otherwise they are loaded.
+    if (const uint32_t v = s.valuesVersion.load(std::memory_order_acquire); v != s.loadedVersion || s.fx.get() != s.loadedFx)
+    {
+        loadValues(s, *s.fx);
+        s.loadedVersion = v;
+        s.loadedFx = s.fx.get();
+    }
     std::memcpy(s.outL, s.inL, sizeof(s.outL));
     std::memcpy(s.outR, s.inR, sizeof(s.outR));
     s.fx->process(s.outL, s.outR);
@@ -505,24 +515,33 @@ clap_process_status process(const clap_plugin_t *plugin, const clap_process_t *p
     const uint32_t count = pr->in_events ? pr->in_events->size(pr->in_events) : 0;
     uint32_t event = 0;
     bool silentIn = true;
-    for (uint32_t i = 0; i < pr->frames_count; ++i)
+    // A run of frames up to the end of the inner block at a time: the events up to its last frame
+    // first (the values are read only when the block runs), then the frames in and out.
+    for (uint32_t i = 0; i < pr->frames_count;)
     {
+        const uint32_t n = std::min<uint32_t>(pr->frames_count - i, block - s.pos), last = i + n - 1;
         while (event < count)
         {
             const auto *h = pr->in_events->get(pr->in_events, event);
-            if (h && h->time > i)
+            if (h && h->time > last)
                 break;
             apply(s, h);
             ++event;
         }
-        const float l = inL ? inL[i] : 0.f, r = inR ? inR[i] : 0.f;
-        silentIn = silentIn && l == 0.f && r == 0.f;
-        s.inL[s.pos] = l;
-        s.inR[s.pos] = r;
-        // Read before writing: in-place buffers are allowed.
-        outL[i] = s.outL[s.pos];
-        outR[i] = s.outR[s.pos];
-        if (++s.pos == block)
+        bool sound = false;
+        for (uint32_t k = 0; k < n; ++k)
+        {
+            const float l = inL ? inL[i + k] : 0.f, r = inR ? inR[i + k] : 0.f;
+            sound = sound || l != 0.f || r != 0.f;
+            s.inL[s.pos + k] = l;
+            s.inR[s.pos + k] = r;
+            // Read before writing: in-place buffers are allowed.
+            outL[i + k] = s.outL[s.pos + k];
+            outR[i + k] = s.outR[s.pos + k];
+        }
+        silentIn = silentIn && !sound;
+        i += n;
+        if ((s.pos += n) == block)
         {
             s.pos = 0;
             runBlock(s);
@@ -811,6 +830,7 @@ bool stateLoad(const clap_plugin_t *plugin, const clap_istream_t *stream)
         was[p] = s.values[p].load();
         s.values[p].store(s.cat.meta(s.cat.params[p]).defaultVal);
     }
+    s.valuesVersion.fetch_add(1, std::memory_order_release);
     const uint32_t wasMode = s.wanted.exchange(s.cat.defaultMode);
     for (auto [id, v] : parsed)
         if (s.cat.paramIndex(id) >= 0)
@@ -822,6 +842,7 @@ bool stateLoad(const clap_plugin_t *plugin, const clap_istream_t *stream)
         // The loaded mode could not be built: put back the state the host had.
         for (size_t p = 1; p < s.cat.params.size(); ++p)
             s.values[p].store(was[p]);
+        s.valuesVersion.fetch_add(1, std::memory_order_release);
         s.wanted.store(wasMode);
         rescanIfModeChanged(s);
         return false;
