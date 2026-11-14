@@ -5270,3 +5270,69 @@ TEST_CASE("Chorus modes' state round-trips, and every parameter's value text par
         REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
     }
 }
+
+TEST_CASE("Chorus family: every mode renders the same bits as the network before its cost work")
+{
+    // Each mode at 44.1, 48 and 96 kHz with the EQ on, every parameter moved mid-render (so every
+    // glide runs), feedback, both input modes and blocks of 37, 128 and 5 frames: the outputs' bits,
+    // hashed (FNV-1a), equal the hashes the per-sample network gave before its cost work (8ee42a8).
+    struct Case
+    {
+        int mode;
+        const char *module, *depth, *second;
+    };
+    const uint64_t expected[4][3] = {{0x9de68c9983c6a807, 0x724ecf95ba4eb0c5, 0xc3353b4606d519dd},
+                                     {0xb920e6642c3c169e, 0xe520d31473f611ee, 0x454346c6e98e98dd},
+                                     {0x14b5302e0a1a3951, 0x1f41d7a4bdddd6df, 0x29fd4d90d8a4e3fb},
+                                     {0xdd1a8b03fec232ee, 0xf1ff0f1fe2fa2d00, 0xc062fc2c36da688b}};
+    int m = 0;
+    for (auto c : {Case{1, "Chorus A", "PM Depth", "Feedback"}, Case{2, "Chorus B", "LFO Depth", "Feedback"},
+                   Case{3, "Dual Modulator", "PM Depth", "AM Depth"}, Case{4, "Chorus C", "LFO Depth", "Delay Offset"}})
+    {
+        int k = 0;
+        for (double rate : {44100.0, 48000.0, 96000.0})
+        {
+            Plugin pl(chorusId);
+            setOffline(pl); // the EQ matched in process, so changes land at the same sample
+            pl.set(1, c.mode);
+            auto id = [&](const char *n) { return paramIdByName(pl.p, c.module, n); };
+            pl.set(id("LFO Speed"), 2.7);
+            pl.set(id(c.depth), 90);
+            pl.set(id("Mix"), 20);
+            pl.set(id("Low Shelf Gain"), 6);
+            pl.set(id("Mid Gain"), -4);
+            pl.set(id("High Shelf Gain"), 3);
+            if (c.mode != 4)
+                pl.set(id("Feedback"), 50), pl.set(id("Input Mode"), c.mode == 3 ? 1 : 0);
+            pl.activate(rate);
+            const size_t n = (size_t)(rate * 1.2);
+            std::vector<float> inL(n), inR(n), outR;
+            uint32_t x = 7;
+            for (size_t i = 0; i < n; ++i)
+            {
+                x = x * 1664525u + 1013904223u;
+                inL[i] = ((x >> 8) / 16777216.f - 0.5f) * 0.9f;
+                inR[i] = 0.6f * (float)std::sin(i * 0.013);
+            }
+            const auto t = [&](double s) { return (uint32_t)(rate * s); };
+            std::vector<Event> ev{{t(0.2), id(c.depth), 12},    {t(0.3), id("Mix"), -40},    {t(0.4), id(c.second), c.mode == 4 ? 30.0 : -63},
+                                  {t(0.5), id("LFO Speed"), 9}, {t(0.6), id("Mix"), 63},     {t(0.7), id("Mid Gain"), 8},
+                                  {t(0.8), id(c.depth), 127},   {t(0.9), id("Mix"), -63}};
+            if (c.mode != 4)
+                ev.push_back({t(1.0), id("Input Mode"), c.mode == 3 ? 0.0 : 1});
+            auto outL = pl.render(inL, inR, outR, {37, 128, 5}, ev, false);
+            uint64_t h = 1469598103934665603ull;
+            for (auto *v : {&outL, &outR})
+                for (float f : *v)
+                {
+                    uint32_t b;
+                    std::memcpy(&b, &f, 4);
+                    h = (h ^ b) * 1099511628211ull;
+                }
+            INFO(c.module << " at " << rate << " Hz: hash 0x" << std::hex << h);
+            CHECK(h == expected[m][k]);
+            ++k;
+        }
+        ++m;
+    }
+}
