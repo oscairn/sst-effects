@@ -26,6 +26,7 @@
 #include <new>
 #include <set>
 #include <string>
+#include <map>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -5412,4 +5413,183 @@ TEST_CASE("Ensemble Detune: the left voice plays down and the right up by the ce
     INFO("left " << rate(o.l) << ", right " << rate(o.r));
     REQUIRE(std::abs(rate(o.l) - (1 - 1866 / 65536.0)) < 1e-3);
     REQUIRE(std::abs(rate(o.r) - (1 + 1919 / 65536.0)) < 1e-3);
+}
+
+namespace
+{
+// Every plugin and mode in the bundle at 44.1, 48 and 96 kHz: each of the mode's parameters set to
+// 37% of its range, then moved to 71% one after another mid-render (stepped ones rounded), noise
+// on the left and a sine on the right, blocks of 37, 128 and 5 frames, offline; the outputs' bits
+// hashed (FNV-1a), keyed "<plugin id> <mode> <rate>".
+std::map<std::string, uint64_t> bundleHashes()
+{
+    std::map<std::string, uint64_t> out;
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", chorusId})
+    {
+        Plugin probe(id);
+        auto *params = ext<clap_plugin_params_t>(probe.p, CLAP_EXT_PARAMS);
+        clap_param_info_t modeInfo;
+        params->get_info(probe.p, 0, &modeInfo);
+        for (int m = (int)modeInfo.min_value; m <= (int)modeInfo.max_value; ++m)
+            for (double rate : {44100.0, 48000.0, 96000.0})
+            {
+                Plugin pl(id);
+                setOffline(pl);
+                pl.set(1, m);
+                std::vector<Event> ev;
+                const size_t n = (size_t)(rate * 0.8);
+                int k = 0;
+                for (uint32_t i = 0; i < params->count(pl.p); ++i)
+                {
+                    clap_param_info_t info;
+                    params->get_info(pl.p, i, &info);
+                    if (info.id == 1 || (int)(info.id >> 8) != m)
+                        continue;
+                    auto at = [&](double t) {
+                        double v = info.min_value + t * (info.max_value - info.min_value);
+                        return (info.flags & CLAP_PARAM_IS_STEPPED) ? std::round(v) : v;
+                    };
+                    pl.set(info.id, at(0.37));
+                    ev.push_back({(uint32_t)(rate * (0.1 + 0.03 * k++)), info.id, at(0.71)});
+                }
+                pl.activate(rate);
+                std::vector<float> inL(n), inR(n), outR;
+                uint32_t x = 7;
+                for (size_t i = 0; i < n; ++i)
+                {
+                    x = x * 1664525u + 1013904223u;
+                    inL[i] = ((x >> 8) / 16777216.f - 0.5f) * 0.9f;
+                    inR[i] = 0.6f * (float)std::sin(i * 0.013);
+                }
+                auto outL = pl.render(inL, inR, outR, {37, 128, 5}, ev, false);
+                uint64_t h = 1469598103934665603ull;
+                for (auto *v : {&outL, &outR})
+                    for (float f : *v)
+                    {
+                        uint32_t b;
+                        std::memcpy(&b, &f, 4);
+                        h = (h ^ b) * 1099511628211ull;
+                    }
+                out[std::string(id) + " " + std::to_string(m) + " " + std::to_string((int)rate)] = h;
+            }
+    }
+    return out;
+}
+} // namespace
+
+TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's cost work")
+{
+    // Taken at dc77b56. The rate-matched EQs' fits and the stock reverbs depend on the platform's
+    // maths library, so some hashes differ between the two arm64 platforms; elsewhere (x86_64) no
+    // hashes are recorded and the test only checks that two renders agree.
+    std::map<std::string, uint64_t> expected = {
+        // The same on macOS arm64 and aarch64 Linux
+        {"org.oscairn.effects.chorus 1 44100", 0xab7970886d7634eb},
+        {"org.oscairn.effects.chorus 1 48000", 0x4f68d1289cfe5c36},
+        {"org.oscairn.effects.chorus 1 96000", 0xc6a8ac7ab177813d},
+        {"org.oscairn.effects.chorus 2 44100", 0x4323bff9154a6586},
+        {"org.oscairn.effects.chorus 2 48000", 0xd0e3f490708cef97},
+        {"org.oscairn.effects.chorus 2 96000", 0x3ebf4dd1de7044a3},
+        {"org.oscairn.effects.chorus 3 44100", 0x419e93596bbfa22},
+        {"org.oscairn.effects.chorus 3 48000", 0xf458fc8c638dd197},
+        {"org.oscairn.effects.chorus 3 96000", 0x870dd8743a1035ef},
+        {"org.oscairn.effects.chorus 4 44100", 0xab0b4e6a75bc8236},
+        {"org.oscairn.effects.chorus 4 48000", 0x995d95600c569e33},
+        {"org.oscairn.effects.chorus 5 44100", 0xb1d52491294b20d1},
+        {"org.oscairn.effects.chorus 5 48000", 0x8d9805a3959c3036},
+        {"org.oscairn.effects.delay 1 44100", 0x6c238e21e3fcba1b},
+        {"org.oscairn.effects.delay 1 48000", 0x2e8ce0bde8409103},
+        {"org.oscairn.effects.delay 1 96000", 0xa5c582d574aae275},
+        {"org.oscairn.effects.delay 2 44100", 0x3b751d411d4efa3d},
+        {"org.oscairn.effects.delay 2 48000", 0x4abadf87f037eca9},
+        {"org.oscairn.effects.delay 3 44100", 0xf8766ad51a990010},
+        {"org.oscairn.effects.delay 3 48000", 0x26aea5b3328c6d00},
+        {"org.oscairn.effects.delay 3 96000", 0xc9921377e4c3ac63},
+        {"org.oscairn.effects.delay 4 44100", 0xa0aaa09e219028ea},
+        {"org.oscairn.effects.delay 4 48000", 0x613f7e5349142906},
+        {"org.oscairn.effects.delay 5 44100", 0x68f3db948e28d52d},
+        {"org.oscairn.effects.delay 5 48000", 0x2a30259cf269464a},
+        {"org.oscairn.effects.delay 6 44100", 0xbb461ad4cb2ef829},
+        {"org.oscairn.effects.delay 6 48000", 0x8950fe1d2f9cd679},
+        {"org.oscairn.effects.dynamics 1 44100", 0xce455b077d220249},
+        {"org.oscairn.effects.dynamics 1 48000", 0xad1f6bf74586041b},
+        {"org.oscairn.effects.dynamics 1 96000", 0x95068277e72a9cd7},
+        {"org.oscairn.effects.eq 1 44100", 0x2d203d9e96799ef5},
+        {"org.oscairn.effects.eq 2 44100", 0x149ceefe0a2c8ce1},
+        {"org.oscairn.effects.eq 2 48000", 0x5ef730452e36d213},
+        {"org.oscairn.effects.eq 3 44100", 0x9923ad728f50f70a},
+        {"org.oscairn.effects.eq 4 44100", 0x94f70019d6c6d288},
+        {"org.oscairn.effects.reverb 3 44100", 0x8aab03e7b0dd8d12},
+        {"org.oscairn.effects.reverb 3 48000", 0x73c8a66b59f6df0d},
+        {"org.oscairn.effects.reverb 3 96000", 0x527d9375dd883947},
+        {"org.oscairn.effects.tremolo-rotary 1 44100", 0x2bb99e99c193a006},
+        {"org.oscairn.effects.tremolo-rotary 1 48000", 0x5e23e28bdbce0cb6},
+        {"org.oscairn.effects.tremolo-rotary 1 96000", 0x78f038e167442d38},
+        {"org.oscairn.effects.tremolo-rotary 2 44100", 0xff13e0a45d929fd1},
+        {"org.oscairn.effects.tremolo-rotary 2 48000", 0xcdb11fc303adc8f1},
+        {"org.oscairn.effects.tremolo-rotary 3 44100", 0xa871f40debea8529},
+        {"org.oscairn.effects.tremolo-rotary 3 48000", 0x827af19ce40b8fa0},
+        {"org.oscairn.effects.tremolo-rotary 3 96000", 0x729f59df3f2ba04f},
+    };
+#if defined(__aarch64__) && defined(__APPLE__)
+    expected.insert({
+        {"org.oscairn.effects.chorus 4 96000", 0x580c857ac65b92a5},
+        {"org.oscairn.effects.chorus 5 96000", 0x9b4649aa3584c1e2},
+        {"org.oscairn.effects.delay 2 96000", 0x2b4111e93751a3b4},
+        {"org.oscairn.effects.delay 4 96000", 0xd74c74f3f2725f09},
+        {"org.oscairn.effects.delay 5 96000", 0x58e85bbb2bf0159c},
+        {"org.oscairn.effects.delay 6 96000", 0x870c057504753226},
+        {"org.oscairn.effects.eq 1 48000", 0xfb20df9653707767},
+        {"org.oscairn.effects.eq 1 96000", 0x45ea7a9df2f4391f},
+        {"org.oscairn.effects.eq 2 96000", 0x63afbec73b965959},
+        {"org.oscairn.effects.eq 3 48000", 0x8d53d0a9f6913741},
+        {"org.oscairn.effects.eq 3 96000", 0xc464a01a8d9a7a76},
+        {"org.oscairn.effects.eq 4 48000", 0xf6f260913637e432},
+        {"org.oscairn.effects.eq 4 96000", 0xed031080a7f47045},
+        {"org.oscairn.effects.reverb 1 44100", 0x44633e7096ede51c},
+        {"org.oscairn.effects.reverb 1 48000", 0x60a4fe149d10d97a},
+        {"org.oscairn.effects.reverb 1 96000", 0x4087a6e9c3852749},
+        {"org.oscairn.effects.reverb 2 44100", 0x401ac3cb1ffb1fb3},
+        {"org.oscairn.effects.reverb 2 48000", 0x415bff4c4fc6500d},
+        {"org.oscairn.effects.reverb 2 96000", 0x196057368889aef7},
+        {"org.oscairn.effects.tremolo-rotary 2 96000", 0x606b1f945a7e2333},
+    });
+#elif defined(__aarch64__) && defined(__linux__)
+    expected.insert({
+        {"org.oscairn.effects.chorus 4 96000", 0xc1e5348f9d0df2c8},
+        {"org.oscairn.effects.chorus 5 96000", 0xf86fdf6b516daaaa},
+        {"org.oscairn.effects.delay 2 96000", 0x492cc99596c8e005},
+        {"org.oscairn.effects.delay 4 96000", 0xf0157ca38f6210af},
+        {"org.oscairn.effects.delay 5 96000", 0x3faf5fc52283b4d6},
+        {"org.oscairn.effects.delay 6 96000", 0x3d63c630ec83ab77},
+        {"org.oscairn.effects.eq 1 48000", 0x10f66a99d2cacf3a},
+        {"org.oscairn.effects.eq 1 96000", 0x405b40be9fe76dfe},
+        {"org.oscairn.effects.eq 2 96000", 0xde48ad99d25f12dd},
+        {"org.oscairn.effects.eq 3 48000", 0xff551975c02b490b},
+        {"org.oscairn.effects.eq 3 96000", 0xab4ed9039aaa24b7},
+        {"org.oscairn.effects.eq 4 48000", 0x8d2cae7c455d6f7f},
+        {"org.oscairn.effects.eq 4 96000", 0xbbf24f11e56d76ad},
+        {"org.oscairn.effects.reverb 1 44100", 0xcc98b587b279b35b},
+        {"org.oscairn.effects.reverb 1 48000", 0xcd4fa7ef442f29d},
+        {"org.oscairn.effects.reverb 1 96000", 0x5753d2200e3449af},
+        {"org.oscairn.effects.reverb 2 44100", 0xc6299be6917bcd73},
+        {"org.oscairn.effects.reverb 2 48000", 0x86cf8b32710b5bf8},
+        {"org.oscairn.effects.reverb 2 96000", 0x6f3369cea280593e},
+        {"org.oscairn.effects.tremolo-rotary 2 96000", 0xcda7ba8d6ae3c57},
+    });
+#else
+    expected.clear();
+#endif
+    const auto again = bundleHashes();
+    for (auto &[key, h] : bundleHashes())
+    {
+        if (expected.empty())
+        {
+            CHECK(again.at(key) == h);
+            continue;
+        }
+        INFO(key << ": hash 0x" << std::hex << h);
+        auto it = expected.find(key);
+        CHECK((it != expected.end() && it->second == h));
+    }
 }
