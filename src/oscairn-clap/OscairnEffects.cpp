@@ -36,6 +36,7 @@
 #include "effects/RotarySpeaker.h"
 #include "effects/AutoPan.h"
 #include "effects/Tremolo.h"
+#include "effects/ChorusFamily.h"
 
 #include <algorithm>
 #include <array>
@@ -231,6 +232,9 @@ const char *const dynamicsFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_P
 const char *const rotaryFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_TREMOLO,
                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
+const char *const chorusFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_CHORUS,
+                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+
 const std::vector<Category> &categories()
 {
     static const std::vector<Category> all = [] {
@@ -298,6 +302,17 @@ const std::vector<Category> &categories()
         rotary.modes.push_back(mode<oscairn_fx::rotary::Tremolo>(3, "Tremolo"));
         rotary.finish();
         c.push_back(std::move(rotary));
+
+        // The chorus family on one four-tap modulation network (plan, section 15).
+        Category chorus{{CLAP_VERSION_INIT, "org.oscairn.effects.chorus", "Oscairn FX Chorus", "Oscairn",
+                         "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                         "Choruses and modulators, one mode per design", chorusFeatures},
+                        {},
+                        1,
+                        {}};
+        chorus.modes.push_back(mode<oscairn_fx::chorus::ChorusA>(1, "Chorus A"));
+        chorus.finish();
+        c.push_back(std::move(chorus));
         return c;
     }();
     return all;

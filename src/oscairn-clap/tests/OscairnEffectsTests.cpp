@@ -389,7 +389,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 {
     // plugin-porting.md: a mode is best a stepped parameter first by priority; when it changes
     // which controls matter, the others are hidden and the host is told to rescan their info.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", "org.oscairn.effects.chorus"})
     {
         Plugin pl(id);
         auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
@@ -476,7 +476,7 @@ TEST_CASE("Editor hints: Mode first, the selected mode's parameters shown, the o
 TEST_CASE("Audio ports stay the same whatever the mode or state")
 {
     // The host refuses a plugin whose audio port layout changes while it is loaded.
-    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
+    for (const char *id : {reverbId, "org.oscairn.effects.eq", "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", "org.oscairn.effects.chorus"})
     {
         Plugin pl(id);
         auto *ports = ext<clap_plugin_audio_ports_t>(pl.p, CLAP_EXT_AUDIO_PORTS);
@@ -798,6 +798,19 @@ TEST_CASE("Processing never allocates")
         tr.render(inL, inR, r, {1, 37, 512}, {{5, sp, 9.0}, {700, am, 80.0}, {9000, pm, 60.0}, {20000, mg, 6.0}, {30000, mg, 0.0}, {40000, im, 0.0}});
         REQUIRE(allocations == 0);
     }
+    // The chorus modes: speed, depth, feedback, offset, mix, a band and the input mode while playing.
+    for (auto [mode, module, depth] : {std::tuple{1, "Chorus A", "PM Depth"}})
+    {
+        Plugin ch("org.oscairn.effects.chorus");
+        ch.set(1, mode);
+        ch.activate(48000);
+        const clap_id sp = paramIdByName(ch.p, module, "LFO Speed"), dp = paramIdByName(ch.p, module, depth),
+                      of = paramIdByName(ch.p, module, "Delay Offset"), mx = paramIdByName(ch.p, module, "Mix"),
+                      mg = paramIdByName(ch.p, module, "Mid Gain");
+        allocations = 0;
+        ch.render(inL, inR, r, {1, 37, 512}, {{5, sp, 9.0}, {700, dp, 127.0}, {9000, of, 50.0}, {12000, mx, 0.0}, {20000, mg, 6.0}, {30000, mg, 0.0}});
+        REQUIRE(allocations == 0);
+    }
     // The counter works: an allocation while counting is seen.
     countAllocations = true;
     void *probe = ::operator new(16);
@@ -1114,7 +1127,7 @@ TEST_CASE("Per-context memory by mode and sample rate")
 {
     // Prints the table for the plan; gates Reverb 2 at 48 kHz below 1.5 MB (it was 14.5 MB), and
     // the EQs at 44.1 kHz below 4 KB: they hold the rate matcher's 58 KB only at other rates.
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", "org.oscairn.effects.chorus"})
     {
         Plugin probe(id);
         double lo, hi;
@@ -1172,7 +1185,7 @@ TEST_CASE("Declared memory equals what activation holds and what effect contexts
 {
     // For every plugin and mode at 44.1 to 192 kHz: estimate (after state load, before
     // activate) == current (after activate) == the effect contexts' resources.
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", "org.oscairn.effects.chorus"})
     {
         Plugin probe(id);
         clap_param_info_t info;
@@ -3847,7 +3860,7 @@ TEST_CASE("Reset leaves a fresh instance at once in every mode")
         buf.data = data;
         return ext<clap_plugin_state_t>(pl.p, CLAP_EXT_STATE)->load(pl.p, &buf.in);
     };
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary"})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", "org.oscairn.effects.chorus"})
     {
         Plugin probe(id);
         clap_param_info_t info;
@@ -3870,9 +3883,10 @@ TEST_CASE("Reset leaves a fresh instance at once in every mode")
                     setAll(used, m, 0.55);
                     std::vector<float> z(64, 0);
                     used.render(z, z, r1, {64});
-                    // time for the worker to match the change (the EQs, Rotary A's shelves, the delays' EQ)
+                    // time for the worker to match the change (the EQs, Rotary A's shelves, the delays' and
+                    // the chorus modes' EQ)
                     if ((!std::strcmp(id, eqId) || !std::strcmp(id, "org.oscairn.effects.tremolo-rotary") ||
-                         !std::strcmp(id, "org.oscairn.effects.delay")) &&
+                         !std::strcmp(id, "org.oscairn.effects.delay") || !std::strcmp(id, "org.oscairn.effects.chorus")) &&
                         rate != 44100)
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     Buffer before;
@@ -4976,4 +4990,215 @@ TEST_CASE("Tremolo: every parameter's value text parses back")
         }
     }
     REQUIRE(checked == 60); // five points on each of the mode's twelve parameters, no vacuous pass
+}
+
+#include "effects/ChorusFamily.h"
+namespace
+{
+constexpr const char *chorusId = "org.oscairn.effects.chorus";
+// An impulse of 1 through a Stereo line's input word, as the line holds it.
+const double stereoUnit = oscairn_fx::rotary::lineWord(32767 / 32768.0);
+struct ChorusOut
+{
+    std::vector<float> l, r;
+};
+// The chorus plugin's response to `in` (left, and right unless leftOnly), latency removed.
+ChorusOut chorusRun(double rate, int modeId, const char *module, std::vector<std::pair<const char *, double>> set,
+                    const std::vector<float> &in, bool leftOnly = false)
+{
+    Plugin pl(chorusId);
+    pl.set(1, modeId);
+    for (auto &[n, v] : set)
+        pl.set(paramIdByName(pl.p, module, n), v);
+    pl.activate(rate);
+    std::vector<float> inL(in), inR(in.size(), 0.f);
+    inL.resize(in.size() + L);
+    if (!leftOnly)
+        inR.assign(inL.begin(), inL.end());
+    inR.resize(inL.size());
+    ChorusOut o;
+    o.l = pl.render(inL, inR, o.r, {64}, {}, false);
+    o.l.erase(o.l.begin(), o.l.begin() + L);
+    o.r.erase(o.r.begin(), o.r.begin() + L);
+    return o;
+}
+// An impulse of a quarter of full scale (the taps' sum is clipped below 1, as the reference's is).
+std::vector<float> impulse(double rate, double seconds)
+{
+    std::vector<float> x((size_t)(rate * seconds));
+    x[0] = 0.25f;
+    return x;
+}
+// The centroid and sum of x over [a - 4, a + 5] per unit impulse: a tap read between samples n and n + 1.
+std::pair<double, double> tapAt(const std::vector<float> &x, double a)
+{
+    double s = 0, m = 0;
+    for (int n = (int)a - 4; n <= (int)a + 5; ++n)
+        s += x[n], m += n * (double)x[n];
+    return {m / s, 4 * s};
+}
+} // namespace
+
+TEST_CASE("Chorus A: the taps sit at the offset plus the depth laws times their LFOs, at 44.1, 48 and 96 kHz")
+{
+    // The reference's network for its type 03 00 at depth 54, offset 9.9 ms, LFOs held at their start
+    // (speed 0): B and C on the left line, A and D on the right; B and A swing 435 samples on
+    // triangles at 120 and 240 degrees, C and D 279 on sines at 300 and 60, centred 78 samples later,
+    // all 437 samples after the input (9.9 ms in the family's time law, plus one). At 44.1 kHz within
+    // 0.01 sample, elsewhere the same times in seconds within 0.05 of a 44.1 kHz sample.
+    for (double rate : {44100.0, 48000.0, 96000.0})
+    {
+        const double k = rate / 44100;
+        auto o = chorusRun(rate, 1, "Chorus A", {{"LFO Speed", 0}, {"PM Depth", 54}, {"Delay Offset", 9.9}, {"Feedback", 0}, {"Mix", 63}}, impulse(rate, 0.1));
+        for (auto [x, age] : {std::pair{&o.l, 799.49779}, {&o.l, 533.72743}, {&o.r, 509.49557}, {&o.r, 775.26831}})
+        {
+            const auto [c, s] = tapAt(*x, age * k);
+            INFO(rate << " Hz: tap expected at " << age << ", found at " << c / k << " (sum " << s << ")");
+            REQUIRE(std::abs(c / k - age) < (rate == 44100 ? 0.01 : 0.05));
+            REQUIRE(std::abs(s - 8191 * 4 / 32768.0 * 32767 / 32768 * stereoUnit) < 1e-6);
+        }
+    }
+    // Depth 0 puts every tap at the offset (and C and D with B and A); depth 127 swings B and A by
+    // 1025 samples and C and D by 657, centred 184 later (the swing of B and A fitted within one sample
+    // of the platform's: 1024 here).
+    auto z = chorusRun(44100, 1, "Chorus A", {{"LFO Speed", 0}, {"PM Depth", 0}, {"Delay Offset", 9.9}, {"Mix", 63}}, impulse(44100, 0.1));
+    REQUIRE(std::abs(tapAt(z.l, 437).first - 437) < 1e-6);
+    REQUIRE(std::abs(tapAt(z.l, 437).second - 2 * 8191 * 4 / 32768.0 * 32767 / 32768 * stereoUnit) < 1e-6);
+    auto f = chorusRun(44100, 1, "Chorus A", {{"LFO Speed", 0}, {"PM Depth", 127}, {"Delay Offset", 9.9}, {"Mix", 63}}, impulse(44100, 0.1));
+    REQUIRE(std::abs(tapAt(f.l, 437 + 1024 * 0.83332825).first - (437 + 1024 * 0.83332825)) < 0.01);
+    // C: the reference centres it 184 samples on; the fitted swing of B and A (one short) puts it at 183.
+    REQUIRE(std::abs(tapAt(f.l, 437 + 184 + 657 * 0.06712341).first - (437 + 184 + 657 * 0.06712341)) < 1.01);
+}
+
+TEST_CASE("Chorus family: the balance words and each mode's wet level")
+{
+    // Dry and wet are quarter-scale words of the platform's dry/wet curve (round-half-down of
+    // 32767 sin(pi (v - 1) / 252)), times 4; the wet word carries the mode's level held as a float:
+    // 0 dB (Chorus A), -1 dB (Chorus B, Chorus C), +3 dB (Dual Modulator), truncated. Held LFOs at
+    // depth 0 put tap B (and in Chorus A tap C) at the offset's age on the left output; the line's
+    // input word is 32767/32768 in Stereo and 1/2 + 1/2 in Mono.
+    const double top = 32767 / 32768.0;
+    struct Case
+    {
+        int mode;
+        const char *module, *depth;
+        int age, taps;
+        double line;
+        int wetMid, wetFull;
+    };
+    for (auto c : {Case{1, "Chorus A", "PM Depth", 437, 2, stereoUnit, 5792, 8191}})
+        for (auto [mix, dryWord, wetWord] : {std::tuple{-63, 8191, 0}, {0, 5792, c.wetMid}, {63, 0, c.wetFull}})
+        {
+            auto o = chorusRun(44100, c.mode, c.module, {{"LFO Speed", 0}, {c.depth, 0}, {"Mix", (double)mix}}, impulse(44100, 0.03));
+            INFO(c.module << ", mix " << mix);
+            REQUIRE(std::abs(4 * o.l[0] - dryWord * 4 / 32768.0) < 1e-6);
+            INFO("tap sum " << tapAt(o.l, c.age).second);
+            REQUIRE(std::abs(tapAt(o.l, c.age).second - wetWord * 4 / 32768.0 * top * c.line * c.taps) < 1e-6);
+        }
+}
+
+TEST_CASE("Chorus A: feedback from B and C into the left line, at v x 250 / 32768 each")
+{
+    // Held LFOs, depth 0, a left-only impulse: B and C sit at the offset's age a (437) and both feed
+    // the left line, so at 2a both taps carry both taps' loop: four times the one-tap echo.
+    using oscairn_fx::rotary::lineWord;
+    const double top = 32767 / 32768.0;
+    auto a = chorusRun(44100, 1, "Chorus A", {{"LFO Speed", 0}, {"PM Depth", 0}, {"Delay Offset", 9.9}, {"Feedback", 40}, {"Mix", 63}}, impulse(44100, 0.1), true);
+    const double wa = 8191 * 4 / 32768.0 * top, fbA = 40 * 250 / 32768.0;
+    REQUIRE(std::abs(tapAt(a.l, 874).second - 2 * wa * lineWord(2 * fbA * stereoUnit)) < 1e-6);
+}
+
+TEST_CASE("Chorus family: Mono feeds one line the input's mean and every tap reads it")
+{
+    // A left-only impulse in Stereo reaches only the left output; in Mono the right output's taps (A
+    // and D) read the left line, fed half the left input.
+    for (auto [mode, module] : {std::pair{1, "Chorus A"}})
+    {
+        const char *depth = "PM Depth";
+        auto st = chorusRun(44100, mode, module, {{"LFO Speed", 0}, {depth, 0}, {"Mix", 63}, {"Input Mode", 1}}, impulse(44100, 0.1), true);
+        auto mo = chorusRun(44100, mode, module, {{"LFO Speed", 0}, {depth, 0}, {"Mix", 63}, {"Input Mode", 0}}, impulse(44100, 0.1), true);
+        double es = 0, em = 0, el = 0;
+        for (size_t n = 0; n < st.r.size(); ++n)
+            es += std::abs(st.r[n]), em += std::abs(mo.r[n]), el += std::abs(mo.l[n]);
+        INFO(module << ": right output in Stereo " << es << ", in Mono " << em << " (left " << el << ")");
+        REQUIRE(es == 0);
+        REQUIRE(std::abs(em / el - 1) < 1e-6);
+    }
+}
+
+TEST_CASE("Chorus family: fed silence, every mode settles to exact silence")
+{
+    // A second of noise at full feedback, then silence: the output reaches exact zeros within 13 s
+    // (Chorus A's two taps per line loop at 0.96), the lines emptying through their words instead
+    // of decaying through denormal floats.
+    std::vector<float> x((size_t)(44100 * 14));
+    uint32_t r = 1;
+    for (size_t n = 0; n < 44100; ++n)
+    {
+        r = r * 1664525u + 1013904223u;
+        x[n] = (float)((double)r / 4294967296.0 - 0.5);
+    }
+    for (auto [mode, module, fb] : {std::tuple{1, "Chorus A", "Feedback"}})
+    {
+        std::vector<std::pair<const char *, double>> set{{"Mix", 0}};
+        if (*fb)
+            set.push_back({fb, 63});
+        auto o = chorusRun(44100, mode, module, set, x);
+        size_t last = 0;
+        for (size_t n = 0; n < o.l.size(); ++n)
+            if (o.l[n] != 0 || o.r[n] != 0)
+                last = n;
+        INFO(module << ": last non-zero sample at " << last / 44100.0 << " s");
+        REQUIRE(last < o.l.size() - 44100);
+    }
+}
+
+TEST_CASE("Chorus modes' state round-trips, and every parameter's value text parses back")
+{
+    for (int mode = 1; mode <= 1; ++mode)
+    {
+        Plugin a(chorusId);
+        a.set(1, mode);
+        auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+        int checked = 0, count = 0;
+        for (uint32_t i = 1; i < params->count(a.p); ++i)
+        {
+            clap_param_info_t info;
+            REQUIRE(params->get_info(a.p, i, &info));
+            if ((info.id >> 8) != (clap_id)mode)
+                continue;
+            ++count;
+            a.set(info.id, info.min_value + 0.3 * (info.max_value - info.min_value));
+            for (double t : {0., .25, .5, .75, 1.})
+            {
+                double v = info.min_value + t * (info.max_value - info.min_value);
+                if (info.flags & CLAP_PARAM_IS_STEPPED)
+                    v = std::round(v);
+                char text[256], again[256];
+                REQUIRE(params->value_to_text(a.p, info.id, v, text, sizeof(text)));
+                double back = NAN;
+                INFO(info.name << " at " << v << ": \"" << text << "\"");
+                REQUIRE(params->text_to_value(a.p, info.id, text, &back));
+                if (info.flags & CLAP_PARAM_IS_STEPPED)
+                    REQUIRE(back == v);
+                REQUIRE(params->value_to_text(a.p, info.id, back, again, sizeof(again)));
+                REQUIRE(!std::strcmp(text, again));
+                ++checked;
+            }
+        }
+        REQUIRE(checked == 5 * count);
+        REQUIRE(count >= 11);
+        Buffer buf;
+        REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+        Plugin b(chorusId);
+        REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+        Buffer again;
+        REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+        REQUIRE(again.data == buf.data);
+        std::vector<float> inL, inR, ra, rb;
+        signal(24000, inL, inR);
+        a.activate();
+        b.activate();
+        REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+    }
 }
