@@ -1,7 +1,7 @@
 /*
  * Oscairn effects (doc/oscairn-plan.md). GPL-3.0-or-later, see ../OscairnEffects.cpp.
  *
- * A two-voice pitch network and the Ensemble Detune mode on it (plan, section 15, "Ensemble
+ * A two-voice pitch network and the Dual Detune mode on it (plan, section 15, "Dual
  * Detune"). Written for Oscairn; follows the sst-effects effect contract. Signal flow:
  *  - a first-order low shelf and a first-order high shelf on the input, dry and wet alike;
  *  - two lines, left and right, each fed its own channel, clipped to [-1, 1) and held as floats;
@@ -168,9 +168,9 @@ template <typename FXConfig, int P, typename Derived> struct PitchNetwork : eq::
     Glide glides[glideCount];
 };
 
-// Ensemble Detune: the left voice detuned down and the right up by the same cents, each line delayed
+// Dual Detune: the left voice detuned down and the right up by the same cents, each line delayed
 // by its initial delay, the voices spread by equal-power words from the dry/wet curve.
-template <typename FXConfig> struct EnsembleDetune : PitchNetwork<FXConfig, 9, EnsembleDetune<FXConfig>>
+template <typename FXConfig> struct DualDetune : PitchNetwork<FXConfig, 9, DualDetune<FXConfig>>
 {
     enum params
     {
@@ -186,9 +186,9 @@ template <typename FXConfig> struct EnsembleDetune : PitchNetwork<FXConfig, 9, E
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
-    static constexpr const char *streamingName{"oscairn-ensemble-detune"};
-    static constexpr const char *displayName{"Ensemble Detune"};
-    using Base = PitchNetwork<FXConfig, 9, EnsembleDetune<FXConfig>>;
+    static constexpr const char *streamingName{"oscairn-dual-detune"};
+    static constexpr const char *displayName{"Dual Detune"};
+    using Base = PitchNetwork<FXConfig, 9, DualDetune<FXConfig>>;
     using Base::Base;
     friend typename Base::Base;
 

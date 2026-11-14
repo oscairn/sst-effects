@@ -270,7 +270,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | 2 MODULATOR | 03 10 | Var,InsA/B,A/D |  | 529 | 335 | Chorus | written | the four-tap network, mode "Dual Modulator" (built; section 15) |
 | SPX CHORUS | 03 20 | Var,InsA/B,A/D |  | 239 | 110 | Chorus | written | the four-tap network, mode "Chorus B" (built; section 15) |
 | SYMPHONIC | 03 30 | Var,InsA/B,A/D |  | 158 | 35 | Chorus | written | the four-tap network, mode "Chorus C" (built; section 15) |
-| ENSEMBLE DETUNE | 03 40 | Var,InsA/B,A/D |  | 384 | 187 | Chorus | written | own two-voice pitch network, mode "Ensemble Detune" (built; section 15) |
+| ENSEMBLE DETUNE | 03 40 | Var,InsA/B,A/D |  | 384 | 187 | Chorus | written | own two-voice pitch network, mode "Dual Detune" (built; section 15) |
 | GS1 ENSEMBLE & TREMOLO | 03 50 | Var,InsA/B,A/D |  | 52 | 0 | Chorus | borrowed | Surge XT BBD Ensemble (GPL-3.0) + sst Tremolo |
 | VCM FLANGER | 04 00 | Var,InsA/B,A/D |  | 210 | 116 | Flanger | written | own circuit-style flanger on the Surge XT BBD line |
 | CLASSIC FLANGER | 04 10 | Var,InsA/B,A/D |  | 124 | 224 | Flanger | base | sst Flanger + mapping |
@@ -564,7 +564,7 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     0.2.1 carries Reverb 0.5.3, EQ 0.1.3, Delay 0.2.1, Dynamics 0.2.3 and Tremolo & Rotary 0.2.1.
     Package 0.3.0 (2026-11-15) adds Chorus 0.1.0 and carries Reverb 0.5.4, EQ 0.1.4, Delay 0.2.2,
     Dynamics 0.2.4 and Tremolo & Rotary 0.2.2. Package 0.3.1 (2026-11-15) carries Chorus 0.2.0 (the
-    Ensemble Detune mode, less work per sample), Reverb 0.5.5, EQ 0.1.5, Delay 0.2.3, Dynamics 0.2.5
+    Dual Detune mode, less work per sample), Reverb 0.5.5, EQ 0.1.5, Delay 0.2.3, Dynamics 0.2.5
     and Tremolo & Rotary 0.2.3 (the wrapper's cost work).
 25. **Decided (Jacob, 2026-11-05): fix the circuit-style compressor before shipping it. Done
     (2026-11-06):** rebuilt on the reference's structure (section 15, "Circuit compressor
@@ -2661,14 +2661,14 @@ After the cost work of 2026-11-15 (the network: glides only while moving, unused
 product skipped, the fold's saw only in Chorus C; the wrapper: values loaded only after a change, the
 frames moved a run at a time, an empty matched cascade skipped; every mode's output bits unchanged,
 plugin test "Every plugin and mode renders the same bits as before the wrapper's cost work"), at 48 kHz
-per block: Chorus A 63,400, Chorus B 64,700, Dual Modulator 46,500, Chorus C 62,600, Ensemble Detune
+per block: Chorus A 63,400, Chorus B 64,700, Dual Modulator 46,500, Chorus C 62,600, Dual Detune
 49,500; fed silence 8,900-9,800. What remains in Chorus A, B and C is mostly the exact LFO words
 (about 14,000 per block) and the interpolated reads; a two-pass form that batched the taps over the
 block was exact but cost more.
 
-### Ensemble Detune (built 2026-11-15)
+### Dual Detune (built 2026-11-15)
 
-Mode "Ensemble Detune" (id 5) of Oscairn FX Chorus, `effects/PitchNetwork.h`, for the reference's type
+Mode "Dual Detune" (id 5) of Oscairn FX Chorus, `effects/PitchNetwork.h`, for the reference's type
 03 40. Measurements: `fx-types-2026-11-15/0340-ensemble-detune/` (its `INDEX.md`).
 
 Structure, as the null takes show it:
@@ -2711,13 +2711,13 @@ variation bus Mix +63):
 
 | Type | Plugin parameters (raw parameter: law) |
 | --- | --- |
-| 03 40 → Ensemble Detune | Detune 1: v - 64 cents; Initial Delay L 2: Table #2 at v, ms; Initial Delay R 3: Table #2 at v, ms; Spread 4: v; Mix 10: clamp(v - 64, -63, 63); Low Shelf Frequency 11: Table #3 at v, Hz; Low Shelf Gain 12: v - 64 dB; High Shelf Frequency 13: Table #3 at v, Hz; High Shelf Gain 14: v - 64 dB |
+| 03 40 → Dual Detune | Detune 1: v - 64 cents; Initial Delay L 2: Table #2 at v, ms; Initial Delay R 3: Table #2 at v, ms; Spread 4: v; Mix 10: clamp(v - 64, -63, 63); Low Shelf Frequency 11: Table #3 at v, Hz; Low Shelf Gain 12: v - 64 dB; High Shelf Frequency 13: Table #3 at v, Hz; High Shelf Gain 14: v - 64 dB |
 
-Plugin tests, each checked to fail with its law broken: "Ensemble Detune: the initial delays, the taps'
+Plugin tests, each checked to fail with its law broken: "Dual Detune: the initial delays, the taps'
 complementary windows and the spread words, at 44.1, 48 and 96 kHz" (fails with the spread words
-swapped, and without the extra sample); "Ensemble Detune: the windows sum to one but for a bump of
+swapped, and without the extra sample); "Dual Detune: the windows sum to one but for a bump of
 0.375 times a folded saw on each tap where they cross" (fails with the bump's phase flipped, and with
-its weight at zero); "Ensemble Detune: the left voice plays down and the right up by the cents, through
+its weight at zero); "Dual Detune: the left voice plays down and the right up by the cents, through
 the ramp word" (fails with the voices swapped, and with the word rounded); the family's silence test
 takes the mode. Memory per context: 66,964 bytes at 44.1 kHz, 124,908 at 48 kHz, 190,444 at 96 kHz (two
 lines of 8,192 floats at 44.1 and 48 kHz, 16,384 at 96 kHz, plus the shelves' matcher away from 44.1
@@ -2799,9 +2799,9 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 60 | Chorus family on the variation bus | The reference plays every type of the family wet only there, whatever the stored balance; the plugin does not know its slot, so the converter sets Mix +63 | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `owner*_varwet_sine`; `features.py` | converter |
 | 61 | Chorus family at rates other than 44.1 kHz | Delays kept in seconds (read between samples) and LFO steps scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Chorus A: the taps sit…" at 48 and 96 kHz | `Network` |
 | 62 | (Resolved 2026-11-15.) Type 03 40 | Built: null takes -97 to -110 dB | — | Resolved | fx-types-2026-11-15 `0340` | `effects/PitchNetwork.h` |
-| 63 | Ensemble Detune: not modelled | The shelves' coefficient glide after a change and their internal clips (x4 and x16 sections, above full scale only); the glide of the network's words is the family's mix glide, not probed by a parameter change; the ramps start at activation, not when the type loads (as 59) | Null takes -97 to -110 dB without them | Deliberate | — | `PitchNetwork` |
-| 64 | Ensemble Detune at rates other than 44.1 kHz | Delays kept in seconds (read between samples), the ramp's step scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Ensemble Detune: the initial delays…" at 48 and 96 kHz | `PitchNetwork` |
-| 65 | Ensemble Detune on the variation bus | Wet only there, whatever the stored balance (as 60) | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `0340` `var_def_sine`; `features.py` | converter |
+| 63 | Dual Detune: not modelled | The shelves' coefficient glide after a change and their internal clips (x4 and x16 sections, above full scale only); the glide of the network's words is the family's mix glide, not probed by a parameter change; the ramps start at activation, not when the type loads (as 59) | Null takes -97 to -110 dB without them | Deliberate | — | `PitchNetwork` |
+| 64 | Dual Detune at rates other than 44.1 kHz | Delays kept in seconds (read between samples), the ramp's step scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Dual Detune: the initial delays…" at 48 and 96 kHz | `PitchNetwork` |
+| 65 | Dual Detune on the variation bus | Wet only there, whatever the stored balance (as 60) | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `0340` `var_def_sine`; `features.py` | converter |
 
 ## 17. Oscairn porting checklist (decision 22)
 

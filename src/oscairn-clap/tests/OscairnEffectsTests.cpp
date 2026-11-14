@@ -5208,7 +5208,7 @@ TEST_CASE("Chorus family: fed silence, every mode settles to exact silence")
         x[n] = (float)((double)r / 4294967296.0 - 0.5);
     }
     for (auto [mode, module, fb] : {std::tuple{1, "Chorus A", "Feedback"}, {2, "Chorus B", "Feedback"}, {3, "Dual Modulator", "Feedback"}, {4, "Chorus C", ""},
-                                    {5, "Ensemble Detune", ""}})
+                                    {5, "Dual Detune", ""}})
     {
         std::vector<std::pair<const char *, double>> set{{"Mix", 0}};
         if (*fb)
@@ -5341,7 +5341,7 @@ TEST_CASE("Chorus family: every mode renders the same bits as the network before
 
 #include "effects/PitchNetwork.h"
 
-TEST_CASE("Ensemble Detune: the initial delays, the taps' complementary windows and the spread words, at 44.1, 48 and 96 kHz")
+TEST_CASE("Dual Detune: the initial delays, the taps' complementary windows and the spread words, at 44.1, 48 and 96 kHz")
 {
     // Detune 0 puts both taps of each voice at its line's age (1 + the initial delay in the family's
     // time law: 9.9 ms is 437 samples on the left, 3.2 ms 142 on the right), their window gains
@@ -5350,7 +5350,7 @@ TEST_CASE("Ensemble Detune: the initial delays, the taps' complementary windows 
     for (double rate : {44100.0, 48000.0, 96000.0})
     {
         const double k = rate / 44100, top = 32767 / 32768.0;
-        auto o = chorusRun(rate, 5, "Ensemble Detune", {{"Detune", 0}, {"Initial Delay L", 9.9}, {"Initial Delay R", 3.2}, {"Spread", 16}, {"Mix", 63}},
+        auto o = chorusRun(rate, 5, "Dual Detune", {{"Detune", 0}, {"Initial Delay L", 9.9}, {"Initial Delay R", 3.2}, {"Spread", 16}, {"Mix", 63}},
                            impulse(rate, 0.05));
         const double nearGain = 8 * 8191 / 32768.0 * 13650 / 32768 * top, farGain = 8 * 8191 / 32768.0 * 9059 / 32768 * top;
         for (auto [x, age, g] : {std::tuple{&o.l, 437.0, nearGain}, {&o.l, 142.0, farGain}, {&o.r, 142.0, nearGain}, {&o.r, 437.0, farGain}})
@@ -5363,7 +5363,7 @@ TEST_CASE("Ensemble Detune: the initial delays, the taps' complementary windows 
     }
 }
 
-TEST_CASE("Ensemble Detune: the windows sum to one but for a bump of 0.375 times a folded saw on each tap where they cross")
+TEST_CASE("Dual Detune: the windows sum to one but for a bump of 0.375 times a folded saw on each tap where they cross")
 {
     // A steady input, detune 50, each voice alone on its side (spread 63): the output follows the
     // sum of the two window gains, 32767/32768 plus twice 0.375 x a second folded saw of up to 0.49994,
@@ -5372,7 +5372,7 @@ TEST_CASE("Ensemble Detune: the windows sum to one but for a bump of 0.375 times
     // right one (it rises: three quarters in).
     const double top = 32767 / 32768.0;
     std::vector<float> dc(65536 + 8000, 0.25f);
-    auto o = chorusRun(44100, 5, "Ensemble Detune", {{"Detune", 50}, {"Spread", 63}, {"Mix", 63}}, dc);
+    auto o = chorusRun(44100, 5, "Dual Detune", {{"Detune", 50}, {"Spread", 63}, {"Mix", 63}}, dc);
     const double unit = 8 * 8191 / 32768.0 * 16383 / 32768 * 0.25;
     for (auto [x, peakAt] : {std::pair{&o.l, 16383}, {&o.r, 49151}})
     {
@@ -5391,7 +5391,7 @@ TEST_CASE("Ensemble Detune: the windows sum to one but for a bump of 0.375 times
     }
 }
 
-TEST_CASE("Ensemble Detune: the left voice plays down and the right up by the cents, through the ramp word")
+TEST_CASE("Dual Detune: the left voice plays down and the right up by the cents, through the ramp word")
 {
     // The ramp word trunc(65536 - 65536 x 2^(c / 1200) + 1/2) in single precision, as measured at
     // +-10, 30 and 50 cents; each voice plays 1 - word / 65536 times the input's frequency (counted
@@ -5403,7 +5403,7 @@ TEST_CASE("Ensemble Detune: the left voice plays down and the right up by the ce
     std::vector<float> sine(6000 + 2 * 65536);
     for (size_t n = 0; n < sine.size(); ++n)
         sine[n] = 0.25f * (float)std::sin(2 * M_PI * 1102.5 * n / 44100);
-    auto o = chorusRun(44100, 5, "Ensemble Detune", {{"Detune", 50}, {"Spread", 63}, {"Mix", 63}}, sine);
+    auto o = chorusRun(44100, 5, "Dual Detune", {{"Detune", 50}, {"Spread", 63}, {"Mix", 63}}, sine);
     auto rate = [&](const std::vector<float> &x) {
         int crossings = 0;
         for (size_t n = 6001; n < 6000 + 2 * 65536; ++n)
