@@ -29,7 +29,11 @@
 namespace oscairn_fx::chorus
 {
 inline constexpr double word = 1.0 / 32768, top = 32767.0 / 32768;
-inline double clip(double x) { return x > top ? top : (x < -1 ? -1 : x); }
+inline double clip(double x)
+{
+    const double a = x > top ? top : x; // two selects, the same result as one nested choice
+    return a < -1 ? -1 : a;
+}
 // A product held to 1/32768, as the network's multipliers keep it.
 inline double held(double x) { return std::trunc(x * 32768 - (x < 0 ? 1 : 0)) * word; }
 
@@ -98,12 +102,22 @@ struct Lfo
         phase += step * n;
         phase -= 16777216 * std::floor(phase / 16777216);
     }
-    double next()
+    // One sample on: for a step below a turn this is the wrap floor() gives, without it.
+    void advance()
     {
         phase += step;
-        phase -= 16777216 * std::floor(phase / 16777216);
+        if (phase >= 16777216)
+            phase -= 16777216;
+    }
+    double read() const
+    {
         const int v = word16(wave, (uint32_t)phase);
         return bipolar ? v * word : ((v + 32768) & 0xffff) / 65536.0;
+    }
+    double next()
+    {
+        advance();
+        return read();
     }
 };
 
@@ -239,21 +253,45 @@ template <typename FXConfig, int P, typename Derived> struct Network : eq::Serie
             w = (w - FXConfig::blockSize) & mask;
             return;
         }
+        // Constant over the block, so hoisted: whether every glide is at its target (the glides
+        // then do nothing), which taps reach an output or a line (an unused tap's terms are zeros,
+        // and adding them changes nothing), whether the fold is used, and each tap's AM (with none,
+        // x + held(0) x is x). Every skipped step's result is exactly what it replaces.
+        const bool moving = !settled();
+        const double mixTarget[6] = {s.wet, s.dry, s.fbLB, s.fbLC, s.fbRA, s.fbRD};
+        const double weight[4][3] = {{s.outB, s.fbLB, 0}, {s.outA, s.fbRA, 0}, {s.outC0, s.outC1, s.fbLC}, {s.outD, s.fbRD, 0}};
+        const int fbGlide[4] = {10, 12, 11, 13};
+        bool used[4], am[4], folded = false;
+        for (int t = 0; t < 4; ++t)
+        {
+            used[t] = moving || weight[t][0] != 0 || weight[t][1] != 0 || weight[t][2] != 0 || !(glides[fbGlide[t]].now == 0);
+            am[t] = moving || glides[2 * t + 1].now != 0;
+            folded = folded || s.tap[t].triGain != 0;
+        }
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             w = (w - 1) & mask;
-            double l[4];
-            for (int k = 0; k < 4; ++k)
-                l[k] = lfo[k].next();
-            const double f = fast.next();
+            if (folded)
+                fast.advance();
+            const double f = folded ? fast.read() : 0;
             double x[4];
             for (int t = 0; t < 4; ++t)
             {
+                lfo[t].advance();
                 const Tap &tp = s.tap[t];
                 Glide &gp = glides[2 * t], &ga = glides[2 * t + 1];
-                gp.depth(tp.pm, per);
-                ga.depth(tp.am, per);
-                const double m = tp.clamped ? std::min(l[tp.lfo], top) : l[tp.lfo];
+                if (moving)
+                {
+                    gp.depth(tp.pm, per);
+                    ga.depth(tp.am, per);
+                }
+                if (!used[t])
+                {
+                    x[t] = 0;
+                    continue;
+                }
+                const double l = lfo[t].read();
+                const double m = tp.clamped ? std::min(l, top) : l;
                 double pos = gp.now * m;
                 if (tp.triGain != 0)
                 {
@@ -267,15 +305,12 @@ template <typename FXConfig, int P, typename Derived> struct Network : eq::Serie
                 const auto &line = tp.right ? lineR : lineL;
                 const double a = line[(w + n) & mask], b = line[(w + n + 1) & mask];
                 const double y = a + (age - n) * (b - a);
-                x[t] = y + held(ga.now * m) * y;
+                x[t] = am[t] ? y + held(ga.now * m) * y : y;
             }
             const double eL = L[i], eR = R[i];
-            glides[8].mix(s.wet, per);
-            glides[9].mix(s.dry, per);
-            glides[10].mix(s.fbLB, per);
-            glides[11].mix(s.fbLC, per);
-            glides[12].mix(s.fbRA, per);
-            glides[13].mix(s.fbRD, per);
+            if (moving)
+                for (int k = 8; k < 14; ++k)
+                    glides[k].mix(mixTarget[k - 8], per);
             const double wet = glides[8].now, dry = glides[9].now;
             lineL[w] = store(glides[10].now * x[0] + glides[11].now * x[2] + s.inLL * eL + s.inLR * eR);
             lineR[w] = store(glides[12].now * x[1] + glides[13].now * x[3] + s.inRR * eR);
