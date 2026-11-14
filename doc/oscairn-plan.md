@@ -563,7 +563,9 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     including when it changed only because it shares the bundle with a plugin that did: package
     0.2.1 carries Reverb 0.5.3, EQ 0.1.3, Delay 0.2.1, Dynamics 0.2.3 and Tremolo & Rotary 0.2.1.
     Package 0.3.0 (2026-11-15) adds Chorus 0.1.0 and carries Reverb 0.5.4, EQ 0.1.4, Delay 0.2.2,
-    Dynamics 0.2.4 and Tremolo & Rotary 0.2.2.
+    Dynamics 0.2.4 and Tremolo & Rotary 0.2.2. Package 0.3.1 (2026-11-15) carries Chorus 0.2.0 (the
+    Ensemble Detune mode, less work per sample), Reverb 0.5.5, EQ 0.1.5, Delay 0.2.3, Dynamics 0.2.5
+    and Tremolo & Rotary 0.2.3 (the wrapper's cost work).
 25. **Decided (Jacob, 2026-11-05): fix the circuit-style compressor before shipping it. Done
     (2026-11-06):** rebuilt on the reference's structure (section 15, "Circuit compressor
     rebuilt on the reference's structure"). A fresh hold-out (fx26, 20 random settings, four
