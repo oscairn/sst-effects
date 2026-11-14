@@ -2655,6 +2655,15 @@ Chorus C 104,800; Chorus A at 44.1 kHz 96,000; Tremolo for comparison 53,100. Fe
 lines are empty, a block costs 18,600 (the wrapper; with three EQ bands on 37,000), and the plugin
 returns `CLAP_PROCESS_SLEEP`.
 
+After the cost work of 2026-11-15 (the network: glides only while moving, unused taps and the AM
+product skipped, the fold's saw only in Chorus C; the wrapper: values loaded only after a change, the
+frames moved a run at a time, an empty matched cascade skipped; every mode's output bits unchanged,
+plugin test "Every plugin and mode renders the same bits as before the wrapper's cost work"), at 48 kHz
+per block: Chorus A 63,400, Chorus B 64,700, Dual Modulator 46,500, Chorus C 62,600, Ensemble Detune
+49,500; fed silence 8,900-9,800. What remains in Chorus A, B and C is mostly the exact LFO words
+(about 14,000 per block) and the interpolated reads; a two-pass form that batched the taps over the
+block was exact but cost more.
+
 ### Ensemble Detune (built 2026-11-15)
 
 Mode "Ensemble Detune" (id 5) of Oscairn FX Chorus, `effects/PitchNetwork.h`, for the reference's type
@@ -2711,7 +2720,7 @@ the ramp word" (fails with the voices swapped, and with the word rounded); the f
 takes the mode. Memory per context: 66,964 bytes at 44.1 kHz, 124,908 at 48 kHz, 190,444 at 96 kHz (two
 lines of 8,192 floats at 44.1 and 48 kHz, 16,384 at 96 kHz, plus the shelves' matcher away from 44.1
 kHz). Cost (`scripts/cost-a53.sh`, 48 kHz, noise in): 58,000 instructions per block, 67,200 with both
-shelves on; fed silence 17,400, and the plugin sleeps.
+shelves on; fed silence 17,400, and the plugin sleeps (49,500 and 8,900 after the cost work above).
 
 The pitch-change type 0D 40 shares this network's structure in the reference; built on it, it would
 also need feedback from each voice into both lines, the input's cross-feed into the lines, the raw
