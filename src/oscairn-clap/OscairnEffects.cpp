@@ -37,6 +37,7 @@
 #include "effects/AutoPan.h"
 #include "effects/Tremolo.h"
 #include "effects/ChorusFamily.h"
+#include "effects/PitchNetwork.h"
 
 #include <algorithm>
 #include <array>
@@ -314,6 +315,7 @@ const std::vector<Category> &categories()
         chorus.modes.push_back(mode<oscairn_fx::chorus::ChorusB>(2, "Chorus B"));
         chorus.modes.push_back(mode<oscairn_fx::chorus::DualModulator>(3, "Dual Modulator"));
         chorus.modes.push_back(mode<oscairn_fx::chorus::ChorusC>(4, "Chorus C"));
+        chorus.modes.push_back(mode<oscairn_fx::chorus::EnsembleDetune>(5, "Ensemble Detune"));
         chorus.finish();
         c.push_back(std::move(chorus));
         return c;
