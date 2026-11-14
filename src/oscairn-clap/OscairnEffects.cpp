@@ -240,7 +240,7 @@ const std::vector<Category> &categories()
     static const std::vector<Category> all = [] {
         std::vector<Category> c;
         Category reverb{{CLAP_VERSION_INIT, "org.oscairn.effects.reverb", "Oscairn FX Reverb",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.5.3",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.5.4",
                          "Reverbs, one mode per algorithm", reverbFeatures},
                         {},
                         2,
@@ -253,7 +253,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(reverb));
 
         Category eq{{CLAP_VERSION_INIT, "org.oscairn.effects.eq", "Oscairn FX EQ", "Oscairn",
-                     "https://github.com/oscairn/sst-effects", "", "", "0.1.3",
+                     "https://github.com/oscairn/sst-effects", "", "", "0.1.4",
                      "Equalizers, one mode per design", eqFeatures},
                     {},
                     1,
@@ -266,7 +266,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(eq));
 
         Category delay{{CLAP_VERSION_INIT, "org.oscairn.effects.delay", "Oscairn FX Delay", "Oscairn",
-                        "https://github.com/oscairn/sst-effects", "", "", "0.2.1",
+                        "https://github.com/oscairn/sst-effects", "", "", "0.2.2",
                         "Delays, one mode per design", delayFeatures},
                        {},
                        1,
@@ -281,7 +281,7 @@ const std::vector<Category> &categories()
         c.push_back(std::move(delay));
 
         Category dynamics{{CLAP_VERSION_INIT, "org.oscairn.effects.dynamics", "Oscairn FX Dynamics",
-                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.3",
+                           "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.4",
                            "Compressors and other dynamics, one mode per design", dynamicsFeatures},
                           {},
                           1,
@@ -292,7 +292,7 @@ const std::vector<Category> &categories()
 
         // Rotary speakers, the auto pan and the tremolo; later the other rotary types (plan, section 6).
         Category rotary{{CLAP_VERSION_INIT, "org.oscairn.effects.tremolo-rotary", "Oscairn FX Tremolo & Rotary",
-                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.1",
+                         "Oscairn", "https://github.com/oscairn/sst-effects", "", "", "0.2.2",
                          "Tremolos and rotary speakers, one mode per design", rotaryFeatures},
                         {},
                         1,
