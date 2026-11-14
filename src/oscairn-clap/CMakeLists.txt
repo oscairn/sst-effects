@@ -33,6 +33,10 @@ target_link_libraries(oscairn-effects-privacy-host PRIVATE clap ${CMAKE_DL_LIBS}
 add_executable(oscairn-effects-render tools/OscairnEffectsRender.cpp)
 target_link_libraries(oscairn-effects-render PRIVATE oscairn-effects-core)
 
+# The per-block cost of a plugin mode, for instruction counts on the device (scripts/cost-a53.sh).
+add_executable(oscairn-effects-cost tools/OscairnEffectsCost.cpp)
+target_link_libraries(oscairn-effects-cost PRIVATE oscairn-effects-core)
+
 # The stock-vs-fork gate (scripts/stock-gate.sh): the same render program against this branch's
 # headers and, when OSCAIRN_STOCK_BASE_INCLUDE names an upstream include/ directory, against those.
 add_executable(oscairn-stock-render tests/StockRender.cpp)
