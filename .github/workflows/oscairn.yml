@@ -1,6 +1,6 @@
 # Oscairn effects (src/oscairn-clap, doc/oscairn-plan.md): build the plugins, run upstream's
 # tests and ours, and the stock-vs-fork gate, on Linux x86_64, Linux ARM64 and macOS, and the
-# tests under ASan/UBSan and TSan.
+# tests under ASan/UBSan and TSan; and the cost gate.
 name: Oscairn
 on:
   push:
@@ -119,3 +119,18 @@ jobs:
       - name: Stock-vs-fork gate
         if: matrix.gate
         run: ./src/oscairn-clap/scripts/stock-gate.sh build-stock-gate
+
+  # Instructions per block of the cases in src/oscairn-clap/scripts/cost-baseline.txt, built for the
+  # device's CPU and counted with callgrind, each within 2 % of its baseline (counted with this
+  # runner's GCC 13 and glibc 2.39).
+  cost:
+    name: Cost gate (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install valgrind and Ninja
+        run: sudo apt-get update && sudo apt-get install -y valgrind ninja-build
+      - name: Configure (for the dependencies' sources)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSST_EFFECTS_BUILD_OSCAIRN=ON
+      - name: Cost gate
+        run: ./src/oscairn-clap/scripts/cost-gate.sh build -

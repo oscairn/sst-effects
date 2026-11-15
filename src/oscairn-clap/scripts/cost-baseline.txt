@@ -1,0 +1,17 @@
+# The cost gate's cases (scripts/cost-gate.sh): <label> <instructions per block> <plugin-id> <rate>
+# <signal|low|full|silence> ["Module/Name=value" ...]. Counted at 48 kHz, 128-frame blocks.
+dyn1-silence 2443 org.oscairn.effects.dynamics 48000 silence Mode=1
+dyn1-low 83086 org.oscairn.effects.dynamics 48000 low Mode=1
+dyn1-signal 92302 org.oscairn.effects.dynamics 48000 signal Mode=1
+dyn2-signal 21007 org.oscairn.effects.dynamics 48000 signal Mode=2
+cho1-signal 61519 org.oscairn.effects.chorus 48000 signal Mode=1
+cho1-eq-signal 78311 org.oscairn.effects.chorus 48000 signal Mode=1 "Chorus A/Low Shelf Gain=6" "Chorus A/Mid Gain=-4" "Chorus A/High Shelf Gain=3"
+cho1-silence 8966 org.oscairn.effects.chorus 48000 silence Mode=1
+cho5-signal 47670 org.oscairn.effects.chorus 48000 signal Mode=5
+eq1-signal 6488 org.oscairn.effects.eq 48000 signal Mode=1
+eq1-silence 2452 org.oscairn.effects.eq 48000 silence Mode=1
+del1-signal 138251 org.oscairn.effects.delay 48000 signal Mode=1
+del1-silence 2455 org.oscairn.effects.delay 48000 silence Mode=1
+rev2-signal 80683 org.oscairn.effects.reverb 48000 signal Mode=2
+rev3-signal 125724 org.oscairn.effects.reverb 48000 signal Mode=3
+rev3-silence 2463 org.oscairn.effects.reverb 48000 silence Mode=3
