@@ -38,6 +38,7 @@
 #include "effects/Tremolo.h"
 #include "effects/ChorusFamily.h"
 #include "effects/PitchNetwork.h"
+#include "effects/AmpChain.h"
 
 #include <algorithm>
 #include <array>
@@ -236,6 +237,9 @@ const char *const rotaryFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLU
 const char *const chorusFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_CHORUS,
                                       CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
+const char *const ampFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_DISTORTION,
+                                   CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+
 const std::vector<Category> &categories()
 {
     static const std::vector<Category> all = [] {
@@ -318,6 +322,17 @@ const std::vector<Category> &categories()
         chorus.modes.push_back(mode<oscairn_fx::chorus::DualDetune>(5, "Dual Detune"));
         chorus.finish();
         c.push_back(std::move(chorus));
+
+        // A fixed amp and effects chain (plan, section 15).
+        Category amp{{CLAP_VERSION_INIT, "org.oscairn.effects.amp-chain", "Oscairn FX Amp Chain", "Oscairn",
+                      "https://github.com/oscairn/sst-effects", "", "", "0.1.0",
+                      "Amp and effects chains, one mode per design", ampFeatures},
+                     {},
+                     1,
+                     {}};
+        amp.modes.push_back(mode<oscairn_fx::amp::AmpChain>(1, "Amp Chain A"));
+        amp.finish();
+        c.push_back(std::move(amp));
         return c;
     }();
     return all;

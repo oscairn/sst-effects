@@ -5593,3 +5593,188 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         CHECK((it != expected.end() && it->second == h));
     }
 }
+
+#include "effects/AmpChain.h"
+#include <complex>
+namespace
+{
+constexpr const char *ampId = "org.oscairn.effects.amp-chain";
+using Amp = oscairn_fx::amp::AmpChain<oscairn_fx::Config>;
+// Every stage off at output level 109.
+const std::vector<std::pair<const char *, double>> ampOff{{"Compressor Sustain", 0}, {"Distortion", 0}, {"Speaker", 0}, {"Delay", 0}, {"Output Level", 109}};
+// The amp chain's response to `in` on both channels, latency removed.
+ChorusOut ampRun(double rate, std::vector<std::pair<const char *, double>> set, const std::vector<float> &in)
+{
+    Plugin pl(ampId);
+    pl.set(1, 1);
+    for (auto &[n, v] : set)
+        pl.set(paramIdByName(pl.p, "Amp Chain A", n), v);
+    pl.activate(rate);
+    std::vector<float> inL(in);
+    inL.resize(in.size() + L);
+    std::vector<float> inR(inL);
+    ChorusOut o;
+    o.l = pl.render(inL, inR, o.r, {64}, {}, false);
+    o.l.erase(o.l.begin(), o.l.begin() + L);
+    o.r.erase(o.r.begin(), o.r.begin() + L);
+    return o;
+}
+std::vector<float> ampSine(double rate, double hz, double amp, double seconds)
+{
+    std::vector<float> x((size_t)(rate * seconds));
+    for (size_t n = 0; n < x.size(); ++n)
+        x[n] = (float)(amp * std::sin(2 * M_PI * hz * n / rate));
+    return x;
+}
+double ampRms(const std::vector<float> &x, size_t a, size_t b)
+{
+    double s = 0;
+    for (size_t n = a; n < b; ++n)
+        s += (double)x[n] * x[n];
+    return std::sqrt(s / (double)(b - a));
+}
+// The level of harmonic h of hz in x over [a, b), dBFS.
+double ampHarmonic(const std::vector<float> &x, double rate, double hz, int h, size_t a, size_t b)
+{
+    std::complex<double> s = 0;
+    for (size_t n = a; n < b; ++n)
+        s += (double)x[n] * std::polar(1.0, -2 * M_PI * hz * h * n / rate);
+    return 20 * std::log10(2 * std::abs(s) / (double)(b - a));
+}
+} // namespace
+
+TEST_CASE("Amp Chain: the settings' words at 44.1 kHz for the owner's settings, as measured")
+{
+    using namespace oscairn_fx::amp;
+    // Sustain 2.0, Clean 1 at drive 1.8, Pre-EQ A at tone 1.5, presence 5.0, Speaker A, Stereo
+    // Echo A at control 40 and time 48, output 109.
+    auto w = Amp::words({20, 1, 18, 0, 15, 50, 1, 1, 40, 48, 109}, 44100).w;
+    const std::vector<std::pair<int, int>> main{
+        {eqLowB, 790}, {eqLowA, 31189}, {eqHighK, 3206}, {eqLowG, 1872}, {eqHighG, 28527}, {eqDcK, 29}, {cmpSus, 8192},
+        {cmpFb, -32731}, {drive, 127}, {cmpRel, 4097}, {cmpLvl, 12820}, {dstFloor, -32768}, {cmpAtk, 32000}, {sat1Am1, -32083},
+        {sat1A, 685}, {sat1Out, -4224}, {prsAp1, 32721}, {prsAp2, 5959}, {cmpMix, -16384}, {prsMix, 9066}, {prsLp, 16696},
+        {dcFall, 93}, {dcRise, 140}, {sat2Am1, -30492}, {sat2A, 2276}, {sat2Out, -1152}, {dlyTime, -19459}, {spk1B1, 1886},
+        {spk1B0, 944}, {spk1A1, 7931}, {spk1A2, -3513}, {spk2B1, -24115}, {spk2B2, 11594}, {spk2B0, 13031}, {spk2A1, 14568},
+        {spk2A2, -6852}, {loopB, 8886}, {loopA, 14997}, {spkDamp, 20480}, {loopHp, 464}, {wetL, 4009}, {dryL, 15887},
+        {wetR, -4009}, {dryR, 15887}, {fb, 6873}, {outL, -8203}, {outR, -8203}, {spkLp, 12437}, {spkHpF, 279}, {dstOn, -32768}};
+    for (auto [k, v] : main)
+    {
+        INFO("word 0x" << std::hex << k);
+        CHECK(w[k] == v);
+    }
+    // Sustain 2.7, drive 1.3, tone 1.3, presence 5.2, the delay off, output 115
+    w = Amp::words({27, 1, 13, 0, 13, 52, 1, 0, 40, 48, 115}, 44100).w;
+    for (auto [k, v] : std::vector<std::pair<int, int>>{{eqLowB, 735}, {eqLowA, 31298}, {eqHighK, 3437}, {eqLowG, 1678}, {eqHighG, 29058},
+                                                         {eqDcK, 28}, {cmpSus, 5325}, {drive, 90}, {cmpLvl, 12404}, {prsAp1, 32722},
+                                                         {prsAp2, 6390}, {prsMix, 9232}, {prsLp, 17525}, {dlyTime, -32767}, {wetL, 0},
+                                                         {dryL, 16384}, {fb, 0}, {outL, -983}})
+    {
+        INFO("word 0x" << std::hex << k);
+        CHECK(w[k] == v);
+    }
+    // The ends of the ranges
+    const auto lo = Amp::words({1, 1, 0, 0, 15, 50, 1, 1, 0, 0, 0}, 44100).w, hi = Amp::words({100, 1, 100, 0, 15, 50, 1, 1, 127, 127, 127}, 44100).w;
+    CHECK(lo[cmpSus] == 31129);
+    CHECK(hi[cmpSus] == 32);
+    CHECK(lo[drive] == 32);
+    CHECK(hi[drive] == 16384);
+    CHECK(lo[dlyTime] == -29460);
+    CHECK(lo[fb] == 13202);
+    CHECK(hi[dlyTime] == -3000);
+    CHECK(hi[fb] == 2347);
+    CHECK(hi[wetL] == 11585);
+    CHECK(hi[dryL] == 11585);
+    CHECK(hi[outL] == 19248);
+    CHECK(lo[outL] == -32768);
+    // Every stage off
+    const auto off = Amp::words({0, 0, 18, 0, 15, 50, 0, 0, 40, 48, 109}, 44100).w;
+    for (auto [k, v] : std::vector<std::pair<int, int>>{{cmpSus, 32767}, {cmpFb, -16384}, {cmpRel, 16384}, {cmpAtk, 16384}, {cmpLvl, 16384}, {cmpMix, 0},
+                                                         {dstOn, 0}, {spk1B1, 8192}, {spk2B0, 8192}, {spkDamp, 23406}, {spkLp, 32767}, {spkHpF, 9}})
+    {
+        INFO("word 0x" << std::hex << k);
+        CHECK(off[k] == v);
+    }
+}
+
+TEST_CASE("Amp Chain: the compressor's curve 1 / (1 + 999 k / 1024) and the multipliers' 4-bit exponent and 11-bit mantissa")
+{
+    using namespace oscairn_fx::amp;
+    for (auto [k, v] : std::vector<std::pair<int, int>>{{0, 32767}, {1, 30745}, {4, 27918}, {256, 16427}, {512, 14383}, {1024, 12337}})
+        CHECK(curveTable.v[k] == v / 32768.0);
+    CHECK(expGain(32000) == 0.8125);
+    CHECK(expGain(4097) == 16392.0 / 32768 / 8192);
+    CHECK(expGain(-1) == 0);
+    CHECK(expWord(0.8126) == 32000);
+    CHECK(expWord(6.107e-5) == 4097);
+}
+
+TEST_CASE("Amp Chain: with every stage off, (1 + the output word) x 32767/32768 times the channels' mean, two samples late, at 44.1, 48 and 96 kHz")
+{
+    for (double rate : {44100.0, 48000.0, 96000.0})
+    {
+        const auto x = ampSine(rate, 440, 0.25, 0.2);
+        const auto o = ampRun(rate, ampOff, x);
+        // the mean of the two (equal) channels is x
+        const double g = 0.5 * (1 - 8203 / 32768.0) * (32767 / 32768.0);
+        double worst = 0;
+        for (size_t n = 2000; n < x.size(); ++n)
+            worst = std::max({worst, std::abs(o.l[n] - g * x[n - 2]), std::abs(o.r[n] - g * x[n - 2])});
+        INFO(rate << " Hz: worst " << worst);
+        CHECK(worst < 2e-7);
+    }
+}
+
+TEST_CASE("Amp Chain: the compressor below its threshold: 1024 x 2 x 2^-10 / the sustain word x the makeup word")
+{
+    // Sustain 2.0 (word 8192): the level ramps to 2^-8 and the makeup word is 12820, so the signal
+    // is 3.1298 times its level with the compressor off; the detector's threshold is not reached.
+    // (small enough that the saturation's curvature stays under 0.002 dB)
+    const auto x = ampSine(44100, 440, 0.001, 0.3);
+    auto on = ampOff;
+    on[0].second = 2.0;
+    const auto a = ampRun(44100, ampOff, x), b = ampRun(44100, on, x);
+    const double ratio = ampRms(b.l, 4410, x.size()) / ampRms(a.l, 4410, x.size());
+    const double expect = 1024 * 2 * (0x1p-10 / 0.25) * (12820 / 32768.0);
+    INFO(20 * std::log10(ratio / expect) << " dB");
+    CHECK(std::abs(20 * std::log10(ratio / expect)) < 0.01);
+}
+
+TEST_CASE("Amp Chain: Stereo Echo A: one line at 75 + 600 x time/127 ms, the right wet inverted, at 44.1, 48 and 96 kHz")
+{
+    for (double rate : {44100.0, 48000.0, 96000.0})
+    {
+        auto set = ampOff;
+        set[3].second = 1;
+        set.push_back({"Delay Time", 48});
+        set.push_back({"Delay Control", 127});
+        std::vector<float> x((size_t)(rate * 0.8));
+        x[0] = 0.25f;
+        const auto o = ampRun(rate, set, x);
+        const int d = (int)(rate * (0.075 + 0.6 * 48 / 127.0) + 0.5) + 2;
+        size_t peak = 100;
+        for (size_t n = 100; n < x.size(); ++n)
+            if (std::abs(o.l[n]) > std::abs(o.l[peak]))
+                peak = n;
+        INFO(rate << " Hz: echo at " << peak << ", the line at " << d);
+        CHECK(std::abs((int)peak - d) <= 2);
+        CHECK(o.l[peak] > 0);
+        CHECK(o.r[peak] == Approx(-o.l[peak]).margin(1e-6));
+    }
+}
+
+TEST_CASE("Amp Chain: Clean 1's harmonics on a 440 Hz sine, as measured from the reference")
+{
+    // Drive 1.8, tone 1.5, presence 5.0, every other stage off, a sine of -6.07 dBFS (the
+    // reference's take at velocity 127): H1-H5 at -22.15, -66.22, -62.39, -83.31, -82.23 dBFS.
+    auto set = ampOff;
+    set[1].second = 1;
+    const auto x = ampSine(44100, 440, std::pow(10.0, -6.07 / 20), 1.5);
+    const auto o = ampRun(44100, set, x);
+    const double ref[5] = {-22.15, -66.22, -62.39, -83.31, -82.23};
+    for (int h = 1; h <= 5; ++h)
+    {
+        const double db = ampHarmonic(o.l, 44100, 440, h, 22050, 66150);
+        INFO("H" << h << ": " << db << " dBFS");
+        CHECK(std::abs(db - ref[h - 1]) < 0.3);
+    }
+}
