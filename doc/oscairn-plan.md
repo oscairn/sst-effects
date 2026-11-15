@@ -302,7 +302,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | BRITISH COMBO | 07 46 | Var,InsA/B,A/D |  | 31 | 1 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
 | BRITISH LEGEND | 07 47 | Var,InsA/B,A/D |  | 1 | 0 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
 | VCM COMPRESSOR 376 | 08 00 | Var,InsA/B,A/D,Mas | yes | 1560 | 924 | Dynamics | written | own circuit-style feedback compressor (fast attack, programme-dependent release) |
-| CLASSIC COMPRESSOR | 08 10 | Var,InsA/B,A/D | yes | 421 | 277 | Dynamics | base | sst voice Compressor (side-chain input) + mapping |
+| CLASSIC COMPRESSOR | 08 10 | Var,InsA/B,A/D | yes | 421 | 277 | Dynamics | written | own peak compressor, plugin Oscairn FX Dynamics, mode "Compressor A" (built without the side-chain input; section 15) |
 | MULTI BAND COMP | 08 20 | Var,InsA/B,A/D,Mas | yes | 427 | 145 | Dynamics | base | sst-filters Linkwitz-Riley crossovers + three sst Compressors |
 | UNI COMP DOWN | 08 30 | Var,InsA/B,A/D,Mas | yes | 41 | 6 | Dynamics | base | sst Compressor + EQ + post HPF + mapping |
 | UNI COMP UP | 08 38 | Var,InsA/B,A/D,Mas | yes | 7 | 0 | Dynamics | written | own upward compressor (shares the detector) |
@@ -2846,6 +2846,74 @@ arithmetic stays in double precision: on the device's scalar unit single precisi
 instructions, and the 20/30 Hz DC tracker, the 60 and 100 Hz high-passes and the slow envelope
 would lose accuracy in it.
 
+### Compressor A (built 2026-11-16)
+
+Mode "Compressor A" (id 2) of Oscairn FX Dynamics (`org.oscairn.effects.dynamics`),
+`effects/CompressorA.h`, for the reference's type 08 10. It shares nothing with the Circuit
+Compressor (mode 1): a feed-forward peak design. Measurements: `fx-types-2026-11-15/0810-classic-comp/`
+(its `INDEX.md`; 78 takes: the seven stored settings, defaults, sweeps, steps).
+
+Structure (every coefficient a 16-bit word, every stage clipped to [-1, 1 - 2^-24], doubles
+throughout, floats in and out):
+
+- input: x at the insertion's level (0.4020535, fitted within 3e-7; register 73), raised again at the
+  output; clipped;
+- per channel a first-order high-pass in biquad form (words b0 = -b1 = 16361, a1 = 16337, run at
+  twice their value: about 20 Hz), clipped;
+- detector: r = min(|16 (w L + w R)|, 1 - 2^-24), w = 2896 / 32768 (the two channels summed);
+  e1 = max(r, d e1); e2 = max(r, (1 - d) e1 + d e2), d the release word;
+- gain computer: v = T e2 (T the threshold word), s = v - v^2 / 2, a 513-point table read at 1023 s
+  with linear interpolation; entry i is (l / 10^(-54 / 20))^(1 / R - 1) with l = 1 - sqrt(1 - i / 512)
+  (the level whose bend is i / 1024), R the ratio, held at or below 32767 and rounded down to
+  1/32768; entry 512 is zero;
+- gain smoother: g = k u + k u' + b g' (u' and g' the previous sample's), the attack's words;
+- output: clip(4 o clip(4 g' x_hp)) per channel with the previous sample's gain, o the output word.
+
+| Law | Value |
+| --- | --- |
+| Attack words (t ms) | w = 1 / (2 x 44100 x t / 1000); k = round(32768 w / (1 + w)), b = floor(32768 (1 - w) / (1 + w)) |
+| Release word (t ms) | d = round(32768 exp(-K / (44.1 t))), K = 2.1417 (every K from 2.1386 to 2.1447 gives the same words; register 74) |
+| Threshold word (T dB) | floor(32768 x 10^((-54 - T) / 20)) |
+| Output word (raw v) | floor(8192 (v / 127)^2) / 32768, so 4 o is (v / 127)^2: the output gain below threshold is 4 x 0.989 (attack 8 ms) x (v / 127)^2 |
+| Gain table | as above, rebuilt only when the ratio changes |
+| Glides | the output and threshold words 2^-9 of the gap per 44.1 kHz sample, a block at a time; the attack and release words step (register 75) |
+
+All 200 settings of a sweep (attack 0-19, release 0-15, threshold 79-121, output, the stored
+settings) give exactly the words these laws give. Null takes (`null810.py`, the AWM2 saw and the
+stepped sine, residual against the take over 0.05-2.5 s): every take -127 to -143 dB (-150 to
+-171 dBFS), the seven stored settings -131.5 to -142.9 dB, level within 0.0001 dB; the attack sweep
+(1, 6, 12, 23, 40 ms), release sweep (10, 55, 115, 680 ms), ratios 1-20, thresholds -48, -27, -6,
+outputs 64 and 127, and a source panned left of centre all within that range. Output 0 and 1 are
+silent in both. The side-chain level (raw 11) changes nothing without a side-chain source (register
+76). The velocity sweep did not change the AWM2 source's level, so the static curve is shown by the
+threshold and ratio sweeps; the two velocity-20 takes are not analysed (the dry take's onset does
+not align).
+
+**Mapping law for the converter** (type 08 10 on an insertion; the variation bus not measured,
+register 77):
+
+| Raw parameter | Plugin parameter: law |
+| --- | --- |
+| 1 Attack (0-19) | Attack: the printed time in ms (Data List table 8: 1-10, 12, 14, 16, 18, 20, 23, 26, 30, 35, 40) |
+| 2 Release (0-15) | Release: the printed time in ms (table 9: 10, 15, 25 … 85, 100, 115, 140, 170, 230, 340, 680) |
+| 3 Threshold (79-121) | Threshold: v - 127 dB |
+| 4 Ratio (0-7) | Ratio: table 10 (1.0, 1.5, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0) |
+| 5 Output Level (0-127) | Output Level: 40 log10(v / 127) dB; v = 0 → -90 (off) |
+| 11 Side Chain Input Level | not mapped (no side-chain input yet) |
+
+Plugin tests, each checked to fail with its law broken: "Compressor A: the reference program's gains
+at 44.1 kHz" (six cases, six windows each, within 0.01 dB; fails without the insertion level (onset
+6.49 dB for 6.81), with the detector reading the left channel twice (left-only case 6.81 for 7.01),
+without the second release follower (3.22 for 3.20) and without the bend before the table (3.19
+for 3.20)); "Compressor A keeps its 44.1 kHz gains at 48 and 96 kHz" (5 ms windows within 0.1 dB,
+worst 0.011 dB at 96 kHz); "Compressor A: fed silence, the output is exact silence and the plugin
+sleeps"; the bundle bit-hash test takes the mode. Other rates: the high-pass's pole, the followers'
+decay and the smoother's pole are raised to 44100 / rate (same time constants), the words' DC
+gains kept. Cost (`scripts/cost-a53.sh`, noise in, the most used stored setting): 22,870
+instructions per block at 44.1, 48 and 96 kHz (ratio 1, nothing compressing: the same), fed
+silence 7,960 (the detector and gain run on until they rest); the Circuit Compressor 94,165 for
+comparison. Memory per context 2,996 bytes at every rate (the gain table, 514 floats), no buffers.
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -2927,6 +2995,11 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 70 | Amp chain: glides | The rates (2^-9, 7/32, and the delay time's exponent-scaled glide) read from the steady state, not probed by a parameter change; the words move a block (16 samples) at a time, holding within it; every glide starts at its target when the plugin starts | Not measured; the block steps for cost | Assumed | — | `AmpChain::glide` |
 | 71 | Amp chain at rates other than 44.1 kHz | Filters designed at the running rate (bilinear with prewarping, one-poles 1 - exp(-2 pi f / fs)), the delay held in seconds, the envelope's times and the glides' time constants kept; the compressor's level ramp and the saturators' memory run per sample, so their time constants shrink with the rate; the compressor's curve and the multiplier formats as at 44.1 kHz | The recorder runs at 44.1 kHz | Assumed | — | `AmpChain` |
 | 72 | Amp chain on the variation bus | Not verified: the input word and the output's scale table index come from bus-level fields | Not measured (the owner's one variation use has options not built) | Unverified | — | converter |
+| 73 | Compressor A: the insertion's level | 0.4020535 (fitted within 3e-7 by the residual minimum on compressing takes; the takes then null at -127 to -143 dB); the amp chain's 0.40201 and the Circuit Compressor's 7.91 dB are the same level fitted more coarsely | No formula found | Fitted | `0810` `out127_awm`, `thr79_awm` | `CompressorA::insertionLevel` |
+| 74 | Compressor A: the release word's exponent | K = 2.1417; any K in [2.1386, 2.1447] gives the same 16 words at 44.1 kHz | The words do not determine K further | Exact for the words | `0810` release sweep | `CompressorA::releaseK` |
+| 75 | Compressor A: glides | The output and threshold words glide a block (16 samples) at a time at 2^-9 per 44.1 kHz sample; the attack and release words step at once (the reference moves them per sample, the attack's at 7/32) | Cost | Deliberate | — | `CompressorA::processBlock` |
+| 76 | Compressor A has no side-chain input | The type takes a side-chain source on the platform; without one its side-chain level changes nothing (takes `sc0`, `sc127` null as the others) | Not built in this version; a side-chain source uses another program | Deliberate for now | `0810` `sc*_awm` | `OscairnEffects.cpp` (ports) |
+| 77 | Compressor A on the variation bus | Not measured: the type is allowed there but no stored setting uses it | Not measured | Open | — | — |
 
 ## 17. Oscairn porting checklist (decision 22)
 
