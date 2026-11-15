@@ -5647,7 +5647,7 @@ double ampHarmonic(const std::vector<float> &x, double rate, double hz, int h, s
 }
 } // namespace
 
-TEST_CASE("Amp Chain: the settings' words at 44.1 kHz for the owner's settings, as measured")
+TEST_CASE("Amp Chain: the settings' words at 44.1 kHz for three stored settings, as measured")
 {
     using namespace oscairn_fx::amp;
     // Sustain 2.0, Clean 1 at drive 1.8, Pre-EQ A at tone 1.5, presence 5.0, Speaker A, Stereo
