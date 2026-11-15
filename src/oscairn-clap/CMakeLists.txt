@@ -3,7 +3,7 @@
 # The version here is the Oscairn PACKAGE version (the tag oscairn-vX.Y.Z and
 # src/oscairn-clap/release/release.conf's release manifest must agree with it); the
 # plugins' own versions live in their descriptors in OscairnEffects.cpp.
-project(oscairn-effects VERSION 0.3.4 LANGUAGES CXX)
+project(oscairn-effects VERSION 0.3.5 LANGUAGES CXX)
 
 add_library(oscairn-effects-core STATIC OscairnEffects.cpp)
 target_include_directories(oscairn-effects-core PUBLIC
