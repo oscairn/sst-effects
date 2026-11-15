@@ -5424,7 +5424,8 @@ namespace
 std::map<std::string, uint64_t> bundleHashes()
 {
     std::map<std::string, uint64_t> out;
-    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", chorusId})
+    for (const char *id : {reverbId, eqId, "org.oscairn.effects.delay", "org.oscairn.effects.dynamics", "org.oscairn.effects.tremolo-rotary", chorusId,
+                           "org.oscairn.effects.amp-chain"})
     {
         Plugin probe(id);
         auto *params = ext<clap_plugin_params_t>(probe.p, CLAP_EXT_PARAMS);
@@ -5553,6 +5554,9 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.reverb 2 48000", 0x415bff4c4fc6500d},
         {"org.oscairn.effects.reverb 2 96000", 0x196057368889aef7},
         {"org.oscairn.effects.tremolo-rotary 2 96000", 0x606b1f945a7e2333},
+        {"org.oscairn.effects.amp-chain 1 44100", 0xcc7ce483afcad1fa},
+        {"org.oscairn.effects.amp-chain 1 48000", 0xb171c5f607e3d764},
+        {"org.oscairn.effects.amp-chain 1 96000", 0x5ac33f693c3ff22d},
     });
 #elif defined(__aarch64__) && defined(__linux__)
     expected.insert({
