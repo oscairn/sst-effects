@@ -40,8 +40,9 @@
 
 namespace oscairn_fx::amp
 {
-using chorus::clip;
 using chorus::top;
+// [-1, 1) as two min/max instructions.
+inline double clip(double x) { return std::fmin(std::fmax(x, -1.0), top); }
 
 // The platform's coefficient rounding: half away from zero in single precision, then held to a
 // 16-bit word.
@@ -95,9 +96,9 @@ inline int fixWord(double x) { return (int)std::clamp(std::trunc(x * 32768), -21
 inline double soft(double u)
 {
     u = clip(u);
-    return clip(2 * (u + (u < 0 ? 0.5 : -0.5) * u * u));
+    return clip(2 * (u - 0.5 * u * std::abs(u)));
 }
-inline double clipUp(double x) { return x > top ? top : (x < 0 ? 0 : x); }
+inline double clipUp(double x) { return std::fmin(std::fmax(x, 0.0), top); }
 
 // The compressor's gain curve, 1 / (1 + 999 k / 1024), held in the multiplier format, k = 0-1024.
 struct CurveTable
@@ -200,6 +201,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         settled = false;
         first = true;
         quiet = false;
+        delayOn = false;
         update();
     }
     void suspendProcessing() { initialize(); }
@@ -210,11 +212,12 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     {
         update();
         bool silent = true;
-        for (int i = 0; i < FXConfig::blockSize; ++i)
+        for (int i = 0; i < N; ++i)
             silent = silent && L[i] == 0.f && R[i] == 0.f;
-        if (settled)
-            prepare();
-        if (silent && settled && quiet)
+        if (!settled)
+            glide(N); // the words move a block at a time
+        prepare();
+        if (silent && quiet)
         {
             // Every state that reaches the output and the line at zero: the block is silence
             // out. The saturators' gains and the detector move on as silence moves them.
@@ -230,15 +233,12 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
             }
             return;
         }
-        for (int i = 0; i < FXConfig::blockSize; ++i)
-        {
-            if (!settled)
-            {
-                glide();
-                prepare();
-            }
-            sample(L[i], R[i]);
-        }
+        // Stage by stage over the block: the distortion takes the phaser's output one sample
+        // late and the delay the distortion's, so each stage can run the whole block in turn.
+        double a[N], b[N];
+        front(L, R, a);
+        distort(a, b);
+        echo(b, L, R);
         quiet = silent && s.zero() && lineSound == 0;
     }
 
@@ -300,7 +300,8 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     double cur[numWords]{}, tgt[numWords]{};
     double rateCommon{0}, rateSpeaker{0}, rateTime{0};
     double delaySeconds{0};
-    bool settled{false}, first{true}, quiet{false};
+    bool settled{false}, first{true}, quiet{false}, delayOn{false};
+    static constexpr int N = FXConfig::blockSize;
     float last[numParamsEnum]{};
 
     void update()
@@ -335,31 +336,32 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         delaySeconds = p.delay ? 0.075 + 0.6 * (p.time / 127.0) : 0.0;
     }
 
-    void glide()
+    // n samples of every word's glide; the words then hold for the block.
+    void glide(int n)
     {
         bool done = true;
         for (int k = 0; k < numWords; ++k)
         {
-            if (k == dlyTime)
+            if (cur[k] == tgt[k])
                 continue;
-            const double d = tgt[k] - cur[k];
-            if (d >= -1e-8 && d <= 1e-8)
-                cur[k] = tgt[k];
-            else
+            for (int i = 0; i < n; ++i)
             {
-                cur[k] += d * (speakerRate(k) ? rateSpeaker : rateCommon);
-                done = false;
+                const double d = tgt[k] - cur[k];
+                if (d >= -1e-8 && d <= 1e-8)
+                {
+                    cur[k] = tgt[k];
+                    break;
+                }
+                if (k == dlyTime)
+                {
+                    int e;
+                    std::frexp(d, &e);
+                    cur[k] += std::min(0.25, rateTime * std::ldexp(1.0, 2 - e)) * d;
+                }
+                else
+                    cur[k] += d * (speakerRate(k) ? rateSpeaker : rateCommon);
             }
-        }
-        const double d = tgt[dlyTime] - cur[dlyTime];
-        if (d >= -1e-8 && d <= 1e-8)
-            cur[dlyTime] = tgt[dlyTime];
-        else
-        {
-            int e;
-            std::frexp(d, &e);
-            cur[dlyTime] += std::min(0.25, rateTime * std::ldexp(1.0, 2 - e)) * d;
-            done = false;
+            done = done && cur[k] == tgt[k];
         }
         settled = done;
     }
@@ -397,88 +399,123 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         return soft(256 * (make * clip((x + x) * expGain(fixWord(curve)))));
     }
 
-    void sample(float &L, float &R)
+    // Input, compressor, wah and phaser over the block into a.
+    void front(const float *L, const float *R, double *a)
     {
         const double *c = cur;
-        const double Kc = -0.5;
-        const double x = clip(16 * (512 / 32768.0) * (insertionLevel * ((double)L + (double)R)));
-        ptr = (ptr - 1) & ((int)line.size() - 1);
+        const double k = 16 * (512 / 32768.0) * insertionLevel, mix = c[cmpMix], w = c[wahDry] * 0.5 * 4, ph = c[phsIn];
+        if (mix == 0)
+            for (int i = 0; i < N; ++i)
+                a[i] = ph * clip(w * clip(0.5 * clip(k * ((double)L[i] + (double)R[i])) * 0.25));
+        else
+            for (int i = 0; i < N; ++i)
+            {
+                const double x = clip(k * ((double)L[i] + (double)R[i]));
+                a[i] = ph * clip(w * clip((0.5 * x + mix * (x - detect(x))) * 0.25));
+            }
+    }
 
-        // Distortion and speaker, on the phaser's output of the sample before.
-        const double X = s.phsOut;
-        double z = 0, t12 = 0, t94 = 0;
-        const bool dist = c[dstOn] != 0;
-        if (dist)
+    // Distortion and speaker over the block, on the phaser's output one sample late, into b.
+    void distort(const double *a, double *b)
+    {
+        const double *c = cur;
+        if (c[dstOn] == 0)
         {
+            // off: the input passes; the stage's states rest
+            b[0] = s.phsOut;
+            for (int i = 1; i < N; ++i)
+                b[i] = a[i - 1];
+            s.x1 = a[N - 2];
+            s.phsOut = a[N - 1];
+            return;
+        }
+        State t = s;
+        const double on = c[dstOn], fall = c[dcFall], rise = c[dcRise];
+        for (int i = 0; i < N; ++i)
+        {
+            const double X = i ? a[i - 1] : t.phsOut;
             // pre-EQ
-            const double lo = c[eqLowB] * (s.x1 + X) + c[eqLowA] * s.eqLp;
-            const double hs = s.eqHp + c[eqHighK] * (X - s.eqHp);
-            const double hp = X + Kc * (s.eqHp + hs);
-            t12 = c[eqLowG] * lo - s.eqDc + c[eqDirG] * X + c[eqHighG] * hp;
-            s.eqLp = lo, s.eqHp = hs;
+            const double lo = c[eqLowB] * (t.x1 + X) + c[eqLowA] * t.eqLp;
+            const double hs = t.eqHp + c[eqHighK] * (X - t.eqHp);
+            const double t12 = c[eqLowG] * lo - t.eqDc + c[eqDirG] * X + c[eqHighG] * (X - 0.5 * (t.eqHp + hs));
+            t.eqLp = lo, t.eqHp = hs, t.x1 = X;
+            t.eqDc += c[eqDcK] * t12;
             // drive, the first saturator with memory, the second saturation
-            const double v = soft(4 * ((t12 + t12) * c[drive]));
-            s.gain1 = c[sat1A] + std::abs(s.gain1 * (c[sat1Am1] + std::abs(c[sat1Am1] * v)));
-            const double u = clip(256 * (c[sat1Out] * std::max(v * s.gain1, c[dstFloor])));
-            const double y = clip((u + (u < 0 ? 0.5 : -0.5) * u * u) * 0.5);
+            const double v = soft(8 * (t12 * c[drive]));
+            t.gain1 = c[sat1A] + std::abs(t.gain1 * (c[sat1Am1] + std::abs(c[sat1Am1] * v)));
+            const double u = clip(256 * (c[sat1Out] * std::max(v * t.gain1, c[dstFloor])));
+            const double y = clip((u - 0.5 * u * std::abs(u)) * 0.5);
             // presence: two all-passes mixed with the direct signal, then a low-pass
-            const double a1 = s.ap1x + c[prsAp1] * (s.ap1 - y);
-            const double a2 = s.ap1 + c[prsAp2] * (s.ap2 - a1);
-            s.ap1x = y, s.ap1 = a1, s.ap2 = a2;
-            s.prsOut += c[prsLp] * (clip(2 * (y + c[prsMix] * (a2 - y))) - s.prsOut);
+            const double a1 = t.ap1x + c[prsAp1] * (t.ap1 - y);
+            const double a2 = t.ap1 + c[prsAp2] * (t.ap2 - a1);
+            t.ap1x = y, t.ap1 = a1, t.ap2 = a2;
+            t.prsOut += c[prsLp] * (clip(2 * (y + c[prsMix] * (a2 - y))) - t.prsOut);
             // the DC tracker and the second saturator with memory
-            t94 = s.prsOut - s.dc;
-            s.gain2 = c[sat2A] + std::abs(s.gain2 * (c[sat2Am1] + std::abs(c[sat2Am1] * t94)));
-            const double x2 = soft(256 * (c[sat2Out] * (t94 * s.gain2)));
-            // speaker: two biquads
-            const double y1 = clip(4 * ((s.s1x1 * c[spk1B1] + c[spk1B0] * (s.s1x2 + x2)) * 0.0625 + c[spk1A1] * s.s1y1 + c[spk1A2] * s.s1y2));
-            z = clip(4 * (s.s1y1 * c[spk2B1] + c[spk2B2] * s.s1y2 + c[spk2B0] * y1 + c[spk2A1] * s.s2y1 + c[spk2A2] * s.s2y2));
-            s.s1x2 = s.s1x1, s.s1x1 = x2, s.s1y2 = s.s1y1, s.s1y1 = y1, s.s2y2 = s.s2y1, s.s2y1 = z;
+            const double t94 = t.prsOut - t.dc;
+            t.dc += (t94 < 0 ? fall : rise) * t94;
+            t.gain2 = c[sat2A] + std::abs(t.gain2 * (c[sat2Am1] + std::abs(c[sat2Am1] * t94)));
+            const double x2 = soft(256 * (c[sat2Out] * (t94 * t.gain2)));
+            // speaker: two biquads, a resonant high-pass and a low-pass
+            const double y1 = clip(4 * ((t.s1x1 * c[spk1B1] + c[spk1B0] * (t.s1x2 + x2)) * 0.0625 + c[spk1A1] * t.s1y1 + c[spk1A2] * t.s1y2));
+            const double z = clip(4 * (t.s1y1 * c[spk2B1] + c[spk2B2] * t.s1y2 + c[spk2B0] * y1 + c[spk2A1] * t.s2y1 + c[spk2A2] * t.s2y2));
+            t.s1x2 = t.s1x1, t.s1x1 = x2, t.s1y2 = t.s1y1, t.s1y1 = y1, t.s2y2 = t.s2y1, t.s2y1 = z;
+            const double hp = z - (t.lp + 2 * c[spkDamp] * t.bp);
+            t.bp += c[spkHpF] * hp;
+            t.lp += c[spkHpF] * t.bp;
+            t.spkOut += c[spkLp] * (hp - t.spkOut);
+            b[i] = X + on * (X - t.spkOut);
         }
-        s.x1 = X;
+        t.phsOut = a[N - 1];
+        s = t;
+    }
 
-        // Compressor
-        double cmp = 0.5 * x;
-        if (c[cmpMix] != 0)
-            cmp += c[cmpMix] * (x - detect(x));
-        const double cmpOut = clip(cmp * 0.25);
-        // Wah (off: the dry word at a half passes the signal) and the phaser (off: its input word)
-        const double wah = clip(4 * (c[wahDry] * cmpOut * 0.5));
-        s.phsOut = c[phsIn] * wah;
-
-        // Speaker's resonant high-pass and low-pass; the distortion's output
-        double dst = X;
-        if (dist)
+    // Delay and outputs over the block, on the distortion's output one sample late.
+    void echo(const double *b, float *L, float *R)
+    {
+        const double *c = cur;
+        const bool on = c[wetL] != 0 || c[wetR] != 0 || c[fb] != 0;
+        if (on != delayOn)
         {
-            const double hp = z - (0.5 * s.lp + c[spkDamp] * s.bp) * 2;
-            s.bp += c[spkHpF] * hp;
-            s.lp += c[spkHpF] * s.bp;
-            s.spkOut += c[spkLp] * (hp - s.spkOut);
-            dst = X + c[dstOn] * (X - s.spkOut);
-            s.eqDc += c[eqDcK] * t12;
-            s.dc += (t94 < 0 ? c[dcFall] : c[dcRise]) * t94;
+            // switched on or off: the line and its filters start from silence (they rest while off)
+            delayOn = on;
+            std::fill(line.begin(), line.end(), 0.f);
+            lineSound = 0;
+            s.tap1 = s.loopLp = s.loopHp = 0;
         }
-
-        // Delay, on the distortion's output of the sample before
-        const double din = s.dstOut;
-        s.dstOut = dst;
-        double wet = 0;
+        double din[N], wet[N];
+        din[0] = s.dstOut;
+        for (int i = 1; i < N; ++i)
+            din[i] = b[i - 1];
+        s.dstOut = b[N - 1];
+        if (on)
         {
             const int mask = (int)line.size() - 1;
-            const double a = line[(ptr + 32768 + dInt) & mask], b = line[(ptr + 32769 + dInt) & mask];
-            const double tap = a + dFrac * (b - a);
-            wet = c[loopB] * (s.tap1 + tap) + c[loopA] * s.loopLp;
-            s.tap1 = tap, s.loopLp = wet;
-            const double hs = s.loopHp + c[loopHp] * (wet - s.loopHp);
-            const double back = clip((wet - 0.5 * (s.loopHp + hs)) * 0.5);
-            s.loopHp = hs;
-            const float in = (float)soft(2 * (din + c[fb] * back));
-            lineSound += (in != 0.f) - (line[ptr] != 0.f);
-            line[ptr] = in;
+            double tap1 = s.tap1, lp = s.loopLp, hpS = s.loopHp;
+            for (int i = 0; i < N; ++i)
+            {
+                ptr = (ptr - 1) & mask;
+                const double p = line[(ptr + 32768 + dInt) & mask], q = line[(ptr + 32769 + dInt) & mask];
+                const double tap = p + dFrac * (q - p);
+                const double w = c[loopB] * (tap1 + tap) + c[loopA] * lp;
+                tap1 = tap, lp = w;
+                const double hs = hpS + c[loopHp] * (w - hpS);
+                const double back = clip((w - 0.5 * (hpS + hs)) * 0.5);
+                hpS = hs;
+                const float in = (float)soft(2 * (din[i] + c[fb] * back));
+                lineSound += (in != 0.f) - (line[ptr] != 0.f);
+                line[ptr] = in;
+                wet[i] = 0.25 * w;
+            }
+            s.tap1 = tap1, s.loopLp = lp, s.loopHp = hpS;
         }
-        const double oL = 0.25 * (c[wetL] * wet) + c[dryL] * din, oR = 0.25 * (c[wetR] * wet) + c[dryR] * din;
-        L = (float)std::clamp(clip(16 * (oL + oL * c[outL])) / insertionLevel, -1.0, 1.0);
-        R = (float)std::clamp(clip(16 * (oR + oR * c[outR])) / insertionLevel, -1.0, 1.0);
+        else
+            std::fill(wet, wet + N, 0.0);
+        const double gL = 16 * (1 + c[outL]), gR = 16 * (1 + c[outR]), up = 1 / insertionLevel;
+        for (int i = 0; i < N; ++i)
+        {
+            L[i] = (float)std::fmax(std::fmin(clip(gL * (c[wetL] * wet[i] + c[dryL] * din[i])) * up, 1.0), -1.0);
+            R[i] = (float)std::fmax(std::fmin(clip(gR * (c[wetR] * wet[i] + c[dryR] * din[i])) * up, 1.0), -1.0);
+        }
     }
 };
 

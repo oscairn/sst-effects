@@ -2827,10 +2827,14 @@ line of floats, a power of two of at least 0.675 s). Cost (`scripts/cost-a53.sh`
 main setting): 88,900 instructions per block at 44.1, 48 and 96 kHz, 85,300 after hoisting the
 per-block constants (same bits); every stage off 38,500, then 37,900; fed silence 89,300, then 13,500
 (the silence shortcut now engages as soon as every state that reaches the output and the line are
-exactly zero). The 60,000 target is not reached with the same bits: the wrapper takes about 9,000
-per block and the exact double-precision chain about 600 instructions per sample with every stage
-the owner uses on; the delay's loop filters run while it is off (their state reaches the output
-after it is switched on).
+exactly zero). Then the chain runs stage by stage over each block (the two one-sample hand-offs
+between stages make that exact in structure), with branches hoisted, clips as min/max, the words
+gliding a block at a time and the delay at rest while off: 50,200 instructions per block at 44.1,
+48 and 96 kHz, every stage off 11,900, fed silence 14,300; the output bits moved (the bit-hash test
+re-taken) while the null takes, levels and harmonics above are unchanged to the figures given. All
+arithmetic stays in double precision: on the device's scalar unit single precision saves no
+instructions, and the 20/30 Hz DC tracker, the 60 and 100 Hz high-passes and the slow envelope
+would lose accuracy in it.
 
 ## 16. Known differences from the reference
 
@@ -2909,8 +2913,8 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 66 | Amp chain: the insertion's level | The chain runs 7.915 dB below the rendered level (0.40201) and raises its output again; the circuit compressor's fit found 7.91 dB | Fitted to the compressor's limiting (residual minimum between 0.4020 and 0.4021); the reference's cause not known | Fitted | fx-types-2026-11-15 `0744` `comp100_awm`; `null744.py` | `AmpChain` (`insertionLevel`) |
 | 67 | Amp chain: Speaker A's second biquad | Its zeros (1430.945 Hz, Q 1.734767, gain 1.645954) and poles (1770.302 Hz, Q 1.400885) fitted so the words come out exact at 44.1 kHz; at other rates the same prototype through the bilinear transform | The section's design not derived | Fitted (exact words at 44.1 kHz) | `0744` `spk2_awm`, `own0_awm` | `AmpChain::words` |
 | 68 | Amp chain: the envelope's normalisation | 0.998 + 0.001 (log2(release / attack) - 13), valid for this effect's two times only | A law with no formula between measured points; the effect uses one segment | Exact for this effect | `0744` compressor takes | `AmpChain::words` |
-| 69 | Amp chain: stages at rest while off | The compressor's detector and the distortion's and speaker's states hold while those stages are off and resume from there; the reference runs them throughout, so the first moments after switching one on differ | Cost | Deliberate | — | `AmpChain::sample` |
-| 70 | Amp chain: glides | The rates (2^-9, 7/32, and the delay time's exponent-scaled glide) read from the steady state, not probed by a parameter change; every glide starts at its target when the plugin starts | Not measured | Assumed | — | `AmpChain::glide` |
+| 69 | Amp chain: stages at rest while off | The compressor's detector and the distortion's and speaker's states hold while those stages are off and resume from there; the delay's line and loop filters start from silence when it is switched on (and are cleared when it is switched off); the reference runs them throughout, so the first moments after switching one on differ | Cost | Deliberate | — | `AmpChain::front`, `distort`, `echo` |
+| 70 | Amp chain: glides | The rates (2^-9, 7/32, and the delay time's exponent-scaled glide) read from the steady state, not probed by a parameter change; the words move a block (16 samples) at a time, holding within it; every glide starts at its target when the plugin starts | Not measured; the block steps for cost | Assumed | — | `AmpChain::glide` |
 | 71 | Amp chain at rates other than 44.1 kHz | Filters designed at the running rate (bilinear with prewarping, one-poles 1 - exp(-2 pi f / fs)), the delay held in seconds, the envelope's times and the glides' time constants kept; the compressor's level ramp and the saturators' memory run per sample, so their time constants shrink with the rate; the compressor's curve and the multiplier formats as at 44.1 kHz | The recorder runs at 44.1 kHz | Assumed | — | `AmpChain` |
 | 72 | Amp chain on the variation bus | Not verified: the input word and the output's scale table index come from bus-level fields | Not measured (the owner's one variation use has options not built) | Unverified | — | converter |
 
