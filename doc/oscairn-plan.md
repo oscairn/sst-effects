@@ -297,7 +297,7 @@ the factory and user sets over all slots; plugin; source class; how.
 | JAZZ COMBO | 07 41 | Var,InsA/B,A/D |  | 30 | 11 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
 | US HIGH GAIN | 07 42 | Var,InsA/B,A/D |  | 6 | 0 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
 | BRITISH LEAD | 07 43 | Var,InsA/B,A/D |  | 8 | 18 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
-| MULTI FX | 07 44 | Var,InsA/B,A/D |  | 45 | 26 | Distortion & Amp | base | chain of the suite's own blocks: compressor, distortion, wah, phaser/flanger, delay |
+| MULTI FX | 07 44 | Var,InsA/B,A/D |  | 45 | 26 | Distortion & Amp | written | own fixed chain, plugin Oscairn FX Amp Chain, mode "Amp Chain A" (built for the owner's main settings; section 15) |
 | SMALL STEREO | 07 45 | Var,InsA/B,A/D |  | 41 | 27 | Distortion & Amp | borrowed | Surge XT Distortion + own small-cabinet filter |
 | BRITISH COMBO | 07 46 | Var,InsA/B,A/D |  | 31 | 1 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
 | BRITISH LEGEND | 07 47 | Var,InsA/B,A/D |  | 1 | 0 | Distortion & Amp | borrowed | Guitarix tone stacks + sst-waveshapers + own cabinet filter |
@@ -2728,6 +2728,101 @@ The pitch-change type 0D 40 shares this network's structure in the reference; bu
 also need feedback from each voice into both lines, the input's cross-feed into the lines, the raw
 input on the outputs, a ramp speed set by its parameters, and its own laws and measurements.
 
+### Amp chain (built 2026-11-15)
+
+Plugin Oscairn FX Amp Chain (`org.oscairn.effects.amp-chain`), mode "Amp Chain A" (id 1),
+`effects/AmpChain.h`, for the reference's type 07 44. Measurements: `fx-types-2026-11-15/0744-multi-fx/`
+(its `INDEX.md`). Built: the stages and options of the owner's main settings (25 of his 27 uses);
+the other options are not exposed (see the mapping below).
+
+Structure, as the null takes show it (every coefficient a 16-bit word gliding to its setting, every
+stage clipped to [-1, 1), doubles throughout, the line's samples floats):
+
+- input: (L + R) / 4 at the insertion's level (7.915 dB below the rendered level, raised again at
+  the output; fitted, register 66); the chain is mono until the delay;
+- compressor: e = clip+(2 (|x| - s / 2)), s the sustain word; d = e + f env, f = -norm; the
+  envelope moves by clip(d / 4) times an attack multiplier when d >= 0, a release one when d < 0
+  (multipliers held as a 4-bit exponent and an 11-bit mantissa: (1/2 + m / 4096) / 2^(15 - e));
+  a level ramp v <- 2^-10 + (1 - s) v; the curve 1 / (1 + 999 k / 1024) (held in the same format,
+  linear between its 1025 points) at k = 1024 v env; g = clip(2 x curve); y = sat(256 clip(2 v M) g)
+  with sat(u) = clip(2 (u - u|u| / 2)) and M the makeup word; out = clip((x / 2 + c (x - y)) / 4),
+  c = -1/2 on, 0 off (off: x / 8);
+- wah and phaser: off only in this version (the wah's dry word 1/2 passes the signal; the phaser
+  its input word 32767/32768);
+- distortion, on the phaser's output of the sample before: a pre-EQ (G_L LP1(f_L) + G_H HP1(f_H) of
+  the input, less a state that integrates the result at the word of a slow high-pass f_D), then
+  v = sat(8 D eq) (D the drive word), a saturator with memory g <- A + |g (A - 1 + |(A - 1) v|)|,
+  A = 1 / (a b), w = clip(-256 (a / 256) max(v g, -1)), y = clip((w - w|w| / 2) / 2); presence: two
+  first-order all-passes (f1, f2) in series, y + m (ap - y), clipped at 2x, a one-pole low-pass f3;
+  a DC tracker (one-pole at 20 Hz while the signal is below it, 30 Hz above) subtracted; the same
+  saturator with c, d in place of a, b and sat(-256 (c / 256) t g'); then the speaker: two biquads
+  (the first's numerator at a sixteenth, both run at a quarter scale and x4), a state-variable
+  high-pass (f_S, damping 1/Q) and a one-pole low-pass f_P; the distortion's output is that low-pass
+  when on, its input when off;
+- delay, on the distortion's output of the sample before: one line read at D samples (the time
+  word + 32768, interpolated), a first-order low-pass (5 kHz, bilinear) and a 100 Hz high-pass
+  (x - (h + h') / 2, h a one-pole) on the tap; the line written sat(2 (in + F clip(hp / 2)));
+  outputs L, R = clip(16 (1 + O) (W_LR wet / 4 + B in)), O the output word, W the wet words (the
+  right one inverted in Stereo Echo A), B the dry word.
+
+| Law | Value |
+| --- | --- |
+| Sustain word s (sustain n + f tenths: raw v / 10) | -(trunc((n - 10x + 2) x -16384) >> n), at most 32767 (x = v / 100): 8192 at 2.0, 9830 at 1.8, 5325 at 2.7, 32 at 10 |
+| Makeup word M | trunc((s x 0.29 / 32767 + 0.71) x 16384) |
+| Envelope | attack 0.1 ms, release 1.487 s: word of 4 (1 - exp(-1 / (t fs))) / norm; norm = 0.998 + 0.001 (log2(release / attack) - 13) (register 68); f = round(-norm) |
+| Drive word D | trunc(16403 x 10^((d - 100) / 40) - 19), d the raw value: 127 at 18, 16384 at 100 |
+| Clean 1 | a = 33, b = 1.45, c = 9, d = 1.6; DC tracker 20 / 30 Hz; presence p = raw / 100 in two segments of 2p: f1 10, 10, 7 Hz, f2 8.5, 8.5, 5 kHz (geometric above 0.5, the first point below), mix (1 - 10^(g / 20)) / 2 with g -5.5, -7, -12 dB (linear), f3 1.25, 5, 30 kHz (geometric) |
+| Pre-EQ A by the tone t = raw / 100 (five points at 4t, geometric frequencies, linear gains) | f_L 200, 500, 1500, 2300, 7000 Hz at G_L -32, -20.1, -10, -20, -30.5 dB; f_H 1250, 500, 1500, 2300, 7000 Hz at G_H 0, -2, -4, 0, 0 dB; f_D 5, 7, 10, 10, 10 Hz; the direct path off; the gains times 1 - w_D / 2 |
+| Speaker A | a 5.8 kHz low-pass (Q 0.92); a biquad with poles at 1770.302 Hz (Q 1.400885) and zeros at 1430.945 Hz (Q 1.734767), gain 1.645954 (fitted, register 67); high-pass 60 Hz, Q 0.8; low-pass 3.35 kHz; numerators rounded so their sum stays within half a step |
+| Stereo Echo A | D = round(fs (0.075 + 0.6 v / 127)) samples (time v); F = trunc(10^(-t / 0.8) x 16384) / 32768 per loop; dry and wet cosLevel(c / 2), cosLevel(1 - c / 2) (c = control / 127, a quartic) |
+| Output word O | round(2 x 2^(-1/3) x V(v / 127) - 1), V the platform's fifth-order volume curve: -8203 at 109 |
+| Glides | 2^-9 of the gap per 44.1 kHz sample; the speaker's words 7/32; the delay time by min(1/4, 5 x 2^-13 x 2^(2 - e)) of the gap (e its binary exponent) (register 70) |
+
+Null takes (`null744.py`, AWM2 saw, residual against the take over 0.05-2.5 s): the owner's settings
+-110.2, -111.6 and -108.3 dB (sustain 2.0, 1.8; 2.7 without the delay); every stage off -144 dB;
+the compressor alone at sustain 0.1-3.6 -109 to -127 dB, at 6.0 and 10 -75 dB; Clean 1 at drive 0,
+1.8, 5, 10 -127, -125, -109, -87 dB, tones and presences -118 to -126 dB; Stereo Echo A alone -139 dB.
+Levels at the owner's settings within 0.00 dB at sine velocities 20-127 (`lvl744.py`); harmonics H1-H5
+at 110, 440 and 1760 Hz within 0.1 dB but at the noise floor (`harm744.py`).
+
+**Mapping law for the converter** (type 07 44 on an insertion; the variation bus not verified,
+register 72). Option values built (the plugin's option parameters expose only these; a stored value
+outside them is reported as not built, not played):
+
+| Raw parameter | Plugin parameter: law |
+| --- | --- |
+| 1 Comp. Sustain | Compressor Sustain: v / 10 (0 off) |
+| 2 Wah SW | only 0 built |
+| 3 Wah Pedal | not used while the wah is off |
+| 4 Dist SW | Distortion: 0 → 0 (Off), 4 → 1 (Clean 1); others not built |
+| 5 Dist Drive | Drive: v / 10 |
+| 6 Dist EQ | Pre-EQ: 0 → 0 (Pre-EQ A); others not built |
+| 7 Dist Tone | Tone: v / 10 |
+| 8 Dist Presence | Presence: v / 10 |
+| 9 Output Level | Output Level: v |
+| 11 Speaker Type | Speaker: 0 → 0 (Off), 2 → 1 (Speaker A); others not built |
+| 12 LFO Speed | not used by the stages built |
+| 13 Phaser SW | only 0 built |
+| 14 Delay SW | Delay: 0 → 0 (Off), 10 → 1 (Stereo Echo A); others not built |
+| 15 Delay Ctrl | Delay Control: v |
+| 16 Delay Time | Delay Time: v |
+
+Plugin tests, each checked to fail with its law broken: "Amp Chain: the settings' words at 44.1 kHz for
+the owner's settings, as measured" (fails with the drive law's offset moved by one); "Amp Chain: the
+compressor's curve…" (fails with 1000 for 999); "Amp Chain: with every stage off…" (fails with the
+phaser's input word one step lower); "Amp Chain: the compressor below its threshold…" (fails with the
+makeup's 0.71 as 0.72); "Amp Chain: Stereo Echo A…" (fails with the right wet not inverted); "Amp
+Chain: Clean 1's harmonics…" (fails with the first saturator's output word at -a / 240); the bundle
+bit-hash test takes the plugin. Line memory: 131,072 bytes at 44.1 and 48 kHz, 262,144 at 96 kHz (one
+line of floats, a power of two of at least 0.675 s). Cost (`scripts/cost-a53.sh`, noise in, the owner's
+main setting): 88,900 instructions per block at 44.1, 48 and 96 kHz, 85,300 after hoisting the
+per-block constants (same bits); every stage off 38,500, then 37,900; fed silence 89,300, then 13,500
+(the silence shortcut now engages as soon as every state that reaches the output and the line are
+exactly zero). The 60,000 target is not reached with the same bits: the wrapper takes about 9,000
+per block and the exact double-precision chain about 600 instructions per sample with every stage
+the owner uses on; the delay's loop filters run while it is off (their state reaches the output
+after it is switched on).
+
 ## 16. Known differences from the reference
 
 One entry per difference, kept up to date. "Reproduce" names the probe batch (built by the probe
@@ -2802,6 +2897,13 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 63 | Dual Detune: not modelled | The shelves' coefficient glide after a change and their internal clips (x4 and x16 sections, above full scale only); the glide of the network's words is the family's mix glide, not probed by a parameter change; the ramps start at activation, not when the type loads (as 59) | Null takes -97 to -110 dB without them | Deliberate | — | `PitchNetwork` |
 | 64 | Dual Detune at rates other than 44.1 kHz | Delays kept in seconds (read between samples), the ramp's step scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Dual Detune: the initial delays…" at 48 and 96 kHz | `PitchNetwork` |
 | 65 | Dual Detune on the variation bus | Wet only there, whatever the stored balance (as 60) | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `0340` `var_def_sine`; `features.py` | converter |
+| 66 | Amp chain: the insertion's level | The chain runs 7.915 dB below the rendered level (0.40201) and raises its output again; the circuit compressor's fit found 7.91 dB | Fitted to the compressor's limiting (residual minimum between 0.4020 and 0.4021); the reference's cause not known | Fitted | fx-types-2026-11-15 `0744` `comp100_awm`; `null744.py` | `AmpChain` (`insertionLevel`) |
+| 67 | Amp chain: Speaker A's second biquad | Its zeros (1430.945 Hz, Q 1.734767, gain 1.645954) and poles (1770.302 Hz, Q 1.400885) fitted so the words come out exact at 44.1 kHz; at other rates the same prototype through the bilinear transform | The section's design not derived | Fitted (exact words at 44.1 kHz) | `0744` `spk2_awm`, `own0_awm` | `AmpChain::words` |
+| 68 | Amp chain: the envelope's normalisation | 0.998 + 0.001 (log2(release / attack) - 13), valid for this effect's two times only | A law with no formula between measured points; the effect uses one segment | Exact for this effect | `0744` compressor takes | `AmpChain::words` |
+| 69 | Amp chain: stages at rest while off | The compressor's detector and the distortion's and speaker's states hold while those stages are off and resume from there; the reference runs them throughout, so the first moments after switching one on differ | Cost | Deliberate | — | `AmpChain::sample` |
+| 70 | Amp chain: glides | The rates (2^-9, 7/32, and the delay time's exponent-scaled glide) read from the steady state, not probed by a parameter change; every glide starts at its target when the plugin starts | Not measured | Assumed | — | `AmpChain::glide` |
+| 71 | Amp chain at rates other than 44.1 kHz | Filters designed at the running rate (bilinear with prewarping, one-poles 1 - exp(-2 pi f / fs)), the delay held in seconds, the envelope's times and the glides' time constants kept; the compressor's level ramp and the saturators' memory run per sample, so their time constants shrink with the rate; the compressor's curve and the multiplier formats as at 44.1 kHz | The recorder runs at 44.1 kHz | Assumed | — | `AmpChain` |
+| 72 | Amp chain on the variation bus | Not verified: the input word and the output's scale table index come from bus-level fields | Not measured (the owner's one variation use has options not built) | Unverified | — | converter |
 
 ## 17. Oscairn porting checklist (decision 22)
 
