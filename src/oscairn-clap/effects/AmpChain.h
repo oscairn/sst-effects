@@ -194,11 +194,12 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     {
         std::fill(line.begin(), line.end(), 0.f);
         ptr = 0;
-        zeroRun = 0;
+        lineSound = 0;
         s = State{};
         std::fill(std::begin(last), std::end(last), NAN);
         settled = false;
         first = true;
+        quiet = false;
         update();
     }
     void suspendProcessing() { initialize(); }
@@ -211,25 +212,34 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         bool silent = true;
         for (int i = 0; i < FXConfig::blockSize; ++i)
             silent = silent && L[i] == 0.f && R[i] == 0.f;
+        if (settled)
+            prepare();
         if (silent && settled && quiet)
         {
             // Every state that reaches the output and the line at zero: the block is silence
-            // out; the detector still falls as it would.
-            if (cur[cmpMix] != 0)
-                for (int i = 0; i < FXConfig::blockSize; ++i)
-                    detect(0);
+            // out. The saturators' gains and the detector move on as silence moves them.
+            for (int i = 0; i < FXConfig::blockSize; ++i)
+            {
+                if (cur[cmpMix] != 0)
+                    follow(0);
+                if (cur[dstOn] != 0)
+                {
+                    s.gain1 = cur[sat1A] + std::abs(s.gain1 * cur[sat1Am1]);
+                    s.gain2 = cur[sat2A] + std::abs(s.gain2 * cur[sat2Am1]);
+                }
+            }
             return;
         }
         for (int i = 0; i < FXConfig::blockSize; ++i)
         {
             if (!settled)
+            {
                 glide();
+                prepare();
+            }
             sample(L[i], R[i]);
         }
-        if (silent)
-            quiet = s.zero() && zeroRun >= (long)line.size();
-        else
-            quiet = false;
+        quiet = silent && s.zero() && lineSound == 0;
     }
 
     static inline const std::unordered_map<int, std::string> distNames{{0, "Off"}, {1, "Clean 1"}};
@@ -268,10 +278,10 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
   private:
     struct State
     {
-        double phsOut{0}, x1{0}, eqLp{0}, eqHp{0}, eqDc{0}, gain1{0}, ap1{0}, ap1x{0},
-            ap2{0}, prsOut{0}, dc{0}, gain2{0}, s1x1{0}, s1x2{0}, s1y1{0}, s1y2{0}, s2y1{0}, s2y2{0}, bp{0}, lp{0},
-            spkOut{0}, dstOut{0}, tap1{0}, loopLp{0}, loopHp{0};
-        double env{0}, lvl{0}; // the compressor's detector: no output without input
+        double phsOut{0}, x1{0}, eqLp{0}, eqHp{0}, eqDc{0}, ap1{0}, ap1x{0}, ap2{0}, prsOut{0}, dc{0}, s1x1{0},
+            s1x2{0}, s1y1{0}, s1y2{0}, s2y1{0}, s2y2{0}, bp{0}, lp{0}, spkOut{0}, dstOut{0}, tap1{0}, loopLp{0}, loopHp{0};
+        // the detector and the saturators' gains: no output without input
+        double env{0}, lvl{0}, gain1{0}, gain2{0};
         bool zero() const
         {
             for (const double *p = &phsOut; p <= &loopHp; ++p)
@@ -283,7 +293,10 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     State s;
     std::vector<float> line;
     int ptr{0};
-    long zeroRun{0}; // how many samples the line has been written zeros
+    long lineSound{0}; // how many of the line's samples are not zero
+    // Constant while no word moves: the envelope's two multipliers, the delay's read offset.
+    double gAtk{0}, gRel{0}, dFrac{0};
+    int dInt{0};
     double cur[numWords]{}, tgt[numWords]{};
     double rateCommon{0}, rateSpeaker{0}, rateTime{0};
     double delaySeconds{0};
@@ -351,15 +364,31 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         settled = done;
     }
 
+    void prepare()
+    {
+        gAtk = expGain(fixWord(cur[cmpAtk]));
+        gRel = expGain(fixWord(cur[cmpRel]));
+        const double pos = 131072 * clip(cur[dlyTime] * 0.25), fl = std::floor(pos);
+        dInt = (int)fl;
+        dFrac = pos - fl;
+    }
+
+    // The compressor's envelope and level on x.
+    void follow(double x)
+    {
+        const double *c = cur;
+        const double e = clipUp(2 * (std::abs(x) + c[cmpSus] * -0.5));
+        const double d = e + c[cmpFb] * s.env;
+        s.env = clip(s.env + clip(d * 0.25) * (d < 0 ? gRel : gAtk));
+        s.lvl = 32 / 32768.0 - (c[cmpSus] * s.lvl - s.lvl);
+    }
+
     // The compressor's detector and gain on x; returns the compressed, saturated signal.
     double detect(double x)
     {
         const double *c = cur;
         const double Kc = -0.5;
-        const double e = clipUp(2 * (std::abs(x) + c[cmpSus] * Kc));
-        const double d = e + c[cmpFb] * s.env;
-        s.env = clip(s.env + clip(d * 0.25) * expGain(fixWord(d < 0 ? c[cmpRel] : c[cmpAtk])));
-        s.lvl = 32 / 32768.0 - (c[cmpSus] * s.lvl - s.lvl);
+        follow(x);
         const double make = clip(2 * (s.lvl * c[cmpLvl]));
         const double h = 2 * (Kc + s.lvl * s.env);
         const double idx = h < -1 ? -512.0 : std::min(h, top) * 512, fl = std::floor(idx);
@@ -436,18 +465,16 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         double wet = 0;
         {
             const int mask = (int)line.size() - 1;
-            const double pos = 131072 * clip(c[dlyTime] * 0.25), fl = std::floor(pos);
-            const int i = (int)fl;
-            const double a = line[(ptr + 32768 + i) & mask], b = line[(ptr + 32769 + i) & mask];
-            const double tap = a + (pos - fl) * (b - a);
+            const double a = line[(ptr + 32768 + dInt) & mask], b = line[(ptr + 32769 + dInt) & mask];
+            const double tap = a + dFrac * (b - a);
             wet = c[loopB] * (s.tap1 + tap) + c[loopA] * s.loopLp;
             s.tap1 = tap, s.loopLp = wet;
             const double hs = s.loopHp + c[loopHp] * (wet - s.loopHp);
             const double back = clip((wet - 0.5 * (s.loopHp + hs)) * 0.5);
             s.loopHp = hs;
             const float in = (float)soft(2 * (din + c[fb] * back));
+            lineSound += (in != 0.f) - (line[ptr] != 0.f);
             line[ptr] = in;
-            zeroRun = in == 0.f ? zeroRun + 1 : 0;
         }
         const double oL = 0.25 * (c[wetL] * wet) + c[dryL] * din, oR = 0.25 * (c[wetR] * wet) + c[dryR] * din;
         L = (float)std::clamp(clip(16 * (oL + oL * c[outL])) / insertionLevel, -1.0, 1.0);
