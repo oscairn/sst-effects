@@ -179,6 +179,8 @@ template <typename FXConfig> struct CircuitCompressor : sst::effects::core::Effe
     FirstOrder sh1, sh2, hp;
     SecondOrder lp;
     double dcK{0}, e1{0}, e2{0}, gin{0}, gout{0}, makeup{1}, kA{1}, kR{1};
+    // A detector level a hair (1e-9) under the knee's start, so log10's rounding cannot matter.
+    double kneeEnv{0};
     int ratioIndex{1};
     float last[numParamsEnum]{};
 
@@ -202,6 +204,8 @@ template <typename FXConfig> struct CircuitCompressor : sst::effects::core::Effe
     }
     double curveGain(double env) const
     {
+        if (env < kneeEnv)
+            return 0.5; // below the knee: what the formula gives there, without its log10 and pow
         const double d = 20 * std::log10(std::max(env, 1e-12)) - curveThresholdDb[ratioIndex];
         const double W = curveKneeDb[ratioIndex], s = curveSlope[ratioIndex];
         double db = 0;
@@ -235,6 +239,7 @@ template <typename FXConfig> struct CircuitCompressor : sst::effects::core::Effe
         if (!changed)
             return;
         ratioIndex = std::clamp((int)std::lround(last[ratio]), 0, 4);
+        kneeEnv = std::pow(10.0, (curveThresholdDb[ratioIndex] - curveKneeDb[ratioIndex] / 2) / 20) * (1 - 1e-9);
         kA = coefficient(std::min(1.0, 2 / attackSamples(last[attack])));
         kR = coefficient(std::min(1.0, 2 / releaseSamples(last[release])));
         gin = heldLevel(last[inputLevel]);
