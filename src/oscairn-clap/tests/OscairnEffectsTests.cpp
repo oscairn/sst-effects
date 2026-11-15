@@ -5531,6 +5531,9 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.tremolo-rotary 3 44100", 0xa871f40debea8529},
         {"org.oscairn.effects.tremolo-rotary 3 48000", 0x827af19ce40b8fa0},
         {"org.oscairn.effects.tremolo-rotary 3 96000", 0x729f59df3f2ba04f},
+        {"org.oscairn.effects.amp-chain 1 44100", 0xcc7ce483afcad1fa},
+        {"org.oscairn.effects.amp-chain 1 48000", 0xb171c5f607e3d764},
+        {"org.oscairn.effects.amp-chain 1 96000", 0x5ac33f693c3ff22d},
     };
 #if defined(__aarch64__) && defined(__APPLE__)
     expected.insert({
@@ -5554,9 +5557,6 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.reverb 2 48000", 0x415bff4c4fc6500d},
         {"org.oscairn.effects.reverb 2 96000", 0x196057368889aef7},
         {"org.oscairn.effects.tremolo-rotary 2 96000", 0x606b1f945a7e2333},
-        {"org.oscairn.effects.amp-chain 1 44100", 0xcc7ce483afcad1fa},
-        {"org.oscairn.effects.amp-chain 1 48000", 0xb171c5f607e3d764},
-        {"org.oscairn.effects.amp-chain 1 96000", 0x5ac33f693c3ff22d},
     });
 #elif defined(__aarch64__) && defined(__linux__)
     expected.insert({
