@@ -4376,7 +4376,7 @@ std::array<std::complex<double>, 2> rotaryLawAt(const RotaryLaw &s, double w, si
 TEST_CASE("Rotary A: the output follows the measured structure sample for sample")
 {
     // The structure in section 15 ("Rotary A") reproduces the reference's clean two-tone recordings
-    // (batch c: Jacob's setting slow and fast, the mic at 0, 30 and 60, two rates, depth 8, three
+    // (batch c: a commonly used setting slow and fast, the mic at 0, 30 and 60, two rates, depth 8, three
     // hold-outs) within the source's own noise (-35 to -49 dB of residual, with one gain for every
     // setting). The plugin must give that structure's output, sample for sample, within -60 dB (the
     // delay words' 12-bit mantissas leave about -80 dB), at 196 and 2637 Hz.
@@ -4535,7 +4535,7 @@ TEST_CASE("Rotary A is linear: no harmonics, and twice the input gives twice the
 TEST_CASE("Rotary A: the low shelf acts on the rotor, the high shelf on the horn, as measured")
 {
     // Shelves alone (rotors stopped, depth 0; batch c, a saw at velocity 40, nothing near full scale):
-    // the reference's levels against its dry input at Jacob's three most used settings and two
+    // the reference's levels against its dry input at three commonly used settings and two
     // hold-outs, within 0.15 dB at 44.1 kHz (tolerance proposed); at 48, 96 and 192 kHz within the
     // rate gate of the 44.1 kHz levels (decision 18: 0.05 dB within 20 dB of the setting's peak).
     struct Setting { double loHz, loDb, hiHz, hiDb, balance; std::vector<std::pair<double, double>> ref; };
