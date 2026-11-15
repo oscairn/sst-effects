@@ -2812,8 +2812,15 @@ the owner's settings, as measured" (fails with the drive law's offset moved by o
 compressor's curve…" (fails with 1000 for 999); "Amp Chain: with every stage off…" (fails with the
 phaser's input word one step lower); "Amp Chain: the compressor below its threshold…" (fails with the
 makeup's 0.71 as 0.72); "Amp Chain: Stereo Echo A…" (fails with the right wet not inverted); "Amp
-Chain: Clean 1's harmonics…" (fails with the first saturator's output word at -a / 240); the bundle
-bit-hash test takes the plugin. Line memory: 131,072 bytes at 44.1 and 48 kHz, 262,144 at 96 kHz (one
+Chain: Clean 1's harmonics…" (fails with the first saturator's output word at -a / 240); "Amp Chain:
+at 48 and 96 kHz the distortion and speaker at a low level answer as at 44.1 kHz…" (within 0.2 dB from
+100 Hz to 8 kHz, worst 0.121 dB; fails with the speaker's low-pass designed at 44.1 kHz at every rate);
+Stereo Echo A's test holds the echo's time in seconds at 48 and 96 kHz; the bundle bit-hash test takes
+the plugin. Other rates, stage by stage: the filters (pre-EQ, presence, the DC tracker, the speaker's
+biquads through their analog prototypes, the fitted one included, its high-pass and low-pass, the
+delay's loop filters) are designed at the running rate; the delay's time is held in seconds; the
+envelope's attack and release are times; the glides keep their 44.1 kHz time constants; the
+compressor's level ramp and the saturators' memory run per sample (register 71). Line memory: 131,072 bytes at 44.1 and 48 kHz, 262,144 at 96 kHz (one
 line of floats, a power of two of at least 0.675 s). Cost (`scripts/cost-a53.sh`, noise in, the owner's
 main setting): 88,900 instructions per block at 44.1, 48 and 96 kHz, 85,300 after hoisting the
 per-block constants (same bits); every stage off 38,500, then 37,900; fed silence 89,300, then 13,500

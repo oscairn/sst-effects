@@ -5766,6 +5766,33 @@ TEST_CASE("Amp Chain: Stereo Echo A: one line at 75 + 600 x time/127 ms, the rig
     }
 }
 
+TEST_CASE("Amp Chain: at 48 and 96 kHz the distortion and speaker at a low level answer as at 44.1 kHz, 100 Hz to 8 kHz")
+{
+    // Clean 1 at drive 1.8 into Speaker A, every other stage off, a sine at -40 dBFS (where the
+    // saturators are nearly linear): the gain at each frequency against 44.1 kHz's.
+    auto set = ampOff;
+    set[1].second = 1;
+    set[2].second = 1;
+    double worst = 0;
+    for (double hz : {100.0, 300.0, 1000.0, 1770.0, 3000.0, 5000.0, 8000.0})
+    {
+        auto gain = [&](double rate) {
+            const auto x = ampSine(rate, hz, 0.01, 0.6);
+            const auto o = ampRun(rate, set, x);
+            return ampHarmonic(o.l, rate, hz, 1, (size_t)(0.3 * rate), (size_t)(0.6 * rate));
+        };
+        const double g44 = gain(44100);
+        for (double rate : {48000.0, 96000.0})
+        {
+            const double d = gain(rate) - g44;
+            INFO(hz << " Hz at " << rate << ": " << d << " dB");
+            worst = std::max(worst, std::abs(d));
+            CHECK(std::abs(d) < 0.2);
+        }
+    }
+    std::printf("Amp chain, distortion and speaker at 48 and 96 kHz: worst %.3f dB from 44.1 kHz\n", worst);
+}
+
 TEST_CASE("Amp Chain: Clean 1's harmonics on a 440 Hz sine, as measured from the reference")
 {
     // Drive 1.8, tone 1.5, presence 5.0, every other stage off, a sine of -6.07 dBFS (the
