@@ -2903,7 +2903,7 @@ register 77):
 | 5 Output Level (0-127) | Output Level: 40 log10(v / 127) dB; v = 0 → -90 (off) |
 | 11 Side Chain Input Level | not mapped (no side-chain input yet) |
 
-Plugin tests, each checked to fail with its law broken: "Compressor A: the reference program's gains
+Plugin tests, each checked to fail with its law broken: "Compressor A: the reference's gains
 at 44.1 kHz" (six cases, six windows each, within 0.01 dB; fails without the insertion level (onset
 6.49 dB for 6.81), with the detector reading the left channel twice (left-only case 6.81 for 7.01),
 without the second release follower (3.22 for 3.20) and without the bend before the table (3.19

@@ -3776,9 +3776,9 @@ double compAGain(const std::vector<float> &y, double rate, double hz, double t0,
 const double compAWindows[6][2] = {{0, 0.003}, {0.003, 0.01}, {0.05, 0.5}, {0.502, 0.505}, {0.52, 0.55}, {0.8, 1}};
 } // namespace
 
-TEST_CASE("Compressor A: the reference program's gains at 44.1 kHz")
+TEST_CASE("Compressor A: the reference's gains at 44.1 kHz")
 {
-    // Expected gains from the reference program's structure and words (plan, section 15), which
+    // Expected gains from the measured structure and words (plan, section 15), which
     // null against reference renders within -127 dB; each case leans on some of its laws: the
     // insertion level, the threshold and output words and the gain table (steady windows), the
     // attack smoother (onset windows), the two release followers (after the step), the detector's
