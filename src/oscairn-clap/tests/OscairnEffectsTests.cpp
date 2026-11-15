@@ -5700,6 +5700,15 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
 #else
     expected.clear();
 #endif
+    // A sanitizer build generates other floating-point code than the builds the tables were taken
+    // from, so there the bits are only checked run to run.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    expected.clear();
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+    expected.clear();
+#endif
+#endif
     const auto again = bundleHashes();
     for (auto &[key, h] : bundleHashes())
     {
