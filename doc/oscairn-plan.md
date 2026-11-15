@@ -2777,13 +2777,21 @@ stage clipped to [-1, 1), doubles throughout, the line's samples floats):
 | Pre-EQ A by the tone t = raw / 100 (five points at 4t, geometric frequencies, linear gains) | f_L 200, 500, 1500, 2300, 7000 Hz at G_L -32, -20.1, -10, -20, -30.5 dB; f_H 1250, 500, 1500, 2300, 7000 Hz at G_H 0, -2, -4, 0, 0 dB; f_D 5, 7, 10, 10, 10 Hz; the direct path off; the gains times 1 - w_D / 2 |
 | Speaker A | a 5.8 kHz low-pass (Q 0.92); a biquad with poles at 1770.302 Hz (Q 1.400885) and zeros at 1430.945 Hz (Q 1.734767), gain 1.645954 (fitted, register 67); high-pass 60 Hz, Q 0.8; low-pass 3.35 kHz; numerators rounded so their sum stays within half a step |
 | Stereo Echo A | D = round(fs (0.075 + 0.6 v / 127)) samples (time v); F = trunc(10^(-t / 0.8) x 16384) / 32768 per loop; dry and wet cosLevel(c / 2), cosLevel(1 - c / 2) (c = control / 127, a quartic) |
+| Crunch 1 | a = 60, b = 1.84, c = 50, d = 1.69; DC tracker 8.5 / 12 Hz; presence f1 180, 150, 10 Hz, f2 2000, 500, 320 Hz, g -13.5, -7, -3 dB, f3 15 kHz, geometric in both segments |
+| Pre-EQ B | f_L 470, 470, 470, 76, 45 Hz at G_L 0, 0, 0, -2, -0.915 dB; the direct path at -60, -60, -60, -23.1, -20 dB; f_H 470, 470, 470, 3150, 2000 Hz at G_H 0, 0, 0, -0.63, -0.915 dB; f_D 2000, 500, 100, 500, 1000 Hz |
+| Speaker B | a 4.3 kHz low-pass (Q 1.1); poles 876.0021 Hz (Q 0.420153), zeros 828.3597 Hz (Q 0.912838), gain 1.300046 (fitted, register 67); high-pass 105 Hz, Q 2; low-pass 7.6 kHz |
+| Mono Delay A | Stereo Echo A's line without feedback, the right wet not inverted |
 | Output word O | round(2 x 2^(-1/3) x V(v / 127) - 1), V the platform's fifth-order volume curve: -8203 at 109 |
 | Glides | 2^-9 of the gap per 44.1 kHz sample; the speaker's words 7/32; the delay time by min(1/4, 5 x 2^-13 x 2^(2 - e)) of the gap (e its binary exponent) (register 70) |
 
 Null takes (`null744.py`, AWM2 saw, residual against the take over 0.05-2.5 s): the owner's settings
 -110.2, -111.6 and -108.3 dB (sustain 2.0, 1.8; 2.7 without the delay); every stage off -144 dB;
 the compressor alone at sustain 0.1-3.6 -109 to -127 dB, at 6.0 and 10 -75 dB; Clean 1 at drive 0,
-1.8, 5, 10 -127, -125, -109, -87 dB, tones and presences -118 to -126 dB; Stereo Echo A alone -139 dB.
+1.8, 5, 10 -127, -125, -109, -87 dB, tones and presences -118 to -126 dB; Stereo Echo A alone -139 dB. The second options: Crunch 1 at drive 0, 1.8, 5, 10 -114, -103, -89,
+-80 dB; Pre-EQ B with Clean 1 -124 dB; Crunch 1 with Pre-EQ B at the fourth stored setting's values
+-83 dB; Mono Delay A alone -142 dB; Speaker B's words exact (no take isolates it: the speaker plays
+only with the distortion on). The wah is not built, so the fourth stored setting (the one variation
+use) is not playable yet.
 Levels at the owner's settings within 0.00 dB at sine velocities 20-127 (`lvl744.py`); harmonics H1-H5
 at 110, 440 and 1760 Hz within 0.1 dB but at the noise floor (`harm744.py`).
 
@@ -2796,16 +2804,16 @@ outside them is reported as not built, not played):
 | 1 Comp. Sustain | Compressor Sustain: v / 10 (0 off) |
 | 2 Wah SW | only 0 built |
 | 3 Wah Pedal | not used while the wah is off |
-| 4 Dist SW | Distortion: 0 → 0 (Off), 4 → 1 (Clean 1); others not built |
+| 4 Dist SW | Distortion: 0 → 0 (Off), 4 → 1 (Clean 1), 5 → 2 (Crunch 1); others not built |
 | 5 Dist Drive | Drive: v / 10 |
-| 6 Dist EQ | Pre-EQ: 0 → 0 (Pre-EQ A); others not built |
+| 6 Dist EQ | Pre-EQ: 0 → 0 (Pre-EQ A), 5 → 1 (Pre-EQ B); others not built |
 | 7 Dist Tone | Tone: v / 10 |
 | 8 Dist Presence | Presence: v / 10 |
 | 9 Output Level | Output Level: v |
-| 11 Speaker Type | Speaker: 0 → 0 (Off), 2 → 1 (Speaker A); others not built |
+| 11 Speaker Type | Speaker: 0 → 0 (Off), 2 → 1 (Speaker A), 1 → 2 (Speaker B); others not built |
 | 12 LFO Speed | not used by the stages built |
 | 13 Phaser SW | only 0 built |
-| 14 Delay SW | Delay: 0 → 0 (Off), 10 → 1 (Stereo Echo A); others not built |
+| 14 Delay SW | Delay: 0 → 0 (Off), 10 → 1 (Stereo Echo A), 1 → 2 (Mono Delay A); others not built |
 | 15 Delay Ctrl | Delay Control: v |
 | 16 Delay Time | Delay Time: v |
 
@@ -2911,7 +2919,7 @@ cases over the stated renders, 20 Hz–19 kHz unless stated.
 | 64 | Dual Detune at rates other than 44.1 kHz | Delays kept in seconds (read between samples), the ramp's step scaled; the reference at other rates is not measured | The recorder runs at 44.1 kHz | Assumed | Plugin test "Dual Detune: the initial delays…" at 48 and 96 kHz | `PitchNetwork` |
 | 65 | Dual Detune on the variation bus | Wet only there, whatever the stored balance (as 60) | Slot-dependent reference behaviour | Converter | fx-types-2026-11-15 `0340` `var_def_sine`; `features.py` | converter |
 | 66 | Amp chain: the insertion's level | The chain runs 7.915 dB below the rendered level (0.40201) and raises its output again; the circuit compressor's fit found 7.91 dB | Fitted to the compressor's limiting (residual minimum between 0.4020 and 0.4021); the reference's cause not known | Fitted | fx-types-2026-11-15 `0744` `comp100_awm`; `null744.py` | `AmpChain` (`insertionLevel`) |
-| 67 | Amp chain: Speaker A's second biquad | Its zeros (1430.945 Hz, Q 1.734767, gain 1.645954) and poles (1770.302 Hz, Q 1.400885) fitted so the words come out exact at 44.1 kHz; at other rates the same prototype through the bilinear transform | The section's design not derived | Fitted (exact words at 44.1 kHz) | `0744` `spk2_awm`, `own0_awm` | `AmpChain::words` |
+| 67 | Amp chain: the speakers' second biquads | Speaker A's zeros (1430.945 Hz, Q 1.734767, gain 1.645954) and poles (1770.302 Hz, Q 1.400885), Speaker B's zeros (828.3597 Hz, Q 0.912838, gain 1.300046) and poles (876.0021 Hz, Q 0.420153), fitted so the words come out exact at 44.1 kHz; at other rates the same prototype through the bilinear transform | The section's design not derived | Fitted (exact words at 44.1 kHz) | `0744` `spk2_awm`, `own0_awm` | `AmpChain::words` |
 | 68 | Amp chain: the envelope's normalisation | 0.998 + 0.001 (log2(release / attack) - 13), valid for this effect's two times only | A law with no formula between measured points; the effect uses one segment | Exact for this effect | `0744` compressor takes | `AmpChain::words` |
 | 69 | Amp chain: stages at rest while off | The compressor's detector and the distortion's and speaker's states hold while those stages are off and resume from there; the delay's line and loop filters start from silence when it is switched on (and are cleared when it is switched off); the reference runs them throughout, so the first moments after switching one on differ | Cost | Deliberate | — | `AmpChain::front`, `distort`, `echo` |
 | 70 | Amp chain: glides | The rates (2^-9, 7/32, and the delay time's exponent-scaled glide) read from the steady state, not probed by a parameter change; the words move a block (16 samples) at a time, holding within it; every glide starts at its target when the plugin starts | Not measured; the block steps for cost | Assumed | — | `AmpChain::glide` |

@@ -5531,10 +5531,10 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.tremolo-rotary 3 44100", 0xa871f40debea8529},
         {"org.oscairn.effects.tremolo-rotary 3 48000", 0x827af19ce40b8fa0},
         {"org.oscairn.effects.tremolo-rotary 3 96000", 0x729f59df3f2ba04f},
-        // re-taken after the amp chain's stage-by-stage rewrite: its bits moved on purpose
-        {"org.oscairn.effects.amp-chain 1 44100", 0x133cacfa29a96473},
-        {"org.oscairn.effects.amp-chain 1 48000", 0x39e5e12ee788bf2b},
-        {"org.oscairn.effects.amp-chain 1 96000", 0x896dcd6dfd10310b},
+        // re-taken when the amp chain's option ranges grew (the test sets each parameter by its range)
+        {"org.oscairn.effects.amp-chain 1 44100", 0x1dcacab643d4a66d},
+        {"org.oscairn.effects.amp-chain 1 48000", 0xbd41567b830d5c7c},
+        {"org.oscairn.effects.amp-chain 1 96000", 0xb5d68900edd9e955},
     };
 #if defined(__aarch64__) && defined(__APPLE__)
     expected.insert({
@@ -5699,6 +5699,45 @@ TEST_CASE("Amp Chain: the settings' words at 44.1 kHz for three stored settings,
         INFO("word 0x" << std::hex << k);
         CHECK(off[k] == v);
     }
+}
+
+TEST_CASE("Amp Chain: the second options' words at 44.1 kHz, as measured")
+{
+    using namespace oscairn_fx::amp;
+    // Sustain 3.6, Crunch 1 at drive 5.0, Pre-EQ B at tone 4.2, presence 5.2, Speaker B, Mono
+    // Delay A at control 13 and time 36, output 77 (the fourth stored setting but its wah).
+    const auto w = Amp::words({36, 2, 50, 1, 42, 52, 2, 2, 13, 36, 77}, 44100).w;
+    for (auto [k, v] : std::vector<std::pair<int, int>>{
+             {eqLowB, 1062}, {eqLowA, 30644}, {eqHighK, 2124}, {eqLowG, 32382}, {eqHighG, 32382}, {eqDcK, 772}, {cmpSus, 2868},
+             {drive, 903}, {cmpLvl, 12048}, {sat1Am1, -32471}, {sat1A, 297}, {sat1Out, -7680}, {prsAp1, 32146}, {prsAp2, 30552},
+             {prsMix, 8929}, {prsLp, 28902}, {dcFall, 40}, {dcRise, 56}, {sat2Am1, -32380}, {sat2A, 388}, {sat2Out, -6400},
+             {dlyTime, -21959}, {spk1B1, 1180}, {spk1B0, 591}, {spk1A1, 10627}, {spk1A2, -4797}, {spk2B1, -18415}, {spk2B2, 8674},
+             {spk2B0, 9870}, {spk2A1, 14159}, {spk2A2, -6078}, {spkDamp, 8192}, {wetL, 1312}, {dryL, 16333}, {wetR, 1312},
+             {dryR, 16333}, {fb, 0}, {outL, -27094}, {spkLp, 21671}, {spkHpF, 487}, {dstOn, -32768}})
+    {
+        INFO("word 0x" << std::hex << k);
+        CHECK(w[k] == v);
+    }
+}
+
+TEST_CASE("Amp Chain: Mono Delay A: one echo, the same on both channels")
+{
+    auto set = ampOff;
+    set[3].second = 2;
+    set.push_back({"Delay Time", 48});
+    set.push_back({"Delay Control", 127});
+    std::vector<float> x(44100);
+    x[0] = 0.25f;
+    const auto o = ampRun(44100, set, x);
+    const int d = (int)(44100 * (0.075 + 0.6 * 48 / 127.0) + 0.5) + 2;
+    double first = 0, later = 0;
+    for (int n = d - 20; n < d + 200; ++n)
+        first = std::max(first, (double)std::abs(o.l[n]));
+    for (int n = 2 * d - 20; n < 2 * d + 200; ++n)
+        later = std::max(later, (double)std::abs(o.l[n]));
+    CHECK(first > 0.01);
+    CHECK(later < 1e-9);
+    CHECK(o.r[d] == Approx(o.l[d]).margin(1e-7));
 }
 
 TEST_CASE("Amp Chain: the compressor's curve 1 / (1 + 999 k / 1024) and the multipliers' 4-bit exponent and 11-bit mantissa")

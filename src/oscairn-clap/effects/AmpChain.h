@@ -242,10 +242,10 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         quiet = silent && s.zero() && lineSound == 0;
     }
 
-    static inline const std::unordered_map<int, std::string> distNames{{0, "Off"}, {1, "Clean 1"}};
-    static inline const std::unordered_map<int, std::string> eqNames{{0, "Pre-EQ A"}};
-    static inline const std::unordered_map<int, std::string> speakerNames{{0, "Off"}, {1, "Speaker A"}};
-    static inline const std::unordered_map<int, std::string> delayNames{{0, "Off"}, {1, "Stereo Echo A"}};
+    static inline const std::unordered_map<int, std::string> distNames{{0, "Off"}, {1, "Clean 1"}, {2, "Crunch 1"}};
+    static inline const std::unordered_map<int, std::string> eqNames{{0, "Pre-EQ A"}, {1, "Pre-EQ B"}};
+    static inline const std::unordered_map<int, std::string> speakerNames{{0, "Off"}, {1, "Speaker A"}, {2, "Speaker B"}};
+    static inline const std::unordered_map<int, std::string> delayNames{{0, "Off"}, {1, "Stereo Echo A"}, {2, "Mono Delay A"}};
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
     {
@@ -254,13 +254,13 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         switch (idx)
         {
         case sustain: return tenth("Compressor Sustain", 1.8f);
-        case distortion: return pmd().asInt().withName("Distortion").withRange(0, 1).withDefault(1).withUnorderedMapFormatting(distNames);
+        case distortion: return pmd().asInt().withName("Distortion").withRange(0, 2).withDefault(1).withUnorderedMapFormatting(distNames);
         case driveLevel: return tenth("Drive", 1.8f);
-        case preEq: return pmd().asInt().withName("Pre-EQ").withRange(0, 0).withDefault(0).withUnorderedMapFormatting(eqNames);
+        case preEq: return pmd().asInt().withName("Pre-EQ").withRange(0, 1).withDefault(0).withUnorderedMapFormatting(eqNames);
         case tone: return tenth("Tone", 1.5f);
         case presence: return tenth("Presence", 5.f);
-        case speaker: return pmd().asInt().withName("Speaker").withRange(0, 1).withDefault(1).withUnorderedMapFormatting(speakerNames);
-        case delayType: return pmd().asInt().withName("Delay").withRange(0, 1).withDefault(1).withUnorderedMapFormatting(delayNames);
+        case speaker: return pmd().asInt().withName("Speaker").withRange(0, 2).withDefault(1).withUnorderedMapFormatting(speakerNames);
+        case delayType: return pmd().asInt().withName("Delay").withRange(0, 2).withDefault(1).withUnorderedMapFormatting(delayNames);
         case delayControl: return pmd().asInt().withName("Delay Control").withRange(0, 127).withDefault(40);
         case delayTime: return pmd().asInt().withName("Delay Time").withRange(0, 127).withDefault(48);
         case outputLevel: return pmd().asInt().withName("Output Level").withRange(0, 127).withDefault(109);
@@ -317,8 +317,8 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
             return;
         auto tenths = [&](int i) { return (int)std::lround(std::clamp(last[i], 0.f, 10.f) * 10); };
         auto pick = [&](int i, int hi) { return std::clamp((int)std::lround(last[i]), 0, hi); };
-        const Setting p{tenths(sustain), pick(distortion, 1), tenths(driveLevel), pick(preEq, 0), tenths(tone), tenths(presence),
-                        pick(speaker, 1), pick(delayType, 1), pick(delayControl, 127), pick(delayTime, 127), pick(outputLevel, 127)};
+        const Setting p{tenths(sustain), pick(distortion, 2), tenths(driveLevel), pick(preEq, 1), tenths(tone), tenths(presence),
+                        pick(speaker, 2), pick(delayType, 2), pick(delayControl, 127), pick(delayTime, 127), pick(outputLevel, 127)};
         const double rate = this->sampleRate();
         const Words w = words(p, rate);
         for (int k = 0; k < numWords; ++k)
@@ -627,22 +627,31 @@ template <typename FXConfig> Words AmpChain<FXConfig>::words(const Setting &p, d
         w[cmpRel] = expWord(4 * (1 - std::exp(-1 / release / rate)) / norm);
         w[cmpMix] = -16384;
     }
-    // Distortion: Clean 1
-    if (p.dist == 1)
+    // Distortion: Clean 1 or Crunch 1 (the two saturators' a, b and c, d; the DC tracker's rising
+    // and falling corners; presence points, interpolated below its middle for Crunch 1 only)
+    if (p.dist == 1 || p.dist == 2)
     {
-        const double e0 = 33, e1 = (double)1.45f, e2 = 9, e3 = (double)1.6f;
+        struct Dist
+        {
+            double a, b, c, d, rise, fall, f1[3], f2[3], g[3], f3[3];
+            bool lowerFixed;
+        };
+        static const Dist clean{33, (double)1.45f, 9, (double)1.6f, 30, 20, {10, 10, 7}, {8500, 8500, 5000}, {-5.5, -7, -12}, {1250, 5000, 30000}, true};
+        static const Dist crunch{60, (double)1.84f, 50, (double)1.69f, 12, 8.5, {180, 150, 10}, {2000, 500, 320}, {-13.5, -7, -3}, {15000, 15000, 15000}, false};
+        const Dist &D = p.dist == 1 ? clean : crunch;
+        const double e0 = D.a, e1 = D.b, e2 = D.c, e3 = D.d;
         w[sat1A] = q16(1 / e0 / e1), w[sat1Am1] = q16(1 / e0 / e1 - 1), w[sat1Out] = q16(-e0 / 256);
         w[sat2A] = q16(1 / e2 / e3), w[sat2Am1] = q16(1 / e2 / e3 - 1), w[sat2Out] = q16(-e2 / 256);
         w[dstFloor] = -32768;
-        w[dcRise] = q16(onePole(30, rate)), w[dcFall] = q16(onePole(20, rate));
+        w[dcRise] = q16(onePole(D.rise, rate)), w[dcFall] = q16(onePole(D.fall, rate));
         w[dstOn] = -32768;
         // presence: two all-passes, their mix and a low-pass, by the presence in two segments
         const double pr = p.presence / 100.0, xx = pr + pr;
         const int i = xx >= 1 ? 1 : 0, j = i + 1;
         const double fr = xx - (xx >= 1 ? 1 : 0);
-        const double f1s[3] = {10, 10, 7}, f2s[3] = {8500, 8500, 5000}, gs[3] = {-5.5, -7, -12}, f3s[3] = {1250, 5000, 30000};
+        const double *f1s = D.f1, *f2s = D.f2, *gs = D.g, *f3s = D.f3;
         double f1 = f1s[i], f2 = f2s[i];
-        if (xx >= 1)
+        if (xx >= 1 || !D.lowerFixed)
             f1 *= std::pow(f1s[j] / f1s[i], fr), f2 *= std::pow(f2s[j] / f2s[i], fr);
         const double k1 = std::tan(pi32 * f1 / rate), k2 = std::tan(pi32 * f2 / rate);
         w[prsAp1] = q16((1 - k1) / (k1 + 1));
@@ -652,13 +661,22 @@ template <typename FXConfig> Words AmpChain<FXConfig>::words(const Setting &p, d
         // drive: 10^((d - 100) / 40) x 16403 - 19
         w[drive] = (int)(law::level05(p.drive - 100) * 16403.0 - 19);
     }
-    // Pre-EQ A by the tone (five points; frequencies geometric, gains linear between them)
+    // Pre-EQ A or B by the tone (five points; frequencies geometric, gains linear between them):
+    // low-pass f and gain, high-pass f and gain, the direct path's gain, the slow high-pass's f
     {
+        struct Eq
+        {
+            double fl[5], fh[5], gl[5], gd[5], gh[5], fd[5];
+        };
+        static const Eq eqA{{200, 500, 1500, 2300, 7000}, {1250, 500, 1500, 2300, 7000}, {-32, (double)-20.1f, -10, -20, (double)-30.5f},
+                            {-60, -60, -60, -60, -60}, {0, -2, -4, 0, 0}, {5, 7, 10, 10, 10}};
+        static const Eq eqB{{470, 470, 470, 76, 45}, {470, 470, 470, 3150, 2000}, {0, 0, 0, -2, (double)-0.915f},
+                            {-60, -60, -60, (double)-23.1f, -20}, {0, 0, 0, (double)-0.63f, (double)-0.915f}, {2000, 500, 100, 500, 1000}};
+        const Eq &E = p.eq == 1 ? eqB : eqA;
         const double tn = p.tone / 100.0;
         const int n = (int)(tn * 4), m = n < 4 ? n + 1 : n;
         const double fr = tn * 4 - n;
-        const double fl[5] = {200, 500, 1500, 2300, 7000}, fh[5] = {1250, 500, 1500, 2300, 7000}, fd[5] = {5, 7, 10, 10, 10};
-        const double gl[5] = {-32, (double)-20.1f, -10, -20, (double)-30.5f}, gh[5] = {0, -2, -4, 0, 0};
+        const double *fl = E.fl, *fh = E.fh, *fd = E.fd, *gl = E.gl, *gh = E.gh;
         auto geo = [&](const double *v) { return std::pow(v[m] / v[n], fr) * v[n]; };
         auto db = [&](const double *v) {
             const double g = (1 - fr) * v[n] + fr * v[m];
@@ -672,7 +690,7 @@ template <typename FXConfig> Words AmpChain<FXConfig>::words(const Setting &p, d
         w[eqDcK] = q16((kd + kd) / (kd + 1));
         const double scale = w[eqDcK] * -0.5 * 0x1p-15 + 1;
         w[eqLowG] = q16(scale * db(gl));
-        w[eqDirG] = 0; // the direct path's gain is -60 dB at every tone: off
+        w[eqDirG] = q16(scale * db(E.gd)); // -60 dB and below: off
         w[eqHighG] = q16(scale * db(gh));
     }
     // Speaker A: a 5.8 kHz low-pass (Q 0.92), a section with poles at 1.77 kHz (Q 1.4) and zeros at 1.43 kHz (Q 1.73, fitted), a 60 Hz
@@ -688,6 +706,19 @@ template <typename FXConfig> Words AmpChain<FXConfig>::words(const Setting &p, d
         w[spkHpF] = q16(onePole(60, rate));
         w[spkLp] = q16(onePole(3350, rate));
     }
+    else if (p.speaker == 2)
+    {
+        // Speaker B: a 4.3 kHz low-pass (Q 1.1), a section with poles at 876 Hz (Q 0.42) and zeros
+        // at 828 Hz (Q 0.91, fitted), a 105 Hz resonant high-pass (Q 2) and a 7.6 kHz low-pass
+        int s1[5], s2[5];
+        law::section(0, 0, 1, 4300, (double)1.1f, fsInt, s1);
+        law::section(828.3597, 0.912838, 1.300046, 876.0021, 0.420153, fsInt, s2);
+        w[spk1B0] = s1[0], w[spk1B1] = s1[1], w[spk1A1] = s1[3], w[spk1A2] = s1[4];
+        w[spk2B0] = s2[0], w[spk2B1] = s2[1], w[spk2B2] = s2[2], w[spk2A1] = s2[3], w[spk2A2] = s2[4];
+        w[spkDamp] = q16(0.5 / 2.0);
+        w[spkHpF] = q16(onePole(105, rate));
+        w[spkLp] = q16(onePole(7600, rate));
+    }
     else
     {
         // off: the first section a sample's delay, the second a wire, the high-pass at 2 Hz (Q 0.7)
@@ -700,16 +731,17 @@ template <typename FXConfig> Words AmpChain<FXConfig>::words(const Setting &p, d
     // cosine law, the right wet inverted
     w[dlyTime] = -32767;
     w[dryL] = w[dryR] = 16384;
-    if (p.delay == 1)
+    if (p.delay == 1 || p.delay == 2)
     {
+        // Mono Delay A: the same line without feedback, the right wet not inverted
         const double sec = 0.075 + (p.time / 127.0) * 0.6;
         w[dlyTime] = (int)(rate * sec + -32768.0 + 0.5);
-        w[fb] = (int)(std::pow(10.0, -sec / (double)0.8f) * 16384);
+        w[fb] = p.delay == 1 ? (int)(std::pow(10.0, -sec / (double)0.8f) * 16384) : 0;
         const double cv = p.control / 127.0;
         const double dry = law::cosLevel(cv * 0.5), wet = law::cosLevel(1 + cv * -0.5);
         w[dryL] = w[dryR] = (int)(dry * 16384);
         w[wetL] = (int)(wet * 16384);
-        w[wetR] = (int)(-wet * 16384);
+        w[wetR] = (int)((p.delay == 1 ? -wet : wet) * 16384);
     }
     // Output level: 2 x 2^(-1/3) x the volume curve, less one
     w[outL] = w[outR] = q16(2 * (double)0.7937005259840998f * law::volume(p.level / 127.0) - 1);
