@@ -471,6 +471,15 @@ void apply(Context &s, const clap_event_header_t *h)
     setValue(s, e.param_id, e.value);
 }
 
+// Any frame other than zero (NaN included); branch-free, so it vectorizes.
+bool sound(const float *l, const float *r, uint32_t n)
+{
+    bool any = false;
+    for (uint32_t k = 0; k < n; ++k)
+        any |= (l[k] != 0.f) | (r[k] != 0.f);
+    return any;
+}
+
 void runBlock(Context &s)
 {
     if (auto *p = s.pending.load(std::memory_order_acquire);
@@ -492,9 +501,10 @@ void runBlock(Context &s)
 
     s.unheard.store(false, std::memory_order_relaxed);
 
-    float inPeak = 0, outPeak = 0;
+    // Branch-free reductions (NaN counts as neither, as in a running maximum).
+    bool input = false, output = false;
     for (int i = 0; i < block; ++i)
-        inPeak = std::max({inPeak, std::abs(s.inL[i]), std::abs(s.inR[i])});
+        input |= (std::abs(s.inL[i]) > 0) | (std::abs(s.inR[i]) > 0);
     // The values only change with a parameter change or another effect: otherwise they are loaded.
     if (const uint32_t v = s.valuesVersion.load(std::memory_order_acquire); v != s.loadedVersion || s.fx.get() != s.loadedFx)
     {
@@ -506,9 +516,9 @@ void runBlock(Context &s)
     std::memcpy(s.outR, s.inR, sizeof(s.outR));
     s.fx->process(s.outL, s.outR);
     for (int i = 0; i < block; ++i)
-        outPeak = std::max({outPeak, std::abs(s.outL[i]), std::abs(s.outR[i])});
+        output |= (std::abs(s.outL[i]) >= 1e-7f) | (std::abs(s.outR[i]) >= 1e-7f);
     // Quiet: no input and output below -140 dBFS for 100 ms.
-    if (inPeak > 0 || outPeak >= 1e-7f)
+    if (input || output)
         s.quietBlocks = 0;
     else if (s.quietBlocks < s.quietLimit)
         ++s.quietBlocks;
@@ -545,18 +555,21 @@ clap_process_status process(const clap_plugin_t *plugin, const clap_process_t *p
             apply(s, h);
             ++event;
         }
-        bool sound = false;
-        for (uint32_t k = 0; k < n; ++k)
+        float *bl = s.inL + s.pos, *br = s.inR + s.pos;
+        if (inL && inR)
         {
-            const float l = inL ? inL[i + k] : 0.f, r = inR ? inR[i + k] : 0.f;
-            sound = sound || l != 0.f || r != 0.f;
-            s.inL[s.pos + k] = l;
-            s.inR[s.pos + k] = r;
-            // Read before writing: in-place buffers are allowed.
-            outL[i + k] = s.outL[s.pos + k];
-            outR[i + k] = s.outR[s.pos + k];
+            std::memcpy(bl, inL + i, n * sizeof(float));
+            std::memcpy(br, inR + i, n * sizeof(float));
         }
-        silentIn = silentIn && !sound;
+        else
+        {
+            std::fill_n(bl, n, 0.f);
+            std::fill_n(br, n, 0.f);
+        }
+        // After the input is read: in-place buffers are allowed.
+        std::memcpy(outL + i, s.outL + s.pos, n * sizeof(float));
+        std::memcpy(outR + i, s.outR + s.pos, n * sizeof(float));
+        silentIn = silentIn && !sound(bl, br, n);
         i += n;
         if ((s.pos += n) == block)
         {
