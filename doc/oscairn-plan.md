@@ -570,6 +570,8 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     0.2.6 and Tremolo & Rotary 0.2.4 (the bundle's new binary). Package 0.3.3 (2026-11-15) carries
     Amp Chain 0.2.0 (stage by stage per block, the delay at rest while off, the second options),
     Chorus 0.2.2, Reverb 0.5.7, EQ 0.1.7, Delay 0.2.5, Dynamics 0.2.7 and Tremolo & Rotary 0.2.5.
+    Package 0.3.4 (2026-11-16) carries Dynamics 0.3.0 (Compressor A), Amp Chain 0.2.1, Chorus
+    0.2.3, Reverb 0.5.8, EQ 0.1.8, Delay 0.2.6 and Tremolo & Rotary 0.2.6 (the bundle's new binary).
 25. **Decided (Jacob, 2026-11-05): fix the circuit-style compressor before shipping it. Done
     (2026-11-06):** rebuilt on the reference's structure (section 15, "Circuit compressor
     rebuilt on the reference's structure"). A fresh hold-out (fx26, 20 random settings, four
