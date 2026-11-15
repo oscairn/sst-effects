@@ -567,7 +567,9 @@ tests, ASan/UBSan, TSan, the stock-vs-fork gate, and CI on Linux x86_64, Linux A
     Dual Detune mode, less work per sample), Reverb 0.5.5, EQ 0.1.5, Delay 0.2.3, Dynamics 0.2.5
     and Tremolo & Rotary 0.2.3 (the wrapper's cost work). Package 0.3.2 (2026-11-15) adds Amp Chain
     0.1.0 and carries Chorus 0.2.1 (mode 5's new name), Reverb 0.5.6, EQ 0.1.6, Delay 0.2.4, Dynamics
-    0.2.6 and Tremolo & Rotary 0.2.4 (the bundle's new binary).
+    0.2.6 and Tremolo & Rotary 0.2.4 (the bundle's new binary). Package 0.3.3 (2026-11-15) carries
+    Amp Chain 0.2.0 (stage by stage per block, the delay at rest while off, the second options),
+    Chorus 0.2.2, Reverb 0.5.7, EQ 0.1.7, Delay 0.2.5, Dynamics 0.2.7 and Tremolo & Rotary 0.2.5.
 25. **Decided (Jacob, 2026-11-05): fix the circuit-style compressor before shipping it. Done
     (2026-11-06):** rebuilt on the reference's structure (section 15, "Circuit compressor
     rebuilt on the reference's structure"). A fresh hold-out (fx26, 20 random settings, four
