@@ -5973,3 +5973,33 @@ TEST_CASE("Amp Chain: Clean 1's harmonics on a 440 Hz sine, as measured from the
         CHECK(std::abs(db - ref[h - 1]) < 0.3);
     }
 }
+
+TEST_CASE("Asleep, silent calls play silence and change nothing, as if the host had skipped them")
+{
+    // A host may stop calling process after CLAP_PROCESS_SLEEP; one that keeps calling with
+    // silence must hear the same afterwards as one that stopped, in the modes without free
+    // modulation (their defaults here).
+    for (const char *id : {dynamicsId, delayId, eqId})
+    {
+        INFO(id);
+        std::vector<float> l, r, out, outR;
+        signal(48000 * 20, l, r); // a burst, then silence for the tail to end
+        std::vector<float> later(l.begin(), l.begin() + 9600), laterR(r.begin(), r.begin() + 9600);
+        const std::vector<float> quiet(48000, 0);
+        Plugin kept(id), skipped(id);
+        for (auto *pl : {&kept, &skipped})
+        {
+            pl->activate();
+            pl->render(l, r, outR, {128});
+            REQUIRE(pl->last == CLAP_PROCESS_SLEEP);
+        }
+        out = kept.render(quiet, quiet, outR, {128});
+        for (size_t i = 0; i < out.size(); ++i)
+            REQUIRE((out[i] == 0 && outR[i] == 0));
+        for (auto st : kept.statuses)
+            REQUIRE(st == CLAP_PROCESS_SLEEP);
+        std::vector<float> keptR, skippedR;
+        REQUIRE(kept.render(later, laterR, keptR, {128}) == skipped.render(later, laterR, skippedR, {128}));
+        REQUIRE(keptR == skippedR);
+    }
+}

@@ -65,6 +65,7 @@ constexpr int block = Cfg::blockSize;
 struct Effect
 {
     uint32_t mode{0};
+    bool skipsAsleep{false}; // Mode::skipsAsleep
     virtual ~Effect() = default;
     virtual float *params() = 0;
     virtual void initialize() = 0;
@@ -133,6 +134,8 @@ struct Mode
     std::vector<pm::ParamMetaData> meta;
     std::unique_ptr<Effect> (*make)(double rate, oscairn_fx::Worker *, const std::atomic<bool> *offline);
     size_t (*bytes)(double rate); // what make(rate, ...) allocates
+    // Runs no free modulation (LFOs), so silent calls may be skipped once its tail is over.
+    bool skipsAsleep;
 };
 
 // An effect instance whose buffers are sized for the running rate (OscairnConfig.h).
@@ -170,9 +173,9 @@ template <template <typename> class FX> size_t sizedBytes(double rate)
     return sizeof(EffectOf<FX<Cfg>>) + heapBytesAt<FX<Cfg>>(rate);
 }
 
-template <template <typename> class FX> Mode mode(uint32_t id, const char *name)
+template <template <typename> class FX> Mode mode(uint32_t id, const char *name, bool skipsAsleep = false)
 {
-    Mode m{id, name, {}, makeSized<FX>, sizedBytes<FX>};
+    Mode m{id, name, {}, makeSized<FX>, sizedBytes<FX>, skipsAsleep};
     static_assert(FX<Cfg>::numParams <= Cfg::BC::maxParamCount);
     // Metadata from the smallest instance; it does not depend on the buffer sizes.
     auto probe = std::make_unique<EffectOf<FX<oscairn_fx::SizedConfig<oscairn_fx::sizedRates[0]>>>>(48000.0, nullptr, nullptr);
@@ -252,9 +255,10 @@ const std::vector<Category> &categories()
                         2,
                         {}};
         // Stock sst-effects reverbs, unchanged. Mode IDs are never reused or renumbered.
-        reverb.modes.push_back(mode<sst::effects::reverb1::Reverb1>(1, "Reverb 1"));
+        // Modes that run no free modulation skip silent calls once their tail is over (asleep()).
+        reverb.modes.push_back(mode<sst::effects::reverb1::Reverb1>(1, "Reverb 1", true));
         reverb.modes.push_back(mode<sst::effects::reverb2::Reverb2>(2, "Reverb 2"));
-        reverb.modes.push_back(mode<oscairn_fx::hall::HallReverb>(3, "Hall A"));
+        reverb.modes.push_back(mode<oscairn_fx::hall::HallReverb>(3, "Hall A", true));
         reverb.finish();
         c.push_back(std::move(reverb));
 
@@ -264,10 +268,10 @@ const std::vector<Category> &categories()
                     {},
                     1,
                     {}};
-        eq.modes.push_back(mode<oscairn_fx::eq::FiveBandEq>(1, "Five-band EQ"));
-        eq.modes.push_back(mode<oscairn_fx::eq::TwoBandEq>(2, "Two-band EQ"));
-        eq.modes.push_back(mode<oscairn_fx::eq::ThreeBandEq>(3, "Three-band EQ"));
-        eq.modes.push_back(mode<oscairn_fx::eq::MasterEq>(4, "Master EQ"));
+        eq.modes.push_back(mode<oscairn_fx::eq::FiveBandEq>(1, "Five-band EQ", true));
+        eq.modes.push_back(mode<oscairn_fx::eq::TwoBandEq>(2, "Two-band EQ", true));
+        eq.modes.push_back(mode<oscairn_fx::eq::ThreeBandEq>(3, "Three-band EQ", true));
+        eq.modes.push_back(mode<oscairn_fx::eq::MasterEq>(4, "Master EQ", true));
         eq.finish();
         c.push_back(std::move(eq));
 
@@ -277,12 +281,12 @@ const std::vector<Category> &categories()
                        {},
                        1,
                        {}};
-        delay.modes.push_back(mode<oscairn_fx::delay::TempoCrossDelay>(1, "Tempo Cross Delay"));
-        delay.modes.push_back(mode<oscairn_fx::delay::CrossDelay>(2, "Cross Delay"));
-        delay.modes.push_back(mode<oscairn_fx::delay::TempoStereoDelay>(3, "Tempo Stereo Delay"));
-        delay.modes.push_back(mode<oscairn_fx::delay::LRDelay>(4, "L/R Delay"));
-        delay.modes.push_back(mode<oscairn_fx::delay::LcrDelay>(5, "L/C/R Delay"));
-        delay.modes.push_back(mode<oscairn_fx::delay::TempoMonoDelay>(6, "Tempo Mono Delay"));
+        delay.modes.push_back(mode<oscairn_fx::delay::TempoCrossDelay>(1, "Tempo Cross Delay", true));
+        delay.modes.push_back(mode<oscairn_fx::delay::CrossDelay>(2, "Cross Delay", true));
+        delay.modes.push_back(mode<oscairn_fx::delay::TempoStereoDelay>(3, "Tempo Stereo Delay", true));
+        delay.modes.push_back(mode<oscairn_fx::delay::LRDelay>(4, "L/R Delay", true));
+        delay.modes.push_back(mode<oscairn_fx::delay::LcrDelay>(5, "L/C/R Delay", true));
+        delay.modes.push_back(mode<oscairn_fx::delay::TempoMonoDelay>(6, "Tempo Mono Delay", true));
         delay.finish();
         c.push_back(std::move(delay));
 
@@ -292,8 +296,8 @@ const std::vector<Category> &categories()
                           {},
                           1,
                           {}};
-        dynamics.modes.push_back(mode<oscairn_fx::dynamics::CircuitCompressor>(1, "Circuit Compressor"));
-        dynamics.modes.push_back(mode<oscairn_fx::dynamics::CompressorA>(2, "Compressor A"));
+        dynamics.modes.push_back(mode<oscairn_fx::dynamics::CircuitCompressor>(1, "Circuit Compressor", true));
+        dynamics.modes.push_back(mode<oscairn_fx::dynamics::CompressorA>(2, "Compressor A", true));
         dynamics.finish();
         c.push_back(std::move(dynamics));
 
@@ -428,8 +432,10 @@ void loadValues(Context &s, Effect &fx)
 
 std::unique_ptr<Effect> build(Context &s, uint32_t modeId)
 {
-    auto fx = s.cat.modes[s.cat.modeIndex(modeId)].make(s.engine->sampleRate, &s.engine->worker, &s.offline);
+    const Mode &m = s.cat.modes[s.cat.modeIndex(modeId)];
+    auto fx = m.make(s.engine->sampleRate, &s.engine->worker, &s.offline);
     fx->mode = modeId;
+    fx->skipsAsleep = m.skipsAsleep;
     loadValues(s, *fx);
     fx->initialize();
     return fx;
@@ -525,6 +531,15 @@ void runBlock(Context &s)
     s.tail.store(s.quietBlocks < s.quietLimit, std::memory_order_relaxed);
 }
 
+// The effect may skip silence (it runs no free modulation), its tail is over, it has seen every
+// change, no new mode waits to be swapped in and no input waits in the block buffer.
+bool asleep(const Context &s)
+{
+    return s.fx->skipsAsleep && !s.tail.load(std::memory_order_relaxed) && s.fx.get() == s.loadedFx &&
+           s.valuesVersion.load(std::memory_order_acquire) == s.loadedVersion &&
+           !s.pending.load(std::memory_order_acquire) && !sound(s.inL, s.inR, s.pos);
+}
+
 clap_process_status process(const clap_plugin_t *plugin, const clap_process_t *pr)
 {
     auto &s = self(plugin);
@@ -540,6 +555,14 @@ clap_process_status process(const clap_plugin_t *plugin, const clap_process_t *p
     float *outL = pr->audio_outputs[0].data32[0];
     float *outR = pr->audio_outputs[0].data32[1];
     const uint32_t count = pr->in_events ? pr->in_events->size(pr->in_events) : 0;
+    // Asleep and nothing coming in: a host honouring CLAP_PROCESS_SLEEP would not make this
+    // call, so it plays silence and changes nothing.
+    if (count == 0 && asleep(s) && !(inL && inR && sound(inL, inR, pr->frames_count)))
+    {
+        std::fill_n(outL, pr->frames_count, 0.f);
+        std::fill_n(outR, pr->frames_count, 0.f);
+        return CLAP_PROCESS_SLEEP;
+    }
     uint32_t event = 0;
     bool silentIn = true;
     // A run of frames up to the end of the inner block at a time: the events up to its last frame
