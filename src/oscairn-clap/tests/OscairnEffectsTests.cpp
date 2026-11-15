@@ -3733,6 +3733,121 @@ TEST_CASE("Circuit compressor keeps its 44.1 kHz gain at 48, 88.2, 96 and 192 kH
     }
 }
 
+namespace
+{
+// Compressor A's settings: attack ms, release ms, threshold dB, ratio, output level dB.
+struct CompA
+{
+    double attack, release, threshold, ratio, output;
+};
+// A sine at amplitude 0.3 for half a second, then 0.03 (20 dB down), on both channels or the left
+// only, through Compressor A; returns the left output.
+std::vector<float> compARender(double rate, CompA c, double hz, bool leftOnly, double seconds = 1)
+{
+    Plugin pl(dynamicsId);
+    pl.set(1, 2);
+    auto set = [&](const char *n, double v) { pl.set(paramIdByName(pl.p, "Compressor A", n), v); };
+    set("Attack", c.attack), set("Release", c.release), set("Threshold", c.threshold), set("Ratio", c.ratio), set("Output Level", c.output);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + oscairn_fx::latencySamples;
+    std::vector<float> l(n, 0), r(n, 0), outR;
+    for (size_t i = 0; i < (size_t)rate; ++i)
+    {
+        const double t = i / rate;
+        l[i] = (float)((t < 0.5 ? 0.3 : 0.03) * std::sin(2 * M_PI * hz * t));
+        r[i] = leftOnly ? 0.f : l[i];
+    }
+    auto o = pl.render(l, r, outR, {64}, {}, false);
+    o.erase(o.begin(), o.begin() + oscairn_fx::latencySamples);
+    REQUIRE(pl.last != CLAP_PROCESS_ERROR);
+    return o;
+}
+// Gain (dB) of the left output against the input over [t0, t1) s.
+double compAGain(const std::vector<float> &y, double rate, double hz, double t0, double t1)
+{
+    double ey = 0, ex = 0;
+    for (size_t i = (size_t)(t0 * rate); i < (size_t)(t1 * rate); ++i)
+    {
+        const double t = i / rate, x = (float)((t < 0.5 ? 0.3 : 0.03) * std::sin(2 * M_PI * hz * t));
+        ey += (double)y[i] * y[i], ex += x * x;
+    }
+    return 10 * std::log10(ey / ex);
+}
+const double compAWindows[6][2] = {{0, 0.003}, {0.003, 0.01}, {0.05, 0.5}, {0.502, 0.505}, {0.52, 0.55}, {0.8, 1}};
+} // namespace
+
+TEST_CASE("Compressor A: the reference program's gains at 44.1 kHz")
+{
+    // Expected gains from the reference program's structure and words (plan, section 15), which
+    // null against reference renders within -127 dB; each case leans on some of its laws: the
+    // insertion level, the threshold and output words and the gain table (steady windows), the
+    // attack smoother (onset windows), the two release followers (after the step), the detector's
+    // link (left only), the 20 Hz high-pass (a 20 Hz sine at ratio 1). Within 0.01 dB.
+    const double out101 = 40 * std::log10(101 / 127.0);
+    struct Case
+    {
+        const char *name;
+        CompA c;
+        double hz;
+        bool leftOnly;
+        double gains[6];
+    };
+    for (auto &k : std::vector<Case>{
+             {"defaults", {8, 85, -30, 3, out101}, 1000, false, {6.8088, 3.1994, -5.7926, -5.6306, -4.6793, 7.5661}},
+             {"defaults, left only", {8, 85, -30, 3, out101}, 1000, true, {7.0061, 4.0953, -1.7792, -1.6164, -0.6578, 7.9660}},
+             {"slow", {40, 680, -40, 20, 0}, 1000, false, {11.2566, 10.2076, -10.6783, -17.4256, -17.5698, -15.0508}},
+             {"fast", {1, 10, -12, 1.5, 40 * std::log10(80 / 127.0)}, 1000, false, {3.4760, 3.1456, 3.1654, 3.7052, 3.9990, 3.9975}},
+             {"ratio 1 at 20 Hz", {8, 85, -30, 1, 0}, 20, false, {10.7532, 7.9531, 8.9013, 30.3171, 7.6924, 8.9016}},
+             {"ratio 10 at 220 Hz", {4, 55, -24, 10, 40 * std::log10(90 / 127.0)}, 220, false, {3.9645, -1.0348, -7.1130, -9.3988, -3.2580, 6.0224}}})
+    {
+        auto y = compARender(44100, k.c, k.hz, k.leftOnly);
+        for (int w = 0; w < 6; ++w)
+        {
+            const double g = compAGain(y, 44100, k.hz, compAWindows[w][0], compAWindows[w][1]);
+            INFO(k.name << ", window " << compAWindows[w][0] << " s: " << g << " dB, expected " << k.gains[w]);
+            REQUIRE(std::abs(g - k.gains[w]) < 0.01);
+        }
+    }
+}
+
+TEST_CASE("Compressor A keeps its 44.1 kHz gains at 48 and 96 kHz")
+{
+    // 5 ms windows over the step, compressing, within 0.1 dB of the 44.1 kHz render's (proposed);
+    // the words' poles keep their time constants, the high-pass its corner.
+    for (auto c : std::vector<CompA>{{8, 85, -30, 3, 0}, {1, 10, -40, 20, -6}, {40, 680, -24, 5, 0}})
+    {
+        auto ref = compARender(44100, c, 1000, false);
+        for (double rate : {48000.0, 96000.0})
+        {
+            auto got = compARender(rate, c, 1000, false);
+            double worst = 0;
+            for (double t = 0.01; t < 0.99; t += 0.005)
+                worst = std::max(worst, std::abs(compAGain(got, rate, 1000, t, t + 0.005) - compAGain(ref, 44100, 1000, t, t + 0.005)));
+            std::printf("Compressor A at %.0f Hz, attack %g release %g: worst %.3f dB\n", rate, c.attack, c.release, worst);
+            REQUIRE(worst < 0.1);
+        }
+    }
+}
+
+TEST_CASE("Compressor A: fed silence, the output is exact silence and the plugin sleeps")
+{
+    Plugin pl(dynamicsId);
+    pl.set(1, 2);
+    pl.activate(44100);
+    const size_t n = 44100 * 3;
+    std::vector<float> l(n, 0), r;
+    for (size_t i = 0; i < 44100 / 2; ++i)
+        l[i] = (float)(0.5 * std::sin(i * 0.05));
+    auto o = pl.render(l, l, r, {64}, {}, false);
+    size_t last = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (o[i] != 0 || r[i] != 0)
+            last = i;
+    INFO("last non-zero sample at " << last / 44100.0 << " s");
+    REQUIRE(last < 44100);
+    REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
+}
+
 TEST_CASE("Hall A changes high ratio and reverb time without clicks")
 {
     // Every gain and filter coefficient ramps over 2 ms to its new value. The click is the
@@ -5514,6 +5629,9 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.dynamics 1 44100", 0xce455b077d220249},
         {"org.oscairn.effects.dynamics 1 48000", 0xad1f6bf74586041b},
         {"org.oscairn.effects.dynamics 1 96000", 0x95068277e72a9cd7},
+        {"org.oscairn.effects.dynamics 2 44100", 0x703db2a5206c0e7},
+        {"org.oscairn.effects.dynamics 2 48000", 0x2e292c631ce52df3},
+        {"org.oscairn.effects.dynamics 2 96000", 0x47672e4744efa83a},
         {"org.oscairn.effects.eq 1 44100", 0x2d203d9e96799ef5},
         {"org.oscairn.effects.eq 2 44100", 0x149ceefe0a2c8ce1},
         {"org.oscairn.effects.eq 2 48000", 0x5ef730452e36d213},

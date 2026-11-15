@@ -33,6 +33,7 @@
 #include "effects/TempoMonoDelay.h"
 #include "effects/HallReverb.h"
 #include "effects/CircuitCompressor.h"
+#include "effects/CompressorA.h"
 #include "effects/RotarySpeaker.h"
 #include "effects/AutoPan.h"
 #include "effects/Tremolo.h"
@@ -292,6 +293,7 @@ const std::vector<Category> &categories()
                           1,
                           {}};
         dynamics.modes.push_back(mode<oscairn_fx::dynamics::CircuitCompressor>(1, "Circuit Compressor"));
+        dynamics.modes.push_back(mode<oscairn_fx::dynamics::CompressorA>(2, "Compressor A"));
         dynamics.finish();
         c.push_back(std::move(dynamics));
 
