@@ -2,11 +2,13 @@
  * The per-block cost of one Oscairn effects plugin mode, for counting instructions on the device's
  * CPU (doc/oscairn-plan.md, section 15, "Cost"). GPL-3.0-or-later, see ../OscairnEffects.cpp.
  *
- *   oscairn-effects-cost <plugin-id> <rate> <blocks> <signal|silence> ["Module/Name=value" ...]
+ *   oscairn-effects-cost <plugin-id> <rate> <blocks> <signal|low|full|silence> ["Module/Name=value" ...]
  *
  * Activates the plugin at <rate> with 128-frame blocks, runs one second to warm up, then <blocks>
  * blocks inside cost_run(), which a counter (scripts/cost-a53.sh: callgrind) measures alone. The
- * signal is deterministic noise at -12 dBFS; silence is zeros, after the warm-up's tail has ended.
+ * signal is deterministic noise peaking at -12 dBFS (low: -48 dBFS, full: 0 dBFS); silence is
+ * zeros, after the warm-up's tail has ended. With OSCAIRN_COST_COLD set, the caches are flushed by
+ * a 4 MB write before each block, so a cache simulator's misses count the lines a block touches.
  */
 #include "OscairnEffects.h"
 
@@ -27,14 +29,14 @@ struct Host
     const clap_plugin_t *p;
     std::vector<float> l, r, ol, orr;
     uint32_t seed{1};
-    bool noise{true};
+    double gain{0.5}; // 0: silence
     void block()
     {
         for (uint32_t i = 0; i < frames; ++i)
         {
             seed = seed * 1664525u + 1013904223u;
-            l[i] = noise ? (float)(((double)seed / 4294967296.0 - 0.5) * 0.5) : 0.f;
-            r[i] = noise ? -l[i] : 0.f;
+            l[i] = gain ? (float)(((double)seed / 4294967296.0 - 0.5) * gain) : 0.f;
+            r[i] = gain ? -l[i] : 0.f;
         }
         float *ins[2] = {l.data(), r.data()}, *outs[2] = {ol.data(), orr.data()};
         clap_audio_buffer_t ib{ins, nullptr, 2, 0, 0}, ob{outs, nullptr, 2, 0, 0};
@@ -113,14 +115,34 @@ int main(int argc, char **argv)
     if (!p->activate(p, rate, frames, frames) || !p->start_processing(p))
         return 1;
     Host h{p, std::vector<float>(frames), std::vector<float>(frames), std::vector<float>(frames), std::vector<float>(frames)};
+    const std::string sig = argv[4];
+    if (sig == "low")
+        h.gain = 0.5 / 64;
+    else if (sig == "full")
+        h.gain = 2;
     const int warm = (int)std::ceil(rate / frames);
     for (int b = 0; b < warm; ++b)
         h.block();
-    h.noise = std::string(argv[4]) != "silence";
-    if (!h.noise) // let the tail end first
+    if (sig == "silence") // let the tail end first
+    {
+        h.gain = 0;
         for (int b = 0; b < 30 * warm; ++b)
             h.block();
-    cost_run(&h, std::atoi(argv[3]));
+    }
+    const int blocks = std::atoi(argv[3]);
+    if (std::getenv("OSCAIRN_COST_COLD"))
+    {
+        std::vector<char> flush(4 << 20);
+        volatile char *f = flush.data(); // the writes must happen
+        for (int b = 0; b < blocks; ++b)
+        {
+            for (size_t i = 0; i < flush.size(); i += 64)
+                f[i] = (char)b;
+            cost_run(&h, 1);
+        }
+    }
+    else
+        cost_run(&h, blocks);
     p->stop_processing(p);
     p->deactivate(p);
     p->destroy(p);
