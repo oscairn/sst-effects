@@ -32,6 +32,7 @@
 #include "effects/LcrDelay.h"
 #include "effects/TempoMonoDelay.h"
 #include "effects/HallReverb.h"
+#include "effects/TankReverb.h"
 #include "effects/CircuitCompressor.h"
 #include "effects/CompressorA.h"
 #include "effects/RotarySpeaker.h"
@@ -259,6 +260,9 @@ const std::vector<Category> &categories()
         reverb.modes.push_back(mode<sst::effects::reverb1::Reverb1>(1, "Reverb 1", true));
         reverb.modes.push_back(mode<sst::effects::reverb2::Reverb2>(2, "Reverb 2"));
         reverb.modes.push_back(mode<oscairn_fx::hall::HallReverb>(3, "Hall A", true));
+        reverb.modes.push_back(mode<oscairn_fx::tank::HallB>(4, "Hall B", true));
+        reverb.modes.push_back(mode<oscairn_fx::tank::StageA>(5, "Stage A", true));
+        reverb.modes.push_back(mode<oscairn_fx::tank::HallC>(6, "Hall C", true));
         reverb.finish();
         c.push_back(std::move(reverb));
 

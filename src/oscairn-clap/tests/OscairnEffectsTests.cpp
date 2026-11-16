@@ -5679,6 +5679,16 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.reverb 2 48000", 0x415bff4c4fc6500d},
         {"org.oscairn.effects.reverb 2 96000", 0x196057368889aef7},
         {"org.oscairn.effects.tremolo-rotary 2 96000", 0x606b1f945a7e2333},
+        // the tank reverbs, taken from one Release build only
+        {"org.oscairn.effects.reverb 4 44100", 0x2eb39ab398658b2b},
+        {"org.oscairn.effects.reverb 4 48000", 0xcaaa90f8b2b307d2},
+        {"org.oscairn.effects.reverb 4 96000", 0x3bb6a31c5ec0b95b},
+        {"org.oscairn.effects.reverb 5 44100", 0x92579a1546eb2e1d},
+        {"org.oscairn.effects.reverb 5 48000", 0xfb2d039cdf3c9880},
+        {"org.oscairn.effects.reverb 5 96000", 0xbdde2b9df1882c20},
+        {"org.oscairn.effects.reverb 6 44100", 0x3f0c9fd969cfcc7f},
+        {"org.oscairn.effects.reverb 6 48000", 0x3dee03b24fc3a9b4},
+        {"org.oscairn.effects.reverb 6 96000", 0xb389517cc295d831},
     });
 #elif defined(__aarch64__) && defined(__linux__)
     // With GCC the rate-matched EQ fits (the EQ modes at 48 and 96 kHz, and the chorus, delay and
@@ -5687,7 +5697,10 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
     for (const char *k : {"chorus 1 96000", "chorus 2 96000", "chorus 4 96000", "chorus 5 96000", "delay 1 96000",
                           "delay 2 96000", "delay 3 96000", "delay 4 96000", "delay 5 96000", "delay 6 96000",
                           "eq 1 48000", "eq 1 96000", "eq 2 96000", "eq 3 48000", "eq 3 96000", "eq 4 48000",
-                          "eq 4 96000", "tremolo-rotary 2 96000"})
+                          "eq 4 96000", "tremolo-rotary 2 96000",
+                          // the tank reverbs: not yet taken on Linux
+                          "reverb 4 44100", "reverb 4 48000", "reverb 4 96000", "reverb 5 44100", "reverb 5 48000",
+                          "reverb 5 96000", "reverb 6 44100", "reverb 6 48000", "reverb 6 96000"})
         runToRun.insert(std::string("org.oscairn.effects.") + k);
     expected.insert({
         {"org.oscairn.effects.reverb 1 44100", 0xcc98b587b279b35b},
@@ -6001,5 +6014,372 @@ TEST_CASE("Asleep, silent calls play silence and change nothing, as if the host 
         std::vector<float> keptR, skippedR;
         REQUIRE(kept.render(later, laterR, keptR, {128}) == skipped.render(later, laterR, skippedR, {128}));
         REQUIRE(keptR == skippedR);
+    }
+}
+
+#include "effects/TankReverb.h"
+namespace
+{
+struct TankMode
+{
+    int id;
+    const char *name;
+    const oscairn_fx::tank::Fit *fit;
+};
+const TankMode tankModes[] = {{4, "Hall B", &oscairn_fx::tank::hallB}, {5, "Stage A", &oscairn_fx::tank::stageA}, {6, "Hall C", &oscairn_fx::tank::hallC}};
+void tankSet(Plugin &pl, const TankMode &m, const std::vector<std::pair<const char *, double>> &set)
+{
+    pl.set(1, m.id);
+    for (auto [n, v] : set)
+        pl.set(paramIdByName(pl.p, m.name, n), v);
+}
+// A tank mode's response to an impulse in the left input and, unless leftOnly, the right; latency removed.
+std::pair<std::vector<float>, std::vector<float>> tankImpulse(const TankMode &m, double rate,
+                                                              const std::vector<std::pair<const char *, double>> &set,
+                                                              double seconds, bool leftOnly = false)
+{
+    Plugin pl(reverbId);
+    tankSet(pl, m, set);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + oscairn_fx::latencySamples;
+    std::vector<float> l(n, 0), r(n, 0), outR;
+    l[0] = 1;
+    if (!leftOnly)
+        r[0] = 1;
+    auto outL = pl.render(l, r, outR, {64}, {}, false);
+    outL.erase(outL.begin(), outL.begin() + oscairn_fx::latencySamples);
+    outR.erase(outR.begin(), outR.begin() + oscairn_fx::latencySamples);
+    return {outL, outR};
+}
+} // namespace
+
+TEST_CASE("Tank reverbs: state round-trips, and every parameter's value text parses back")
+{
+    for (auto &m : tankModes)
+    {
+        INFO(m.name);
+        Plugin a(reverbId);
+        a.set(1, m.id);
+        auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+        int count = 0;
+        for (uint32_t i = 1; i < params->count(a.p); ++i)
+        {
+            clap_param_info_t info;
+            REQUIRE(params->get_info(a.p, i, &info));
+            if ((info.id >> 8) != (clap_id)m.id)
+                continue;
+            ++count;
+            REQUIRE(std::string(info.module) == m.name);
+            for (double t : {0., .25, .5, .75, 1.})
+            {
+                double v = info.min_value + t * (info.max_value - info.min_value);
+                if (info.flags & CLAP_PARAM_IS_STEPPED)
+                    v = std::round(v);
+                char text[256], again[256];
+                REQUIRE(params->value_to_text(a.p, info.id, v, text, sizeof(text)));
+                double back = NAN;
+                INFO(info.name << " at " << v << ": \"" << text << "\"");
+                REQUIRE(params->text_to_value(a.p, info.id, text, &back));
+                if (info.flags & CLAP_PARAM_IS_STEPPED)
+                    REQUIRE(back == v);
+                REQUIRE(params->value_to_text(a.p, info.id, back, again, sizeof(again)));
+                REQUIRE(!std::strcmp(text, again));
+            }
+            a.set(info.id, info.min_value + 0.3 * (info.max_value - info.min_value));
+        }
+        REQUIRE(count == 9);
+        Buffer buf;
+        REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+        Plugin b(reverbId);
+        REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+        Buffer again;
+        REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+        REQUIRE(again.data == buf.data);
+        std::vector<float> inL, inR, ra, rb;
+        signal(24000, inL, inR);
+        a.activate();
+        b.activate();
+        REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+    }
+}
+
+TEST_CASE("Tank reverbs: output does not depend on the host's block size")
+{
+    for (auto &m : tankModes)
+    {
+        INFO(m.name);
+        std::vector<float> inL, inR, r, r0, ref;
+        signal(48000, inL, inR);
+        Plugin probe(reverbId);
+        tankSet(probe, m, {});
+        const std::vector<Event> events{{10007, paramIdByName(probe.p, m.name, "Reverb Time"), 5.0},
+                                        {20011, paramIdByName(probe.p, m.name, "High Damp"), 0.3},
+                                        {30001, paramIdByName(probe.p, m.name, "Reverb Delay"), 40.0}};
+        for (auto blocks : std::vector<std::vector<uint32_t>>{{512}, {1}, {37}, {7, 300, 64, 1}})
+        {
+            Plugin pl(reverbId);
+            tankSet(pl, m, {});
+            pl.activate();
+            auto out = pl.render(inL, inR, r, blocks, events);
+            if (ref.empty())
+            {
+                ref = out;
+                r0 = r;
+                continue;
+            }
+            REQUIRE(out == ref);
+            REQUIRE(r == r0);
+        }
+    }
+}
+
+TEST_CASE("Tank reverbs: silence in gives silence out, the tail ends and the plugin sleeps")
+{
+    for (auto &m : tankModes)
+    {
+        INFO(m.name);
+        auto ctxOf = [](Plugin &pl) { return ext<oscairn_plugin_effect_contexts_t>(pl.p, OSCAIRN_EXT_EFFECT_CONTEXTS); };
+        oscairn_effect_resources_t res;
+        {
+            Plugin pl(reverbId);
+            tankSet(pl, m, {});
+            pl.activate();
+            std::vector<float> z(48000, 0), r;
+            auto out = pl.render(z, z, r, {128});
+            for (size_t i = 0; i < out.size(); ++i)
+                REQUIRE((out[i] == 0 && r[i] == 0));
+            REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
+        }
+        // the longest settings: the tail still ends (below -140 dBFS for 100 ms; at 30 s and a low end
+        // decaying up to twice as long, that takes over two minutes), and then the output is exact silence
+        Plugin pl(reverbId);
+        tankSet(pl, m, {{"Reverb Time", 30}, {"High Damp", 1}, {"Initial Delay", 200}, {"Reverb Delay", 200}});
+        pl.activate();
+        std::vector<float> inL, inR, r;
+        signal(4800, inL, inR);
+        pl.render(inL, inR, r, {480});
+        ctxOf(pl)->resources(pl.p, &res);
+        REQUIRE(res.tail_active);
+        std::vector<float> rest((size_t)48000 * 300, 0);
+        auto out = pl.render(rest, rest, r, {480});
+        ctxOf(pl)->resources(pl.p, &res);
+        REQUIRE_FALSE(res.tail_active);
+        REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
+        for (size_t i = out.size() - 48000; i < out.size(); ++i)
+            REQUIRE((out[i] == 0 && r[i] == 0));
+    }
+}
+
+TEST_CASE("Tank reverbs: bounded output at extreme settings")
+{
+    // Full-scale noise for a second into each mode at the ends of every range; the output must stay
+    // finite and below 16 (a 30 s reverb holding a second of full-scale noise rises well over full
+    // scale; the bound is proposed, set after seeing 6.7), and fall once the input stops: no
+    // frequency gains in the loop.
+    for (auto &m : tankModes)
+        for (int c = 0; c < 4; ++c)
+        {
+            const bool hi = c & 1, lowFilters = c & 2;
+            std::vector<std::pair<const char *, double>> set{{"Reverb Time", hi ? 30 : 0.3}, {"Diffusion", hi ? 10 : 0},
+                {"Initial Delay", hi ? 200 : 0.1}, {"Reverb Delay", hi ? 200 : 0.1}, {"Density", hi ? 4 : 0},
+                {"ER/Rev Balance", hi ? 63 : -63}, {"High Damp", hi ? 1 : 0.1}, {"HPF Cutoff", lowFilters ? 20 : 8000},
+                {"LPF Cutoff", lowFilters ? 1000 : 20000}};
+            Plugin pl(reverbId);
+            tankSet(pl, m, set);
+            pl.activate(44100);
+            const size_t n = 44100 * 6;
+            std::vector<float> l(n, 0), r(n, 0), outR;
+            uint32_t x = 99;
+            for (size_t i = 0; i < 44100; ++i)
+            {
+                x = x * 1664525u + 1013904223u;
+                l[i] = ((x >> 8) / 8388608.f) - 1;
+                r[i] = (float)(i % 2 ? 1 : -1);
+            }
+            auto out = pl.render(l, r, outR, {256}, {}, false);
+            double peak = 0, e1 = 0, e5 = 0; // energy in the second and in the sixth second
+            for (size_t i = 0; i < n; ++i)
+            {
+                REQUIRE((std::isfinite(out[i]) && std::isfinite(outR[i])));
+                peak = std::max({peak, (double)std::abs(out[i]), (double)std::abs(outR[i])});
+                const double e = (double)out[i] * out[i] + (double)outR[i] * outR[i];
+                if (i >= 44100 && i < 2 * 44100)
+                    e1 += e;
+                else if (i >= 5 * 44100)
+                    e5 += e;
+            }
+            INFO(m.name << " case " << c << " peak " << peak << " second 2 " << e1 << " second 6 " << e5);
+            REQUIRE(peak < 16);
+            REQUIRE(e5 <= e1);
+        }
+}
+
+TEST_CASE("Tank reverbs: the decay at 1 kHz follows the reverb time, at 8 kHz the high damp's share")
+{
+    // The reverb time law: the decay at 1 kHz is reverb time x the mode's time scale (fitted to the
+    // reference), within 10% (the M3 gate) from 2 to 16 s; the high damp sets the decay at 8 kHz to
+    // (dampA + dampB x high damp) of the decay at 1 kHz, within 0.12 (proposed; this band filter, wider
+    // than the fitting analysis's octave filter, reads 0.02 to 0.10 above the law, the fitting
+    // analysis within 0.04). Impulse responses,
+    // filters open, ER/Rev balance all tank. At 1 s the first, undamped pass through the tank holds
+    // most of the -5 to -25 dB range, so the 8 kHz share is not met there (printed, not gated).
+    using oscairn_fx::hall::bandHz;
+    for (auto &m : tankModes)
+        for (double t : {1.0, 2.0, 4.0, 8.0, 16.0})
+            for (double hd : {1.0, 0.6})
+            {
+                auto [l, r] = tankImpulse(m, 44100, {{"Reverb Time", t}, {"High Damp", hd}, {"HPF Cutoff", 20}, {"LPF Cutoff", 20000},
+                                                     {"ER/Rev Balance", 63}}, 2.2 * t + 1);
+                const double t1 = 0.5 * (bandDecay(l, 44100, 1000) + bandDecay(r, 44100, 1000));
+                const double t8 = 0.5 * (bandDecay(l, 44100, 8000) + bandDecay(r, 44100, 8000));
+                const double want = t * m.fit->timeScale, ratio = std::min(1.0, m.fit->dampA + m.fit->dampB * hd);
+                std::printf("%s reverb time %.0f s, high damp %.1f: 1 kHz %.3f s (law %.3f), 8 kHz / 1 kHz %.3f (law %.3f)\n", m.name, t,
+                            hd, t1, want, t8 / t1, ratio);
+                INFO(m.name << " time " << t << " high damp " << hd);
+                if (t < 2)
+                    continue;
+                CHECK(std::abs(t1 / want - 1) < 0.1);
+                CHECK(std::abs(t8 / t1 - ratio) < 0.12);
+            }
+}
+
+TEST_CASE("Tank reverbs: reflections at the initial delay, the tank at initial delay + reverb delay")
+{
+    // The first sound of each side is its first reflection (the mode's offset after the initial
+    // delay); fed the left input only, the other side's first sound is the tank's, at initial delay
+    // + reverb delay + the mode's offset (Hall B and Stage A: their right reflections read the right
+    // input only). Within a sample at 44.1 kHz.
+    for (auto &m : tankModes)
+        for (auto [id, rd] : std::vector<std::pair<double, double>>{{12.7, 0.1}, {25.3, 4.8}, {45.7, 70.9}, {200, 200}})
+        {
+            INFO(m.name << " initial delay " << id << " reverb delay " << rd);
+            const auto &f = *m.fit;
+            auto [l, r] = tankImpulse(m, 44100, {{"Initial Delay", id}, {"Reverb Delay", rd}, {"HPF Cutoff", 20}}, 0.7);
+            const double tank = (id + rd + f.feedMs) / 1000;
+            REQUIRE(std::abs(firstAbove(l, 44100, 1e-9f) - std::min((id + f.erMs[0][0]) / 1000, tank)) <= 1.5 / 44100);
+            REQUIRE(std::abs(firstAbove(r, 44100, 1e-9f) - std::min((id + f.erMs[1][0]) / 1000, tank)) <= 1.5 / 44100);
+            auto [l1, r1] = tankImpulse(m, 44100, {{"Initial Delay", id}, {"Reverb Delay", rd}, {"HPF Cutoff", 20}}, 0.7, true);
+            REQUIRE(std::abs(firstAbove(r1, 44100, 1e-9f) - tank) <= 1.5 / 44100);
+        }
+}
+
+TEST_CASE("Tank reverbs keep their 44.1 kHz decay, onset and level at 48, 88.2, 96 and 192 kHz")
+{
+    // Decision 13, with Hall A's tolerances: per octave band (250 Hz to 8 kHz) the decay within 5%
+    // of the 44.1 kHz render's, the energy within 1.5 dB, the onset within 0.1 ms.
+    using oscairn_fx::hall::bandHz;
+    using oscairn_fx::hall::bands;
+    for (auto &m : tankModes)
+        for (auto set : std::vector<std::vector<std::pair<const char *, double>>>{{}, {{"Reverb Time", 6.0}, {"High Damp", 0.4}, {"LPF Cutoff", 3000}}})
+        {
+            const double secs = set.empty() ? 6 : 14;
+            auto ref = tankImpulse(m, 44100, set, secs).first;
+            for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
+            {
+                auto got = tankImpulse(m, rate, set, secs).first;
+                INFO(m.name << " rate " << rate << " setting " << set.size());
+                REQUIRE(std::abs(firstAbove(got, rate) - firstAbove(ref, 44100)) < 1e-4);
+                std::printf("%s at %.0f Hz, setting %zu, band: decay, energy:", m.name, rate, set.size());
+                for (int b = 1; b < bands; ++b)
+                {
+                    double ea = 0, ec = 0;
+                    const double a = bandDecay(ref, 44100, bandHz[b], &ea), c = bandDecay(got, rate, bandHz[b], &ec);
+                    const double de = 10 * std::log10(ec * rate / ea / 44100);
+                    std::printf(" %.0f: %+.1f%% %+.2f dB", bandHz[b], 100 * (c / a - 1), de);
+                    CHECK(std::abs(c / a - 1) < 0.05);
+                    CHECK(std::abs(de) < 1.5);
+                }
+                std::printf("\n");
+            }
+        }
+}
+
+TEST_CASE("Tank reverbs change reverb time and high damp without clicks, and stay cheap doing it")
+{
+    // As Hall A's: every gain and coefficient ramps (here over 5 ms), so the largest output above 8 kHz in
+    // the 50 ms after a change, for a 220 Hz + 1 kHz input, stays below -60 dBFS, or adds under 1 dB
+    // to the same render's without the change (at 30 s the tank plays near 0 dBFS and the 1 kHz
+    // tone through the 8 kHz high-pass alone reads -57 dBFS in Hall C; proposed); and a sweep at
+    // 192 kHz with a change every 64-sample block keeps the worst call (fastest of three runs per
+    // block) under a quarter of the block (unsanitized builds).
+    struct Change
+    {
+        const char *name;
+        double from, to;
+    };
+    for (auto &m : tankModes)
+    {
+        for (auto c : {Change{"High Damp", 1.0, 0.1}, Change{"High Damp", 0.1, 1.0}, Change{"Reverb Time", 30, 0.3}})
+            for (double rate : {44100.0, 192000.0})
+            {
+                const size_t n = (size_t)(rate * 1.6), at = (size_t)(rate * 1.5) + 7;
+                std::vector<float> in(n);
+                for (size_t i = 0; i < n; ++i)
+                    in[i] = 0.25f * (float)(std::sin(2 * M_PI * 220 * i / rate) + std::sin(2 * M_PI * 1000 * i / rate));
+                // the largest output above 8 kHz (fourth-order high-pass) in the 50 ms after `at`, in dBFS
+                auto peakDb = [&](bool change) {
+                    Plugin pl(reverbId);
+                    tankSet(pl, m, {{"LPF Cutoff", 20000}, {c.name, c.from}});
+                    setOffline(pl);
+                    pl.activate(rate);
+                    std::vector<Event> ev;
+                    if (change)
+                        ev.push_back({(uint32_t)at, paramIdByName(pl.p, m.name, c.name), c.to});
+                    std::vector<float> r;
+                    auto out = pl.render(in, in, r, {64}, ev, false);
+                    double peak = 0, z[2][2]{};
+                    const double K = std::tan(M_PI * 8000 / rate);
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        double x = out[i];
+                        for (int s = 0; s < 2; ++s)
+                        {
+                            const double q = s ? 1.3065630 : 0.5411961, norm = 1 / (1 + K / q + K * K);
+                            const double b0 = norm, b1 = -2 * norm, a1 = 2 * (K * K - 1) * norm, a2 = (1 - K / q + K * K) * norm;
+                            const double y = b0 * x + z[s][0];
+                            z[s][0] = b1 * x - a1 * y + z[s][1];
+                            z[s][1] = b0 * x - a2 * y;
+                            x = y;
+                        }
+                        if (i >= at && i < at + (size_t)(0.05 * rate))
+                            peak = std::max(peak, std::abs(x));
+                    }
+                    return 20 * std::log10(peak + 1e-12);
+                };
+                const double db = peakDb(true), still = peakDb(false);
+                std::printf("%s click, %s %.1f to %.1f at %.0f Hz: %.1f dBFS (without the change %.1f dBFS)\n", m.name, c.name, c.from,
+                            c.to, rate, db, still);
+                CHECK((db < -60 || db < still + 1));
+            }
+        const double rate = 192000;
+        const uint32_t frames = 64;
+        auto tone = [rate](size_t i) { return 0.25f * (float)std::sin(2 * M_PI * 440.0 * (double)i / rate); };
+        for (const char *name : {"Reverb Time", "High Damp"})
+        {
+            std::vector<double> best;
+            for (int run = 0; run < 3; ++run)
+            {
+                Plugin pl(reverbId);
+                tankSet(pl, m, {});
+                pl.activate(rate);
+                const clap_id id = paramIdByName(pl.p, m.name, name);
+                Driver d(pl, frames);
+                size_t at = 0;
+                for (int k = 0; k < 20; ++k, at += frames)
+                    d.block(at, tone);
+                d.callUs.clear();
+                for (int k = 0; k <= 300; ++k, at += frames)
+                    d.block(at, tone, id, !std::strcmp(name, "High Damp") ? 0.1 + 0.1 * (k % 10) : 0.3 + 29.7 * k / 300.0);
+                if (best.empty())
+                    best = d.callUs;
+                for (size_t i = 0; i < best.size(); ++i)
+                    best[i] = std::min(best[i], d.callUs[i]);
+            }
+            const double worst = *std::max_element(best.begin(), best.end());
+            std::printf("%s %s sweep at 192 kHz: worst process call %.1f us (block %.1f us)\n", m.name, name, worst, 1e6 * frames / rate);
+#ifndef OSCAIRN_SANITIZED
+            REQUIRE(worst < 1e6 * frames / rate / 4);
+#endif
+        }
     }
 }
