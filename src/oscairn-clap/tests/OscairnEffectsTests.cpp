@@ -15,6 +15,7 @@
 #include "sst/effects/Reverb1.h"
 #include "sst/effects/Reverb2.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <complex>
@@ -194,6 +195,12 @@ struct Plugin
     clap_process_status last{};
     double tempo{0}; // > 0: a transport with this tempo
     std::vector<clap_process_status> statuses; // of the last render, per host block
+    // As the Oscairn host: after CLAP_PROCESS_SLEEP, a block with silent input and no events is
+    // not called (its output is silence); `rested` counts those blocks.
+    bool rests{false};
+    size_t rested{0};
+    // Never skipped by the plugin either: a Mode event (to the mode it has) in every block.
+    bool keepAwake{false};
     std::vector<float> render(const std::vector<float> &inL, const std::vector<float> &inR,
                               std::vector<float> &outR, std::vector<uint32_t> blocks = {37},
                               std::vector<Event> events = {}, bool count = true)
@@ -206,6 +213,7 @@ struct Plugin
         statuses.reserve(inL.size() / blocks[0] + 2);
         Events ev;
         ev.e.reserve(events.size() + 1);
+        const double mode = keepAwake ? get(1) : 0;
         while (at < inL.size())
         {
             const uint32_t n = (uint32_t)std::min<size_t>(blocks[b++ % blocks.size()], inL.size() - at);
@@ -215,6 +223,17 @@ struct Plugin
             for (auto &e : events)
                 if (e.time >= at && e.time < at + n)
                     ev.add((uint32_t)(e.time - at), e.id, e.value);
+            if (rests && last == CLAP_PROCESS_SLEEP && ev.e.empty() &&
+                std::all_of(bl.begin(), bl.begin() + n, [](float v) { return v == 0; }) &&
+                std::all_of(br.begin(), br.begin() + n, [](float v) { return v == 0; }))
+            {
+                statuses.push_back(last);
+                ++rested;
+                at += n; // outL and outR are zero there
+                continue;
+            }
+            if (keepAwake)
+                ev.add(0, 1, mode);
             float *ins[2] = {bl.data(), br.data()}, *outs[2] = {ol.data(), orr.data()};
             clap_audio_buffer_t ib{ins, nullptr, 2, 0, 0}, ob{outs, nullptr, 2, 0, 0};
             clap_process_t pr{};
@@ -6382,4 +6401,206 @@ TEST_CASE("Tank reverbs change reverb time and high damp without clicks, and sta
 #endif
         }
     }
+}
+
+// ---- sleep: every mode reports CLAP_PROCESS_SLEEP once its tail has ended ----
+namespace
+{
+struct SleepMode
+{
+    const char *id;
+    int mode;
+    const char *name;
+    bool lfo;     // runs free modulation, which sleeping stops
+    bool delays;  // also run with its delays at their longest
+    double settle; // seconds after the tail's end within which it sleeps at defaults
+};
+const SleepMode sleepModes[] = {
+    {reverbId, 1, "Reverb 1", false, true, 2}, {reverbId, 2, "Reverb 2", true, true, 3},
+    {reverbId, 3, "Hall A", false, true, 1}, {reverbId, 4, "Hall B", false, true, 1},
+    {reverbId, 5, "Stage A", false, true, 1}, {reverbId, 6, "Hall C", false, true, 1},
+    {eqId, 1, "Five-band EQ", false, false, 1}, {eqId, 2, "Two-band EQ", false, false, 1},
+    {eqId, 3, "Three-band EQ", false, false, 1}, {eqId, 4, "Master EQ", false, false, 1},
+    {delayId, 1, "Tempo Cross Delay", false, true, 3.5}, {delayId, 2, "Cross Delay", false, true, 3.5},
+    {delayId, 3, "Tempo Stereo Delay", false, true, 3.5}, {delayId, 4, "L/R Delay", false, true, 3.5},
+    {delayId, 5, "L/C/R Delay", false, true, 3.5}, {delayId, 6, "Tempo Mono Delay", false, true, 3.5},
+    {dynamicsId, 1, "Circuit Compressor", false, false, 2}, {dynamicsId, 2, "Compressor A", false, false, 2},
+    {rotaryId, 1, "Rotary A", true, false, 1}, {rotaryId, 2, "Auto Pan", true, false, 1},
+    {rotaryId, 3, "Tremolo", true, false, 1}, {chorusId, 1, "Chorus A", true, false, 1},
+    {chorusId, 2, "Chorus B", true, false, 1}, {chorusId, 3, "Dual Modulator", true, false, 1},
+    {chorusId, 4, "Chorus C", true, false, 1}, {chorusId, 5, "Dual Detune", true, false, 1},
+    // its compressor's envelope falls slowly, and it rests only within a gain step of rest
+    {ampId, 1, "Amp Chain A", true, false, 30}};
+// Every parameter of the mode whose name holds one of `words`, at its maximum.
+void sleepSetMax(Plugin &pl, const SleepMode &m, std::initializer_list<const char *> words)
+{
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    for (uint32_t i = 1; i < params->count(pl.p); ++i)
+    {
+        clap_param_info_t info;
+        REQUIRE(params->get_info(pl.p, i, &info));
+        if (std::strcmp(info.module, m.name))
+            continue;
+        for (const char *w : words)
+            if (std::strstr(info.name, w))
+                pl.set(info.id, info.max_value);
+    }
+}
+} // namespace
+
+TEST_CASE("Sleep: every mode sleeps on silence from the start within 0.5 s, and never while input comes")
+{
+    for (auto &m : sleepModes)
+    {
+        INFO(m.name);
+        Plugin pl(m.id);
+        pl.set(1, m.mode);
+        pl.activate();
+        const std::vector<float> z(48000, 0);
+        std::vector<float> r;
+        auto out = pl.render(z, z, r, {128});
+        // at once, or once its state has settled (Compressor A's gain, a chorus' lines) and its quiet time passed
+        for (size_t k = 0; k < pl.statuses.size(); ++k)
+            if (k * 128 >= 24000)
+                REQUIRE(pl.statuses[k] == CLAP_PROCESS_SLEEP);
+        for (size_t i = 0; i < out.size(); ++i)
+            REQUIRE((out[i] == 0 && r[i] == 0));
+        // three seconds (longer than any mode's quiet time at defaults) of noise, then of input
+        // far below the output threshold: every block continues
+        std::vector<float> l, rr;
+        signal(9600, l, rr);
+        std::vector<float> in(48000 * 3), tiny(48000 * 3, 1e-20f);
+        for (size_t i = 0; i < in.size(); ++i)
+            in[i] = l[i % 9600];
+        for (auto *x : {&in, &tiny})
+        {
+            pl.render(*x, *x, r, {128});
+            for (auto st : pl.statuses)
+                REQUIRE(st == CLAP_PROCESS_CONTINUE);
+        }
+    }
+}
+
+TEST_CASE("Sleep: an impulse's tail plays in full before the plugin sleeps, and it wakes as if it had not slept")
+{
+    // An impulse, 40 s of silence, then a burst, through a plugin the host rests after it says it
+    // sleeps (as Oscairn) and through one that never sleeps (a no-op event in every block).
+    //  - Up to its sleep the rested plugin's output is the other's, bit for bit, and what it cuts
+    //    after (the never-sleeping output from there to the burst) peaks below -140 dBFS.
+    //  - It sleeps within the mode's settling time of the never-sleeping output's last sample at or
+    //    above -140 dBFS.
+    //  - Woken by the burst, it plays exactly what a plugin given the same input without the
+    //    slept blocks plays (time stops while it sleeps); without free modulation that is the
+    //    never-sleeping output within 2^-23 (-138.5 dBFS), the residue below -140 dBFS it held.
+    const double rate = 48000;
+    const size_t wake = (size_t)rate * 40, n = wake + (size_t)rate * 2;
+    for (int longest = 0; longest < 2; ++longest)
+        for (auto &m : sleepModes)
+        {
+            if (longest && !m.delays)
+                continue;
+            INFO(m.name << (longest ? ", delays at their longest" : ""));
+            std::vector<float> l(n, 0), r(n, 0), b1, b2;
+            signal(9600, b1, b2);
+            l[0] = r[0] = 1;
+            std::copy(b1.begin(), b1.end(), l.begin() + wake);
+            std::copy(b2.begin(), b2.end(), r.begin() + wake);
+            Plugin ref(m.id), sl(m.id), frozen(m.id);
+            for (auto *pl : {&ref, &sl, &frozen})
+            {
+                pl->set(1, m.mode);
+                if (longest)
+                    sleepSetMax(*pl, m, {"Delay"});
+                pl->activate(rate);
+            }
+            ref.keepAwake = frozen.keepAwake = true;
+            sl.rests = true;
+            std::vector<float> refR, slR;
+            const auto refL = ref.render(l, r, refR, {128}, {}, false);
+            const auto slL = sl.render(l, r, slR, {128}, {}, false);
+            // the block that said it sleeps, after which the host rested it until the burst
+            size_t k0 = 0;
+            for (size_t k = 0; k < wake / 128; ++k)
+                if (sl.statuses[k] != CLAP_PROCESS_SLEEP)
+                    k0 = k + 1;
+            REQUIRE(k0 < wake / 128);
+            const size_t sleepAt = k0 * 128, restFrom = sleepAt + 128;
+            size_t tailEnd = 0;
+            double cutPeak = 0, cutE = 0, tailE = 0;
+            for (size_t i = 0; i < wake; ++i)
+            {
+                const double a = std::max(std::abs(refL[i]), std::abs(refR[i])), e = (double)refL[i] * refL[i] + (double)refR[i] * refR[i];
+                if (a >= 1e-7)
+                    tailEnd = i;
+                tailE += e;
+                if (i >= restFrom)
+                    cutPeak = std::max(cutPeak, a), cutE += e;
+                else
+                    REQUIRE((slL[i] == refL[i] && slR[i] == refR[i]));
+            }
+            REQUIRE(cutPeak < 1e-7);
+            REQUIRE(restFrom > tailEnd);
+            REQUIRE((double)(restFrom - tailEnd) / rate <= m.settle);
+            // the frozen reference: the same input without the rested blocks
+            std::vector<float> fl(l.begin(), l.begin() + restFrom), fr(r.begin(), r.begin() + restFrom), frR;
+            fl.insert(fl.end(), l.begin() + wake, l.end());
+            fr.insert(fr.end(), r.begin() + wake, r.end());
+            const auto frL = frozen.render(fl, fr, frR, {128}, {}, false);
+            double diff = 0;
+            for (size_t i = wake; i < n; ++i)
+            {
+                REQUIRE((slL[i] == frL[i - wake + restFrom] && slR[i] == frR[i - wake + restFrom]));
+                diff = std::max({diff, (double)std::abs(slL[i] - refL[i]), (double)std::abs(slR[i] - refR[i])});
+            }
+            if (!m.lfo)
+                REQUIRE(diff <= 0x1p-23);
+            std::printf("%s%s: tail above -140 dBFS ends %.3f s, sleeps %.3f s; cut peak %.1f dBFS, cut energy %.1f dB "
+                        "of the tail's; woken, %.1f dBFS from the never-sleeping output\n",
+                        m.name, longest ? " (delays longest)" : "", tailEnd / rate, sleepAt / rate,
+                        20 * std::log10(cutPeak + 1e-30), 10 * std::log10(cutE / tailE + 1e-300), 20 * std::log10(diff + 1e-30));
+        }
+}
+
+TEST_CASE("Sleep: not while input waits in the block buffer")
+{
+    // Host blocks of 4 frames: an impulse fills a quarter of the inner block, and the next call,
+    // silent, must not say it sleeps, or a host resting the plugin would hold the impulse unheard.
+    Plugin ref(delayId), sl(delayId);
+    sl.rests = true;
+    ref.keepAwake = true;
+    std::vector<float> l(48000 * 2, 0), refR, slR;
+    l[48000] = 1;
+    for (auto *pl : {&ref, &sl})
+    {
+        pl->set(1, 2); // Cross Delay
+        pl->activate();
+    }
+    const auto a = ref.render(l, l, refR, {4}, {}, false);
+    const auto b = sl.render(l, l, slR, {4}, {}, false);
+    double echo = 0;
+    for (size_t i = 48000; i < l.size(); ++i)
+        echo = std::max(echo, (double)std::abs(b[i]));
+    REQUIRE(echo > 0.01);
+    REQUIRE(a == b);
+    REQUIRE(refR == slR);
+}
+
+TEST_CASE("Sleep: a rotor still ramping keeps Rotary A awake")
+{
+    // A switch to fast in silence: the rotors take the ramp time (rotor 7.7 s at defaults) to
+    // reach speed, and the plugin may not sleep before, or it would wake still ramping.
+    Plugin pl(rotaryId);
+    pl.rests = true;
+    pl.set(1, 1);
+    pl.activate();
+    const clap_id speed = paramIdByName(pl.p, "Rotary A", "Speed");
+    std::vector<float> z(48000 * 12, 0), r;
+    pl.render(z, z, r, {128}, {{128 * 10, speed, 1.0}});
+    size_t k0 = 0;
+    for (size_t k = 0; k < pl.statuses.size(); ++k)
+        if (pl.statuses[k] != CLAP_PROCESS_SLEEP)
+            k0 = k + 1;
+    INFO("sleeps at " << k0 * 128 / 48000.0 << " s");
+    REQUIRE(k0 * 128 > 48000 * 5);
+    REQUIRE(k0 < pl.statuses.size());
 }

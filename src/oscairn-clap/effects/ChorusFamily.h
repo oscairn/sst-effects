@@ -214,6 +214,8 @@ template <typename FXConfig, int P, typename Derived> struct Network : eq::Serie
     size_t heapBytes() const { return (lineL.size() + lineR.size()) * sizeof(float) + Base::heapBytes(); }
     int getRingoutDecay() const { return -1; }
     double quietSeconds() const { return longest / rotary::designRate + 0.1; }
+    // The last block was silence in, the lines empty and the glides settled: only the LFOs move on.
+    bool atRest() const { return resting; }
 
     void initialize()
     {
@@ -224,6 +226,7 @@ template <typename FXConfig, int P, typename Derived> struct Network : eq::Serie
         for (auto &g : glides)
             g.now = NAN;
         started = false;
+        resting = false;
         Base::initialize();
     }
 
@@ -246,7 +249,8 @@ template <typename FXConfig, int P, typename Derived> struct Network : eq::Serie
         const int mask = (int)lineL.size() - 1;
         // Silence in, the lines empty and the glides settled: the block is silence out. Only the
         // LFOs and the write position move on, as they would sample by sample.
-        if (zeroRun > mask && settled() && quiet(L, R))
+        resting = zeroRun > mask && settled() && quiet(L, R);
+        if (resting)
         {
             for (auto *o : {&lfo[0], &lfo[1], &lfo[2], &lfo[3], &fast})
                 o->skip(FXConfig::blockSize);
@@ -367,7 +371,7 @@ template <typename FXConfig, int P, typename Derived> struct Network : eq::Serie
     int w{0}, zeroRun{0};
     Lfo lfo[4], fast;
     Glide glides[14];
-    bool started{false};
+    bool started{false}, resting{false};
 };
 
 // The insertion EQ's seven parameters, as the tremolo modes show them.

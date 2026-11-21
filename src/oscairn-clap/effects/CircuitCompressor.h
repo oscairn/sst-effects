@@ -108,6 +108,8 @@ template <typename FXConfig> struct CircuitCompressor : sst::effects::core::Effe
         update();
     }
     void suspendProcessing() { initialize(); }
+    // The followers below -140 dB: far under the knee, where the gain no longer depends on them.
+    bool atRest() const { return e1 < 1e-7 && e2 < 1e-7; }
     int getRingoutDecay() const { return -1; }
     void onSampleRateChanged() { initialize(); }
 

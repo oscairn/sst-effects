@@ -80,6 +80,9 @@ struct Effect
     // How long the output may stay silent while the effect still holds sound (a delay's longest
     // gap between echoes); the tail ends after that much silence.
     virtual double quietSeconds() const = 0;
+    // Nothing in the effect moves on in silence but free-running LFOs (no ramp, glide or detector
+    // short of where silence takes it), so sleeping leaves no stale state.
+    virtual bool atRest() const = 0;
 };
 
 // An effect's own heap allocations (made at construction), where it has any.
@@ -118,7 +121,21 @@ template <typename FX> struct EffectOf final : Effect
     {
         if constexpr (requires { fx.quietSeconds(); })
             return fx.quietSeconds();
+        // The stock reverbs, unchanged, say nothing: until their first output after the input, at
+        // most Reverb 1's pre-delay and tap lines (2^15 samples each, wrapped), and Reverb 2's
+        // pre-delay plus one pass through its input all-passes, a tank all-pass pair and line
+        // (308.8 ms at room scale 1).
+        if constexpr (requires { FX::rev1_predelay; })
+            return 0.1 + 2 * 32768 / gs.sampleRate;
+        if constexpr (requires { FX::rev2_predelay; })
+            return 0.1 + std::exp2(fx.floatValue(FX::rev2_predelay)) + 0.3088 * std::exp2(fx.floatValue(FX::rev2_room_size));
         return 0.1;
+    }
+    bool atRest() const override
+    {
+        if constexpr (requires { fx.atRest(); })
+            return fx.atRest();
+        return true;
     }
     size_t bytes() const override
     {
@@ -527,8 +544,8 @@ void runBlock(Context &s)
     s.fx->process(s.outL, s.outR);
     for (int i = 0; i < block; ++i)
         output |= (std::abs(s.outL[i]) >= 1e-7f) | (std::abs(s.outR[i]) >= 1e-7f);
-    // Quiet: no input and output below -140 dBFS for 100 ms.
-    if (input || output)
+    // Quiet: no input, output below -140 dBFS and the effect at rest, for the mode's quiet time.
+    if (input || output || !s.fx->atRest())
         s.quietBlocks = 0;
     else if (s.quietBlocks < s.quietLimit)
         ++s.quietBlocks;
@@ -606,8 +623,9 @@ clap_process_status process(const clap_plugin_t *plugin, const clap_process_t *p
     }
     for (; event < count; ++event)
         apply(s, pr->in_events->get(pr->in_events, event));
-    return silentIn && !s.tail.load(std::memory_order_relaxed) ? CLAP_PROCESS_SLEEP
-                                                                : CLAP_PROCESS_CONTINUE;
+    // Not while input waits in the block buffer: a host that rests the plugin would hold it there.
+    return silentIn && !s.tail.load(std::memory_order_relaxed) && !sound(s.inL, s.inR, s.pos) ? CLAP_PROCESS_SLEEP
+                                                                                              : CLAP_PROCESS_CONTINUE;
 }
 
 void clear(Context &s)

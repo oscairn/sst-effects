@@ -212,6 +212,7 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
         last[0] = NAN;
         timerSamples = 0;
         timerOn = false;
+        still = false;
         update();
         // The rotors start at the speeds the switch selects, the depths and weights at their values.
         for (int k = 0; k < 2; ++k)
@@ -228,6 +229,9 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
             weight[i] = weightTarget[i];
     }
     void suspendProcessing() { initialize(); }
+    // Both rotors at their target speeds and the depths and weights still over the last block: in
+    // silence only the rotation moves on.
+    bool atRest() const { return !timerOn && still; }
     int getRingoutDecay() const { return -1; }
     void onSampleRateChanged() { initialize(); }
 
@@ -269,6 +273,8 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
                 for (int i = 0; i < n; ++i)
                     bands[k][i] = shelves[k].run(0, bands[k][i]);
         const double swingPole = 1 - std::pow(1 - 0x1p-12, per), weightPole = 1 - std::pow(1 - 0x1p-9, per);
+        const double was[12] = {weight[0], weight[1], weight[2], weight[3], weight[4], weight[5],
+                                rot[0].swing, rot[0].am, rot[0].amCh, rot[1].swing, rot[1].am, rot[1].amCh};
         double step[2];
         for (int k = 0; k < 2; ++k)
             step[k] = speedStep(rot[k].index) / 16777216.0 * per;
@@ -304,6 +310,9 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
             L[i] = (float)(outGain * out[0]);
             R[i] = (float)(outGain * out[1]);
         }
+        const double now[12] = {weight[0], weight[1], weight[2], weight[3], weight[4], weight[5],
+                                rot[0].swing, rot[0].am, rot[0].amCh, rot[1].swing, rot[1].am, rot[1].amCh};
+        still = std::equal(was, was + 12, now);
     }
 
     sst::basic_blocks::params::ParamMetaData paramAt(int idx) const
@@ -360,7 +369,7 @@ template <typename FXConfig> struct RotarySpeaker : sst::effects::core::EffectTe
     double weight[6]{}, weightTarget[6]{}, centreTurns[2]{0.25, 0}, chTurns[2][2]{};
     int fastNow{0}, speedIndex[2][2]{}, rampedTo[2]{-1, -1}, timerCount{0};
     double timerSamples{0};
-    bool timerOn{false};
+    bool timerOn{false}, still{false};
     float last[numParamsEnum]{};
 
     int targetIndex(int k) const { return speedIndex[k][fastNow]; }

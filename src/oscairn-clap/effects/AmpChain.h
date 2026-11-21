@@ -190,6 +190,10 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate); }
     size_t heapBytes() const { return line.size() * sizeof(float); }
     double quietSeconds() const { return delaySeconds + 0.1; }
+    // Silence out, the words glided home, the saturators' gains and the compressor's level at their
+    // fixed points (the last silent block moved none of them) and its envelope within a gain step
+    // of rest: silence changes nothing more that reaches the output.
+    bool atRest() const { return quiet && settled && still; }
 
     void initialize()
     {
@@ -202,6 +206,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         first = true;
         quiet = false;
         delayOn = false;
+        still = false;
         update();
     }
     void suspendProcessing() { initialize(); }
@@ -221,6 +226,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         {
             // Every state that reaches the output and the line at zero: the block is silence
             // out. The saturators' gains and the detector move on as silence moves them.
+            const State was = s;
             for (int i = 0; i < FXConfig::blockSize; ++i)
             {
                 if (cur[cmpMix] != 0)
@@ -231,6 +237,10 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
                     s.gain2 = cur[sat2A] + std::abs(s.gain2 * cur[sat2Am1]);
                 }
             }
+            // the envelope decays for long after it matters (to the word at rest below about 1e-14):
+            // still once its gain word is within a step of the one at rest
+            still = std::abs(gainWord(s.env) - gainWord(0)) <= 1 && s.lvl == was.lvl && s.gain1 == was.gain1 &&
+                    s.gain2 == was.gain2;
             return;
         }
         // Stage by stage over the block: the distortion takes the phaser's output one sample
@@ -240,6 +250,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         distort(a, b);
         echo(b, L, R);
         quiet = silent && s.zero() && lineSound == 0;
+        still = false;
     }
 
     static inline const std::unordered_map<int, std::string> distNames{{0, "Off"}, {1, "Clean 1"}, {2, "Crunch 1"}};
@@ -300,7 +311,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     double cur[numWords]{}, tgt[numWords]{};
     double rateCommon{0}, rateSpeaker{0}, rateTime{0};
     double delaySeconds{0};
-    bool settled{false}, first{true}, quiet{false}, delayOn{false};
+    bool settled{false}, first{true}, quiet{false}, delayOn{false}, still{false};
     static constexpr int N = FXConfig::blockSize;
     float last[numParamsEnum]{};
 
@@ -389,14 +400,19 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     double detect(double x)
     {
         const double *c = cur;
-        const double Kc = -0.5;
         follow(x);
         const double make = clip(2 * (s.lvl * c[cmpLvl]));
-        const double h = 2 * (Kc + s.lvl * s.env);
+        return soft(256 * (make * clip((x + x) * expGain(gainWord(s.env)))));
+    }
+    // The compressor's gain word for an envelope.
+    int gainWord(double env) const
+    {
+        const double Kc = -0.5;
+        const double h = 2 * (Kc + s.lvl * env);
         const double idx = h < -1 ? -512.0 : std::min(h, top) * 512, fl = std::floor(idx);
         const int k = 512 + (int)fl;
         const double curve = curveTable.v[k] + (idx - fl) * (curveTable.v[k + 1] - curveTable.v[k]);
-        return soft(256 * (make * clip((x + x) * expGain(fixWord(curve)))));
+        return fixWord(curve);
     }
 
     // Input, compressor, wah and phaser over the block into a.

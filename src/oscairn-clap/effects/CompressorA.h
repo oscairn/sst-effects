@@ -70,6 +70,8 @@ template <typename FXConfig> struct CompressorA : sst::effects::core::EffectTemp
         g = 2 * k * u1 / (1 - b);
     }
     void suspendProcessing() { initialize(); }
+    // The detector and gain rest and the words have glided home: silence changes nothing more.
+    bool atRest() const { return rest && out == outTarget && thr == thrTarget; }
     int getRingoutDecay() const { return -1; }
     void onSampleRateChanged() { initialize(); }
 

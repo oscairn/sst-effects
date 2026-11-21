@@ -67,6 +67,8 @@ template <typename FXConfig, int P, typename Derived> struct PitchNetwork : eq::
     size_t heapBytes() const { return (line[0].size() + line[1].size()) * sizeof(float) + Base::heapBytes(); }
     int getRingoutDecay() const { return -1; }
     double quietSeconds() const { return longest / rotary::designRate + 0.1; }
+    // The last block was silence in, the lines empty and the glides settled: only the ramps move on.
+    bool atRest() const { return resting; }
 
     void initialize()
     {
@@ -74,6 +76,7 @@ template <typename FXConfig, int P, typename Derived> struct PitchNetwork : eq::
             std::fill(l.begin(), l.end(), 0.f);
         w = 0;
         zeroRun = 0;
+        resting = false;
         for (auto &g : glides)
             g.now = NAN;
         for (auto &r : ramp)
@@ -95,7 +98,8 @@ template <typename FXConfig, int P, typename Derived> struct PitchNetwork : eq::
             settled = settled && glides[k].now == target[k];
         // Silence in, the lines empty and the glides settled: the block is silence out; only the
         // ramps and the write position move on.
-        if (zeroRun > mask && settled && quiet(L, R))
+        resting = zeroRun > mask && settled && quiet(L, R);
+        if (resting)
         {
             for (auto &r : ramp)
                 r.skip(FXConfig::blockSize);
@@ -164,6 +168,7 @@ template <typename FXConfig, int P, typename Derived> struct PitchNetwork : eq::
     static constexpr int glideCount = 10;
     std::vector<float> line[2];
     int w{0}, zeroRun{0};
+    bool resting{false};
     Lfo ramp[2];
     Glide glides[glideCount];
 };
