@@ -231,6 +231,7 @@ struct Core
         dOut[2][4]{};
     bool hpOn{false}, lpOn{false}, have{false};
     double onset{0};
+    int ramping{0}; // samples left in the ramps a change started
 
     static int samples(double s, double rate) { return (int)std::ceil(s * rate) + 1; }
     // Capacities (samples) of the lines in order, for the declared memory.
@@ -313,6 +314,7 @@ struct Core
         const bool now = !have;
         have = true;
         const int n = fadeLen;
+        ramping = now ? 0 : n;
         const double S = sizeScale(f, std::clamp(q.size, 0.0, 31.0)), SL = lineScale(f, std::clamp(q.size, 0.0, 31.0)),
                      SA = tankApScale(f, std::clamp(q.size, 0.0, 31.0));
         // delays keep their 44.1 kHz length in seconds at other rates (decision 13)
@@ -381,24 +383,48 @@ struct Core
 
     void process(float *L, float *R, int frames)
     {
+        // while a change ramps every gain and coefficient steps per sample; after that they are
+        // read as they stand (the same values: a finished ramp's next() is its value)
+        const int k = std::min(ramping, frames);
+        if (k > 0)
+            run<true>(L, R, 0, k);
+        run<false>(L, R, k, frames);
+        ramping -= k;
+    }
+    template <bool ramp> static inline double at(Ramp &r)
+    {
+        if constexpr (ramp)
+            return r.next();
+        return r.v;
+    }
+    template <bool ramp> static inline double run(FirstOrder &f, double x)
+    {
+        if constexpr (ramp)
+            return f.run(x);
+        const double y = f.b0.v * x + f.b1.v * f.x1 - f.a1.v * f.y1;
+        f.x1 = x, f.y1 = y;
+        return y;
+    }
+    template <bool ramp> void run(float *L, float *R, int from, int to)
+    {
         const Fit &f = *fit;
-        for (int i = 0; i < frames; ++i)
+        for (int i = from; i < to; ++i)
         {
             const double in[2] = {L[i], R[i]};
-            const double fb = loopGain.next(), lv = level.next(), m = mix.next();
+            const double fb = at<ramp>(loopGain), lv = at<ramp>(level), m = at<ramp>(mix);
             double eg[2][4];
             for (int s = 0; s < 2; ++s)
                 for (int k = 0; k < 4; ++k)
-                    eg[s][k] = erGain[s][k].next();
+                    eg[s][k] = at<ramp>(erGain[s][k]);
             const double back[2] = {line2[0].read(dLine2[0]), line2[1].read(dLine2[1])};
             double out[2];
             for (int s = 0; s < 2; ++s)
             {
                 double x = in[s];
-                x = hp[s].run(x);
+                x = run<ramp>(hp[s], x);
                 if (!hpOn)
                     x = in[s];
-                x = pre[s].run(shelf[s].run(x));
+                x = run<ramp>(pre[s], run<ramp>(shelf[s], x));
                 double u = x;
                 for (int k = 0; k < 3; ++k)
                     u = allpass(diff[s][k], f.apGain[0], u, diff[s][k].read(dDiff[s][k]));
@@ -411,7 +437,7 @@ struct Core
                 input[s].push(v);
                 er = allpass(erAp[s], 0.5, er, erAp[s].read(dErAp[s]));
                 // the tank: this side's half of the loop; its filters act on what recirculates only
-                double a = feed + fb * lp1[s].run(loopShelf[s].run(back[1 - s]));
+                double a = feed + fb * run<ramp>(lp1[s], run<ramp>(loopShelf[s], back[1 - s]));
                 a = allpass(tankAp[s], f.apGain[1], a, tankAp[s].read(dTankAp[s]));
                 const double b = line1[s].read(dLine1[s]);
                 line1[s].push(a);
@@ -425,7 +451,7 @@ struct Core
             for (int s = 0; s < 2; ++s)
             {
                 double y = out[s];
-                const double lo = outLp[s].run(y);
+                const double lo = run<ramp>(outLp[s], y);
                 if (lpOn)
                     y = 0.4 * y + 0.6 * lo;
                 (s ? R : L)[i] = (float)(lv * y);

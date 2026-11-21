@@ -165,7 +165,7 @@ struct Core
     FirstOrder hp[2], damp[2], shelf[2], outLp[2];
     Ramp loopGain, erG, revG, mix, inG, level, crossG;
     int dEr[2][erTaps]{}, dErAp[2]{}, dFeed{1}, dInAp[2]{}, dApA[2]{}, dLine1[2]{}, dApB[2]{}, dLine2[2]{},
-        dOut[2][outTaps]{};
+        dOut[2][outTaps]{}, outSrc[2][outTaps]{};
     bool hpOn{false}, lpOn{false}, have{false};
     double onset{0}, quiet{0};
     int ramping{0}; // samples left in the ramps a change started
@@ -271,6 +271,8 @@ struct Core
                 const int w = f.outLine[s][k];
                 const int len = (w & 1) ? dLine2[w < 2 ? s : 1 - s] : dLine1[w < 2 ? s : 1 - s];
                 dOut[s][k] = std::max(1, (int)std::lround(f.outFrac[s][k] * len));
+                outSrc[s][k] = 2 * (w < 2 ? s : 1 - s) + (w & 1); // into run()'s taps
+
             }
         onset = first;
         // the longest silence while sound is held: until the tank's first output
@@ -334,6 +336,7 @@ struct Core
     template <bool ramp> void run(float *L, float *R, int from, int to)
     {
         const Fit &f = *fit;
+        const Line *taps[4] = {&line1[0], &line2[0], &line1[1], &line2[1]};
         for (int i = from; i < to; ++i)
         {
             const double gl = at<ramp>(loopGain), eg = at<ramp>(erG), rg = at<ramp>(revG), m = at<ramp>(mix),
@@ -373,10 +376,7 @@ struct Core
             double t[2] = {0, 0};
             for (int s = 0; s < 2; ++s)
                 for (int k = 0; k < outTaps; ++k)
-                {
-                    const int w = f.outLine[s][k], side = w < 2 ? s : 1 - s;
-                    t[s] += f.outGain[s][k] * ((w & 1) ? line2[side] : line1[side]).read(dOut[s][k]);
-                }
+                    t[s] += f.outGain[s][k] * taps[outSrc[s][k]]->read(dOut[s][k]);
             for (int s = 0; s < 2; ++s)
             {
                 // the tank's outputs mix across the sides; the reflections stay on their own side
