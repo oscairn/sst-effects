@@ -104,7 +104,9 @@ template <typename FXConfig> struct CompressorA : sst::effects::core::EffectTemp
                 }
                 if (ee1 < 1e-12 && ee2 < 1e-12)
                     ee1 = ee2 = 0;
-                rest = ee1 == 0 && ee2 == 0 && uu1 == table[0] && gg == before;
+                // the gain's fixed point within 1e-12: exact equality may never come where the last ulp
+                // rounds otherwise (a two-value cycle)
+                rest = ee1 == 0 && ee2 == 0 && uu1 == table[0] && std::abs(gg - before) <= 1e-12;
             }
             std::fill(L, L + N, 0.f), std::fill(R, R + N, 0.f);
         }

@@ -6432,8 +6432,8 @@ const SleepMode sleepModes[] = {
     {rotaryId, 3, "Tremolo", true, false, 1}, {chorusId, 1, "Chorus A", true, false, 1},
     {chorusId, 2, "Chorus B", true, false, 1}, {chorusId, 3, "Dual Modulator", true, false, 1},
     {chorusId, 4, "Chorus C", true, false, 1}, {chorusId, 5, "Dual Detune", true, false, 1},
-    // its compressor's envelope falls slowly, and it rests only within a gain step of rest
-    {ampId, 1, "Amp Chain A", true, false, 30}};
+    // its compressor's envelope falls slowly (a tenth per 3.4 s), and it rests once its gain word is that of rest
+    {ampId, 1, "Amp Chain A", true, false, 10}};
 // Every parameter of the mode whose name holds one of `words`, at its maximum.
 void sleepSetMax(Plugin &pl, const SleepMode &m, std::initializer_list<const char *> words)
 {

@@ -190,10 +190,12 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
     static size_t heapBytesAt(double rate) { return sizeof(float) * (size_t)bufferSamples(rate); }
     size_t heapBytes() const { return line.size() * sizeof(float); }
     double quietSeconds() const { return delaySeconds + 0.1; }
-    // Silence out, the words glided home, the saturators' gains and the compressor's level at their
-    // fixed points (the last silent block moved none of them) and its envelope within a gain step
-    // of rest: silence changes nothing more that reaches the output.
-    bool atRest() const { return quiet && settled && still; }
+    // A silent block, the words glided home, the saturators' gains and the compressor's level at
+    // their fixed points (moved by at most 1e-12 over the block) and its envelope low enough that
+    // its gain word is the one every smaller envelope gives (stillAfter). The signal path's states
+    // need not reach zero (on x86_64 some stall at tiny normal values): the output threshold
+    // covers them.
+    bool atRest() const { return settled && still; }
 
     void initialize()
     {
@@ -222,11 +224,11 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         if (!settled)
             glide(N); // the words move a block at a time
         prepare();
+        const State was = s;
         if (silent && quiet)
         {
             // Every state that reaches the output and the line at zero: the block is silence
             // out. The saturators' gains and the detector move on as silence moves them.
-            const State was = s;
             for (int i = 0; i < FXConfig::blockSize; ++i)
             {
                 if (cur[cmpMix] != 0)
@@ -237,10 +239,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
                     s.gain2 = cur[sat2A] + std::abs(s.gain2 * cur[sat2Am1]);
                 }
             }
-            // the envelope decays for long after it matters (to the word at rest below about 1e-14):
-            // still once its gain word is within a step of the one at rest
-            still = std::abs(gainWord(s.env) - gainWord(0)) <= 1 && s.lvl == was.lvl && s.gain1 == was.gain1 &&
-                    s.gain2 == was.gain2;
+            still = stillAfter(was);
             return;
         }
         // Stage by stage over the block: the distortion takes the phaser's output one sample
@@ -250,7 +249,7 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         distort(a, b);
         echo(b, L, R);
         quiet = silent && s.zero() && lineSound == 0;
-        still = false;
+        still = silent && stillAfter(was);
     }
 
     static inline const std::unordered_map<int, std::string> distNames{{0, "Off"}, {1, "Clean 1"}, {2, "Crunch 1"}};
@@ -403,6 +402,18 @@ template <typename FXConfig> struct AmpChain : sst::effects::core::EffectTemplat
         follow(x);
         const double make = clip(2 * (s.lvl * c[cmpLvl]));
         return soft(256 * (make * clip((x + x) * expGain(gainWord(s.env)))));
+    }
+    // The gain word is trunc(32767 - 2022 f), f = 1024 lvl env (the curve's first step, 32767 to
+    // 30745 / 32768): 32766 for every envelope from 1 / (2022 x 1024 lvl) (1.5e-4 at defaults) down
+    // to where f rounds to zero (about 1e-13), which the envelope's decay (a tenth per 3.4 s at
+    // defaults) takes minutes more to reach. So once the word is within one of the word at zero, a
+    // held envelope and a decayed one give the same gain until the input lifts them again. The
+    // level and the saturators' gains converge to fixed points: steps of at most 1e-12 (a few
+    // ulps of values near 1) are reached on any IEEE platform, however the last ulp rounds.
+    bool stillAfter(const State &was) const
+    {
+        return gainWord(s.env) >= gainWord(0) - 1 && std::abs(s.lvl - was.lvl) <= 1e-12 &&
+               std::abs(s.gain1 - was.gain1) <= 1e-12 && std::abs(s.gain2 - was.gain2) <= 1e-12;
     }
     // The compressor's gain word for an envelope.
     int gainWord(double env) const
