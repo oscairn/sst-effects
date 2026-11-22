@@ -15,7 +15,10 @@
  *    all-pass, a line, then the other side times the loop gain (from the reverb time and the loop's
  *    length);
  *  - the output is the reflections and taps of the tank's lines, balanced by ER/Rev balance, mixed
- *    across the sides, through a first-order LPF, times a level.
+ *    across the sides, through a first-order LPF, times a level;
+ *  - Mix (for an insertion; the reference's Dry/Wet) adds the input, unfiltered, to that output:
+ *    dry and wet at cos and sin of (pi / 2)(v + 63) / 126, the tempo delays' measured law (not
+ *    measured on these types). Its default, D<W63, is the reverb alone.
  * Nothing is modulated: the reference's response is time-invariant. Delays keep their 44.1 kHz
  * length in seconds at other rates, and the low-passes their 44.1 kHz design's response.
  */
@@ -23,6 +26,9 @@
 #define OSCAIRN_CLAP_EFFECTS_TANKREVERB_H
 
 #include "effects/HallReverb.h"
+
+#include <string>
+#include <unordered_map>
 
 namespace oscairn_fx::tank
 {
@@ -113,7 +119,7 @@ inline constexpr Fit hallC{
 struct Settings
 {
     double time{2}, diffusion{10}, initialDelayMs{10}, hpf{20}, lpf{20000}, reverbDelayMs{0.1}, density{4}, balance{0},
-        highDamp{1};
+        highDamp{1}, mix{63};
     bool operator==(const Settings &) const = default;
 };
 
@@ -163,7 +169,7 @@ struct Core
     int fadeLen{1};
     Line pre[2], erAp[2], inAp[2], apA[2], line1[2], apB[2], line2[2];
     FirstOrder hp[2], damp[2], shelf[2], outLp[2];
-    Ramp loopGain, erG, revG, mix, inG, level, crossG;
+    Ramp loopGain, erG, revG, mix, inG, level, crossG, dryG, wetG;
     int dEr[2][erTaps]{}, dErAp[2]{}, dFeed{1}, dInAp[2]{}, dApA[2]{}, dLine1[2]{}, dApB[2]{}, dLine2[2]{},
         dOut[2][outTaps]{}, outSrc[2][outTaps]{};
     bool hpOn{false}, lpOn{false}, have{false};
@@ -296,6 +302,10 @@ struct Core
         inG.to(f.inApAt4 * std::clamp(std::round(q.density), 0.0, 4.0) / 4, n, now);
         level.to(std::pow(10.0, f.levelDb / 20), n, now);
         crossG.to(f.cross, n, now);
+        // the ends exact, so D<W63 is the reverb alone, bit for bit
+        const double mx = std::clamp(std::round(q.mix), -63.0, 63.0), xm = (mx + 63) / 126;
+        dryG.to(mx >= 63 ? 0 : mx <= -63 ? 1 : std::cos(M_PI / 2 * xm), n, now);
+        wetG.to(mx >= 63 ? 1 : mx <= -63 ? 0 : std::sin(M_PI / 2 * xm), n, now);
         hpOn = q.hpf > 20.5;
         lpOn = q.lpf < 19999.5;
         for (int s = 0; s < 2; ++s)
@@ -315,8 +325,12 @@ struct Core
         // read as they stand (the same values: a finished ramp's next() is its value)
         const int k = std::min(ramping, frames);
         if (k > 0)
-            run<true>(L, R, 0, k);
-        run<false>(L, R, k, frames);
+            run<true, true>(L, R, 0, k);
+        // the reverb alone (Mix at D<W63) needs no dry path
+        if (dryG.v == 0 && wetG.v == 1)
+            run<false, false>(L, R, k, frames);
+        else
+            run<false, true>(L, R, k, frames);
         ramping -= k;
     }
     template <bool ramp> static inline double at(Ramp &r)
@@ -333,7 +347,7 @@ struct Core
         f.x1 = x, f.y1 = y;
         return y;
     }
-    template <bool ramp> void run(float *L, float *R, int from, int to)
+    template <bool ramp, bool dry> void run(float *L, float *R, int from, int to)
     {
         const Fit &f = *fit;
         const Line *taps[4] = {&line1[0], &line2[0], &line1[1], &line2[1]};
@@ -341,7 +355,13 @@ struct Core
         {
             const double gl = at<ramp>(loopGain), eg = at<ramp>(erG), rg = at<ramp>(revG), m = at<ramp>(mix),
                          ig = at<ramp>(inG), lv = at<ramp>(level), cg = at<ramp>(crossG);
-            double x[2] = {L[i], R[i]};
+            double dg = 0, wg = 1;
+            if constexpr (dry)
+                dg = at<ramp>(dryG), wg = at<ramp>(wetG);
+            // while ramping, wet only exactly as without the dry path once the gains are there
+            const bool wetOnly = !dry || (dg == 0 && wg == 1);
+            const double in[2] = {L[i], R[i]};
+            double x[2] = {in[0], in[1]};
             for (int s = 0; s < 2; ++s)
             {
                 const double h = run<ramp>(hp[s], x[s]);
@@ -384,7 +404,7 @@ struct Core
                 const double lo = run<ramp>(outLp[s], y);
                 if (lpOn)
                     y = lo;
-                (s ? R : L)[i] = (float)(lv * y);
+                (s ? R : L)[i] = (float)(wetOnly ? lv * y : wg * (lv * y) + dg * in[s]);
             }
         }
     }
@@ -403,6 +423,7 @@ template <typename FXConfig, const Fit &F> struct TankReverb : sst::effects::cor
         density,
         balance,
         highDamp,
+        mixParam,
         numParamsEnum
     };
     static constexpr int numParams{numParamsEnum};
@@ -451,6 +472,13 @@ template <typename FXConfig, const Fit &F> struct TankReverb : sst::effects::cor
         case density: return pmd().asInt().withName("Density").withRange(0, 4).withDefault(d[6]);
         case balance: return pmd().asInt().withName("ER/Rev Balance").withRange(-63, 63).withDefault(d[7]);
         case highDamp: return pmd().asFloat().withName("High Damp").withRange(0.1f, 1.f).withDefault(d[8]).withLinearScaleFormatting("").withDecimalPlaces(1);
+        case mixParam:
+        {
+            std::unordered_map<int, std::string> m;
+            for (int v = -63; v <= 63; ++v)
+                m[v] = v < 0 ? "D" + std::to_string(-v) + ">W" : (v == 0 ? "D=W" : "D<W" + std::to_string(v));
+            return pmd().asInt().withName("Mix").withRange(-63, 63).withDefault(63).withUnorderedMapFormatting(m);
+        }
         }
         return pmd().withName("Unused").withType(pmd::NONE);
     }
@@ -465,7 +493,8 @@ template <typename FXConfig, const Fit &F> struct TankReverb : sst::effects::cor
     {
         Settings q{this->floatValue(time),        this->floatValue(diffusion), this->floatValue(initialDelay),
                    this->floatValue(hpf),         this->floatValue(lpf),       this->floatValue(reverbDelay),
-                   std::round(this->floatValue(density)), std::round(this->floatValue(balance)), this->floatValue(highDamp)};
+                   std::round(this->floatValue(density)), std::round(this->floatValue(balance)), this->floatValue(highDamp),
+                   std::round(this->floatValue(mixParam))};
         if (have && q == last)
             return;
         have = true;

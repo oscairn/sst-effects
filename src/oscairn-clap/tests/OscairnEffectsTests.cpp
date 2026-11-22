@@ -5580,6 +5580,9 @@ std::map<std::string, uint64_t> bundleHashes()
                     params->get_info(pl.p, i, &info);
                     if (info.id == 1 || (int)(info.id >> 8) != m)
                         continue;
+                    // the tanks' Mix stays at its default (the reverb alone): the hashes predate it
+                    if (id == reverbId && m >= 4 && !std::strcmp(info.name, "Mix"))
+                        continue;
                     auto at = [&](double t) {
                         double v = info.min_value + t * (info.max_value - info.min_value);
                         return (info.flags & CLAP_PARAM_IS_STEPPED) ? std::round(v) : v;
@@ -6106,7 +6109,7 @@ TEST_CASE("Tank reverbs: state round-trips, and every parameter's value text par
             }
             a.set(info.id, info.min_value + 0.3 * (info.max_value - info.min_value));
         }
-        REQUIRE(count == 9);
+        REQUIRE(count == 10);
         Buffer buf;
         REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
         Plugin b(reverbId);
@@ -6603,4 +6606,56 @@ TEST_CASE("Sleep: a rotor still ramping keeps Rotary A awake")
     INFO("sleeps at " << k0 * 128 / 48000.0 << " s");
     REQUIRE(k0 * 128 > 48000 * 5);
     REQUIRE(k0 < pl.statuses.size());
+}
+
+TEST_CASE("Tank reverbs: Mix adds the dry input at the law's gains, fully dry passes it, and the plugin still sleeps")
+{
+    const double rate = 48000;
+    std::vector<float> inL, inR;
+    signal(48000, inL, inR);
+    for (auto &m : tankModes)
+    {
+        INFO(m.name);
+        auto run = [&](double mix, std::vector<float> &r, std::vector<Event> ev = {}) {
+            Plugin pl(reverbId);
+            tankSet(pl, m, {{"Mix", mix}});
+            pl.activate(rate);
+            return pl.render(inL, inR, r, {128}, ev);
+        };
+        std::vector<float> wr, er, dr;
+        const auto wet = run(63, wr), equal = run(0, er), dry = run(-63, dr);
+        // D=W: cos and sin of pi / 4 (rounding: the plugin sums in double before its float output)
+        const double g = std::cos(M_PI / 4);
+        double worst = 0;
+        for (size_t i = L; i < inL.size(); ++i)
+        {
+            worst = std::max(worst, std::abs(equal[i] - (g * wet[i] + g * inL[i - L])));
+            worst = std::max(worst, std::abs(er[i] - (g * wr[i] + g * inR[i - L])));
+        }
+        REQUIRE(worst < 1e-6);
+        // D63>W: the input alone, a block late (the plugin's latency), bit for bit
+        for (size_t i = 0; i < inL.size(); ++i)
+            REQUIRE((dry[i] == (i < L ? 0.f : inL[i - L]) && dr[i] == (i < L ? 0.f : inR[i - L])));
+        // a change glides over 5 ms (240 samples at 48 kHz), as every other gain: from wet only to the input alone
+        Plugin probe(reverbId);
+        tankSet(probe, m, {});
+        const clap_id mixId = paramIdByName(probe.p, m.name, "Mix");
+        std::vector<float> cr;
+        const auto changed = run(63, cr, {{1024, mixId, -63}});
+        REQUIRE(changed[1024 + L + 120] != inL[1024 + 120]); // halfway
+        for (size_t i = 1024 + L + 240; i < inL.size(); ++i) // a ramp ends within rounding of its target
+            REQUIRE(std::abs(changed[i] - inL[i - L]) < 1e-6);
+        // with the dry path the plugin still sleeps once the input is silent and the tail is over,
+        // and never while input comes
+        Plugin pl(reverbId);
+        tankSet(pl, m, {{"Mix", 0}});
+        pl.activate(rate);
+        std::vector<float> l(inL), r(inR), outR;
+        l.resize(48000 * 12, 0.f);
+        r.resize(l.size(), 0.f);
+        pl.render(l, r, outR, {128});
+        for (size_t k = 0; k < 9600 / 128; ++k)
+            REQUIRE(pl.statuses[k] == CLAP_PROCESS_CONTINUE);
+        REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
+    }
 }
