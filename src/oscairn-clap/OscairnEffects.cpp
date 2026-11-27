@@ -33,6 +33,7 @@
 #include "effects/TempoMonoDelay.h"
 #include "effects/HallReverb.h"
 #include "effects/TankReverb.h"
+#include "effects/MonoTankReverb.h"
 #include "effects/CircuitCompressor.h"
 #include "effects/CompressorA.h"
 #include "effects/RotarySpeaker.h"
@@ -280,6 +281,9 @@ const std::vector<Category> &categories()
         reverb.modes.push_back(mode<oscairn_fx::tank::HallB>(4, "Hall B", true));
         reverb.modes.push_back(mode<oscairn_fx::tank::StageA>(5, "Stage A", true));
         reverb.modes.push_back(mode<oscairn_fx::tank::HallC>(6, "Hall C", true));
+        reverb.modes.push_back(mode<oscairn_fx::monotank::HallD>(7, "Hall D", true));
+        reverb.modes.push_back(mode<oscairn_fx::monotank::RoomA>(8, "Room A", true));
+        reverb.modes.push_back(mode<oscairn_fx::monotank::PlateA>(9, "Plate A", true));
         reverb.finish();
         c.push_back(std::move(reverb));
 

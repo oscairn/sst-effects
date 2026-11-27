@@ -5711,6 +5711,16 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
         {"org.oscairn.effects.reverb 6 44100", 0x3f0c9fd969cfcc7f},
         {"org.oscairn.effects.reverb 6 48000", 0x3dee03b24fc3a9b4},
         {"org.oscairn.effects.reverb 6 96000", 0xb389517cc295d831},
+        // Hall D, Room A and Plate A, taken from one Release build only
+        {"org.oscairn.effects.reverb 7 44100", 0x3704088415614c86},
+        {"org.oscairn.effects.reverb 7 48000", 0x397f836bf180a257},
+        {"org.oscairn.effects.reverb 7 96000", 0x7684db9ab0ea155d},
+        {"org.oscairn.effects.reverb 8 44100", 0xa6a7d460ee18e1b0},
+        {"org.oscairn.effects.reverb 8 48000", 0x3ec05ea69c94b242},
+        {"org.oscairn.effects.reverb 8 96000", 0x99bd560697376bb8},
+        {"org.oscairn.effects.reverb 9 44100", 0x1cd74dff722ac3e3},
+        {"org.oscairn.effects.reverb 9 48000", 0xb9c78afaa8a9999},
+        {"org.oscairn.effects.reverb 9 96000", 0x9edec439ea051e5c},
     });
 #elif defined(__aarch64__) && defined(__linux__)
     // With GCC the rate-matched EQ fits (the EQ modes at 48 and 96 kHz, and the chorus, delay and
@@ -5722,7 +5732,10 @@ TEST_CASE("Every plugin and mode renders the same bits as before the wrapper's c
                           "eq 4 96000", "tremolo-rotary 2 96000",
                           // the tank reverbs: not yet taken on Linux
                           "reverb 4 44100", "reverb 4 48000", "reverb 4 96000", "reverb 5 44100", "reverb 5 48000",
-                          "reverb 5 96000", "reverb 6 44100", "reverb 6 48000", "reverb 6 96000"})
+                          "reverb 5 96000", "reverb 6 44100", "reverb 6 48000", "reverb 6 96000",
+                          // Hall D, Room A and Plate A: not yet taken on Linux
+                          "reverb 7 44100", "reverb 7 48000", "reverb 7 96000", "reverb 8 44100", "reverb 8 48000",
+                          "reverb 8 96000", "reverb 9 44100", "reverb 9 48000", "reverb 9 96000"})
         runToRun.insert(std::string("org.oscairn.effects.") + k);
     expected.insert({
         {"org.oscairn.effects.reverb 1 44100", 0xcc98b587b279b35b},
@@ -6422,6 +6435,7 @@ const SleepMode sleepModes[] = {
     {reverbId, 1, "Reverb 1", false, true, 2}, {reverbId, 2, "Reverb 2", true, true, 3},
     {reverbId, 3, "Hall A", false, true, 1}, {reverbId, 4, "Hall B", false, true, 1},
     {reverbId, 5, "Stage A", false, true, 1}, {reverbId, 6, "Hall C", false, true, 1},
+    {reverbId, 7, "Hall D", false, true, 1}, {reverbId, 8, "Room A", false, true, 1}, {reverbId, 9, "Plate A", false, true, 1},
     {eqId, 1, "Five-band EQ", false, false, 1}, {eqId, 2, "Two-band EQ", false, false, 1},
     {eqId, 3, "Three-band EQ", false, false, 1}, {eqId, 4, "Master EQ", false, false, 1},
     {delayId, 1, "Tempo Cross Delay", false, true, 3.5}, {delayId, 2, "Cross Delay", false, true, 3.5},
@@ -6658,4 +6672,382 @@ TEST_CASE("Tank reverbs: Mix adds the dry input at the law's gains, fully dry pa
             REQUIRE(pl.statuses[k] == CLAP_PROCESS_CONTINUE);
         REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
     }
+}
+
+#include "effects/MonoTankReverb.h"
+namespace
+{
+struct MonoTankMode
+{
+    int id;
+    const char *name;
+    const oscairn_fx::monotank::Fit *fit;
+};
+const MonoTankMode monoTankModes[] = {{7, "Hall D", &oscairn_fx::monotank::hallD}, {8, "Room A", &oscairn_fx::monotank::roomA}, {9, "Plate A", &oscairn_fx::monotank::plateA}};
+void monoTankSet(Plugin &pl, const MonoTankMode &m, const std::vector<std::pair<const char *, double>> &set)
+{
+    pl.set(1, m.id);
+    for (auto [n, v] : set)
+        pl.set(paramIdByName(pl.p, m.name, n), v);
+}
+// A mono-fed tank mode's response to an impulse in the left input and, unless leftOnly, the right; latency removed.
+std::pair<std::vector<float>, std::vector<float>> monoTankImpulse(const MonoTankMode &m, double rate,
+                                                            const std::vector<std::pair<const char *, double>> &set,
+                                                            double seconds, bool leftOnly = false, bool rightOnly = false)
+{
+    Plugin pl(reverbId);
+    monoTankSet(pl, m, set);
+    pl.activate(rate);
+    const size_t n = (size_t)(rate * seconds) + oscairn_fx::latencySamples;
+    std::vector<float> l(n, 0), r(n, 0), outR;
+    if (!rightOnly)
+        l[0] = 1;
+    if (!leftOnly)
+        r[0] = 1;
+    auto outL = pl.render(l, r, outR, {64}, {}, false);
+    outL.erase(outL.begin(), outL.begin() + oscairn_fx::latencySamples);
+    outR.erase(outR.begin(), outR.begin() + oscairn_fx::latencySamples);
+    return {outL, outR};
+}
+} // namespace
+
+TEST_CASE("Hall D, Room A and Plate A: modes 7, 8 and 9 are Hall D, Room A and Plate A, each with its nine parameters")
+{
+    Plugin pl(reverbId);
+    auto *params = ext<clap_plugin_params_t>(pl.p, CLAP_EXT_PARAMS);
+    for (auto &m : monoTankModes)
+    {
+        char name[64];
+        REQUIRE(params->value_to_text(pl.p, 1, m.id, name, sizeof(name)));
+        REQUIRE(std::string(name) == m.name);
+        int count = 0;
+        for (uint32_t i = 1; i < params->count(pl.p); ++i)
+        {
+            clap_param_info_t info;
+            REQUIRE(params->get_info(pl.p, i, &info));
+            count += (info.id >> 8) == (clap_id)m.id;
+        }
+        REQUIRE(count == 9);
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: state round-trips, and every parameter's value text parses back")
+{
+    for (auto &m : monoTankModes)
+    {
+        INFO(m.name);
+        Plugin a(reverbId);
+        a.set(1, m.id);
+        auto *params = ext<clap_plugin_params_t>(a.p, CLAP_EXT_PARAMS);
+        for (uint32_t i = 1; i < params->count(a.p); ++i)
+        {
+            clap_param_info_t info;
+            REQUIRE(params->get_info(a.p, i, &info));
+            if ((info.id >> 8) != (clap_id)m.id)
+                continue;
+            REQUIRE(std::string(info.module) == m.name);
+            for (double t : {0., .25, .5, .75, 1.})
+            {
+                double v = info.min_value + t * (info.max_value - info.min_value);
+                if (info.flags & CLAP_PARAM_IS_STEPPED)
+                    v = std::round(v);
+                char text[256], again[256];
+                REQUIRE(params->value_to_text(a.p, info.id, v, text, sizeof(text)));
+                double back = NAN;
+                INFO(info.name << " at " << v << ": \"" << text << "\"");
+                REQUIRE(params->text_to_value(a.p, info.id, text, &back));
+                if (info.flags & CLAP_PARAM_IS_STEPPED)
+                    REQUIRE(back == v);
+                REQUIRE(params->value_to_text(a.p, info.id, back, again, sizeof(again)));
+                REQUIRE(!std::strcmp(text, again));
+            }
+            a.set(info.id, info.min_value + 0.3 * (info.max_value - info.min_value));
+        }
+        Buffer buf;
+        REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->save(a.p, &buf.out));
+        Plugin b(reverbId);
+        REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->load(b.p, &buf.in));
+        Buffer again;
+        REQUIRE(ext<clap_plugin_state_t>(b.p, CLAP_EXT_STATE)->save(b.p, &again.out));
+        REQUIRE(again.data == buf.data);
+        std::vector<float> inL, inR, ra, rb;
+        signal(24000, inL, inR);
+        a.activate();
+        b.activate();
+        REQUIRE(a.render(inL, inR, ra) == b.render(inL, inR, rb));
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: output does not depend on the host's block size")
+{
+    for (auto &m : monoTankModes)
+    {
+        INFO(m.name);
+        std::vector<float> inL, inR, r, r0, ref;
+        signal(48000, inL, inR);
+        Plugin probe(reverbId);
+        monoTankSet(probe, m, {});
+        const std::vector<Event> events{{10007, paramIdByName(probe.p, m.name, "Reverb Time"), 5.0},
+                                        {20011, paramIdByName(probe.p, m.name, "High Damp Freq"), 2000.0},
+                                        {30001, paramIdByName(probe.p, m.name, "EQ Low Gain"), -6.0}};
+        for (auto blocks : std::vector<std::vector<uint32_t>>{{512}, {1}, {37}, {7, 300, 64, 1}})
+        {
+            Plugin pl(reverbId);
+            monoTankSet(pl, m, {});
+            pl.activate();
+            auto out = pl.render(inL, inR, r, blocks, events);
+            if (ref.empty())
+            {
+                ref = out;
+                r0 = r;
+                continue;
+            }
+            REQUIRE(out == ref);
+            REQUIRE(r == r0);
+        }
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: silence in gives silence out, the tail ends and the plugin sleeps")
+{
+    for (auto &m : monoTankModes)
+    {
+        INFO(m.name);
+        auto ctxOf = [](Plugin &pl) { return ext<oscairn_plugin_effect_contexts_t>(pl.p, OSCAIRN_EXT_EFFECT_CONTEXTS); };
+        oscairn_effect_resources_t res;
+        {
+            Plugin pl(reverbId);
+            monoTankSet(pl, m, {});
+            pl.activate();
+            std::vector<float> z(48000, 0), r;
+            auto out = pl.render(z, z, r, {128});
+            for (size_t i = 0; i < out.size(); ++i)
+                REQUIRE((out[i] == 0 && r[i] == 0));
+            REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
+        }
+        // the longest settings, the EQ at its most: the tail still ends, then the output is exact silence
+        Plugin pl(reverbId);
+        monoTankSet(pl, m, {{"Reverb Time", 30}, {"High Damp Freq", 20000}, {"High Ratio", 1}, {"Initial Delay", 200}, {"EQ Low Gain", 12},
+                      {"EQ High Gain", 12}, {m.fit->sizeName, m.fit->sizeMax}});
+        pl.activate();
+        std::vector<float> inL, inR, r;
+        signal(4800, inL, inR);
+        pl.render(inL, inR, r, {480});
+        ctxOf(pl)->resources(pl.p, &res);
+        REQUIRE(res.tail_active);
+        std::vector<float> rest((size_t)48000 * 300, 0);
+        auto out = pl.render(rest, rest, r, {480});
+        ctxOf(pl)->resources(pl.p, &res);
+        REQUIRE_FALSE(res.tail_active);
+        REQUIRE(pl.last == CLAP_PROCESS_SLEEP);
+        for (size_t i = out.size() - 48000; i < out.size(); ++i)
+            REQUIRE((out[i] == 0 && r[i] == 0));
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: bounded output at extreme settings")
+{
+    // As the tank reverbs': a second of full-scale noise at the ends of every range stays finite and
+    // below 64 (the tanks' 16, times 4 for the EQ at +12 dB across the band), and the sixth second
+    // holds less than the second.
+    for (auto &m : monoTankModes)
+        for (int c = 0; c < 4; ++c)
+        {
+            const bool hi = c & 1, eqUp = c & 2;
+            std::vector<std::pair<const char *, double>> set{{"Reverb Time", hi ? 30 : 0.3}, {"Initial Delay", hi ? 200 : 0.1},
+                {"High Damp Freq", hi ? 20000 : 1000}, {"High Ratio", hi ? 1 : 0}, {m.fit->sizeName, hi ? m.fit->sizeMax : 0},
+                {"EQ Low Freq", eqUp ? 1000 : 22}, {"EQ Low Gain", eqUp ? 12 : -12}, {"EQ High Freq", eqUp ? 500 : 18000},
+                {"EQ High Gain", eqUp ? 12 : -12}};
+            Plugin pl(reverbId);
+            monoTankSet(pl, m, set);
+            pl.activate(44100);
+            const size_t n = 44100 * 6;
+            std::vector<float> l(n, 0), r(n, 0), outR;
+            uint32_t x = 99;
+            for (size_t i = 0; i < 44100; ++i)
+            {
+                x = x * 1664525u + 1013904223u;
+                l[i] = ((x >> 8) / 8388608.f) - 1;
+                r[i] = (float)(i % 2 ? 1 : -1);
+            }
+            auto out = pl.render(l, r, outR, {256}, {}, false);
+            double peak = 0, e1 = 0, e5 = 0;
+            for (size_t i = 0; i < n; ++i)
+            {
+                REQUIRE((std::isfinite(out[i]) && std::isfinite(outR[i])));
+                peak = std::max({peak, (double)std::abs(out[i]), (double)std::abs(outR[i])});
+                const double e = (double)out[i] * out[i] + (double)outR[i] * outR[i];
+                if (i >= 44100 && i < 2 * 44100)
+                    e1 += e;
+                else if (i >= 5 * 44100)
+                    e5 += e;
+            }
+            INFO(m.name << " case " << c << " peak " << peak << " second 2 " << e1 << " second 6 " << e5);
+            REQUIRE(peak < 64);
+            REQUIRE(e5 <= e1);
+        }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: the input is mixed to mono, and the first sound comes at the initial delay")
+{
+    // Measured: left, right and center feeds give the same wet output. The first reflection is the
+    // initial delay after the input (measured at 100.8 and 200 ms within 5 ms), within a sample here.
+    for (auto &m : monoTankModes)
+    {
+        INFO(m.name);
+        auto [ll, lr] = monoTankImpulse(m, 44100, {}, 1, true);
+        auto [rl, rr] = monoTankImpulse(m, 44100, {}, 1, false, true);
+        REQUIRE(ll == rl);
+        REQUIRE(lr == rr);
+        for (double id : {0.1, 12.7, 100.8, 200.0})
+        {
+            auto [l, r] = monoTankImpulse(m, 44100, {{"Initial Delay", id}}, 0.5);
+            INFO("initial delay " << id);
+            REQUIRE(std::abs(firstAbove(l, 44100, 1e-9f) - std::max(1.0, std::round(id / 1000 * 44100)) / 44100) <= 1.5 / 44100);
+        }
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: the decay follows the time law, and high damp adds the same dB per second at every reverb time")
+{
+    // With the damping's corner out of the way (20 kHz, high ratio 1) the decay at 1 kHz is reverb
+    // time x the mode's time scale within 10% (the M3 gate) from 2 to 16 s; and with high damp at
+    // 2 kHz the extra decay rate at 4 kHz over 1 kHz (dB/s) stays within 25% of its value at 4 s
+    // from 2 to 16 s (measured: constant within the sweeps' precision; proposed tolerance).
+    using oscairn_fx::hall::interp;
+    for (auto &m : monoTankModes)
+    {
+        double at4 = 0;
+        for (double t : {4.0, 2.0, 8.0, 16.0})
+        {
+            auto [l, r] = monoTankImpulse(m, 44100, {{"Reverb Time", t}, {"High Damp Freq", 20000}, {"High Ratio", 1}, {"EQ Low Gain", 0},
+                                               {"EQ High Gain", 0}}, 2.2 * t + 1);
+            const double t1 = 0.5 * (bandDecay(l, 44100, 1000) + bandDecay(r, 44100, 1000));
+            const double want = t * interp(m.fit->timeAt, m.fit->timeScale, oscairn_fx::monotank::timeKnots, t);
+            auto [dl, dr] = monoTankImpulse(m, 44100, {{"Reverb Time", t}, {"High Damp Freq", 2000}, {"EQ Low Gain", 0}, {"EQ High Gain", 0}},
+                                      2.2 * t + 1);
+            const double d1 = 0.5 * (bandDecay(dl, 44100, 1000) + bandDecay(dr, 44100, 1000));
+            const double d4 = 0.5 * (bandDecay(dl, 44100, 4000) + bandDecay(dr, 44100, 4000));
+            const double extra = 60 / d4 - 60 / d1;
+            if (t == 4)
+                at4 = extra;
+            std::printf("%s reverb time %.0f s: 1 kHz %.3f s (law %.3f); high damp 2 kHz: extra decay at 4 kHz %.1f dB/s\n", m.name, t, t1,
+                        want, extra);
+            INFO(m.name << " time " << t);
+            CHECK(std::abs(t1 / want - 1) < 0.1);
+            CHECK(std::abs(extra / at4 - 1) < 0.25);
+        }
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A: the output EQ's shelves give their gains far from their corners")
+{
+    // The shelves follow the reverb, so the ratio of two renders, EQ on and off, of one steady sine
+    // is the shelf's gain: +12 dB at 30 Hz for the low shelf at 1 kHz, -12 dB at 16 kHz for the high
+    // shelf at 1 kHz, each within 0.5 dB (a slope-1 shelf is within 0.1 dB there).
+    const double rate = 44100;
+    for (auto &m : monoTankModes)
+        for (int high = 0; high < 2; ++high)
+        {
+            const double hz = high ? 16000 : 30;
+            const size_t n = (size_t)rate * 2;
+            std::vector<float> in(n);
+            for (size_t i = 0; i < n; ++i)
+                in[i] = 0.1f * (float)std::sin(2 * M_PI * hz * i / rate);
+            auto rms = [&](double gain) {
+                Plugin pl(reverbId);
+                monoTankSet(pl, m, {{"High Damp Freq", 20000}, {"High Ratio", 1}, {"EQ Low Freq", 1000}, {"EQ High Freq", 1000},
+                              {"EQ Low Gain", high ? 0 : gain}, {"EQ High Gain", high ? gain : 0}});
+                pl.activate(rate);
+                std::vector<float> r;
+                auto out = pl.render(in, in, r, {64}, {}, false);
+                double s = 0;
+                for (size_t i = n / 2; i < n; ++i)
+                    s += (double)out[i] * out[i] + (double)r[i] * r[i];
+                return s;
+            };
+            const double db = 10 * std::log10(rms(high ? -12 : 12) / rms(0));
+            INFO(m.name << (high ? " high shelf" : " low shelf") << ": " << db << " dB");
+            CHECK(std::abs(db - (high ? -12 : 12)) < 0.5);
+        }
+}
+
+TEST_CASE("Hall D, Room A and Plate A keep their 44.1 kHz decay, onset and level at 48, 88.2, 96 and 192 kHz")
+{
+    // As the tank reverbs': per octave band (250 Hz to 8 kHz) the decay within 5% of the 44.1 kHz
+    // render's, the energy within 1.5 dB, the onset within 0.1 ms.
+    using oscairn_fx::hall::bandHz;
+    using oscairn_fx::hall::bands;
+    for (auto &m : monoTankModes)
+    {
+        auto ref = monoTankImpulse(m, 44100, {}, 6).first;
+        for (double rate : {48000.0, 88200.0, 96000.0, 192000.0})
+        {
+            auto got = monoTankImpulse(m, rate, {}, 6).first;
+            INFO(m.name << " rate " << rate);
+            REQUIRE(std::abs(firstAbove(got, rate) - firstAbove(ref, 44100)) < 1e-4);
+            for (int b = 1; b < bands; ++b)
+            {
+                double ea = 0, ec = 0;
+                const double a = bandDecay(ref, 44100, bandHz[b], &ea), c = bandDecay(got, rate, bandHz[b], &ec);
+                CHECK(std::abs(c / a - 1) < 0.05);
+                CHECK(std::abs(10 * std::log10(ec * rate / ea / 44100)) < 1.5);
+            }
+        }
+    }
+}
+
+TEST_CASE("Hall D, Room A and Plate A change their parameters without clicks")
+{
+    // As the tank reverbs': every gain and coefficient ramps over 5 ms, so the largest output above
+    // 8 kHz in the 50 ms after a change, for a 220 Hz + 1 kHz input, stays below -60 dBFS or adds
+    // under 1 dB to the same render's without the change.
+    struct Change
+    {
+        const char *name;
+        double from, to;
+    };
+    for (auto &m : monoTankModes)
+        for (auto c : {Change{"High Damp Freq", 20000, 1000}, Change{"High Ratio", 0, 1}, Change{"Reverb Time", 30, 0.3},
+                       Change{"EQ Low Gain", -12, 12}, Change{"EQ High Gain", 12, -12}, Change{"EQ High Freq", 18000, 500}})
+            for (double rate : {44100.0, 192000.0})
+            {
+                const size_t n = (size_t)(rate * 1.6), at = (size_t)(rate * 1.5) + 7;
+                std::vector<float> in(n);
+                for (size_t i = 0; i < n; ++i)
+                    in[i] = 0.25f * (float)(std::sin(2 * M_PI * 220 * i / rate) + std::sin(2 * M_PI * 1000 * i / rate));
+                auto peakDb = [&](bool change) {
+                    Plugin pl(reverbId);
+                    monoTankSet(pl, m, {{c.name, c.from}});
+                    setOffline(pl);
+                    pl.activate(rate);
+                    std::vector<Event> ev;
+                    if (change)
+                        ev.push_back({(uint32_t)at, paramIdByName(pl.p, m.name, c.name), c.to});
+                    std::vector<float> r;
+                    auto out = pl.render(in, in, r, {64}, ev, false);
+                    double peak = 0, z[2][2]{};
+                    const double K = std::tan(M_PI * 8000 / rate);
+                    for (size_t i = 0; i < n; ++i)
+                    {
+                        double x = out[i];
+                        for (int s = 0; s < 2; ++s)
+                        {
+                            const double q = s ? 1.3065630 : 0.5411961, norm = 1 / (1 + K / q + K * K);
+                            const double b0 = norm, b1 = -2 * norm, a1 = 2 * (K * K - 1) * norm, a2 = (1 - K / q + K * K) * norm;
+                            const double y = b0 * x + z[s][0];
+                            z[s][0] = b1 * x - a1 * y + z[s][1];
+                            z[s][1] = b0 * x - a2 * y;
+                            x = y;
+                        }
+                        if (i >= at && i < at + (size_t)(0.05 * rate))
+                            peak = std::max(peak, std::abs(x));
+                    }
+                    return 20 * std::log10(peak + 1e-12);
+                };
+                const double db = peakDb(true), still = peakDb(false);
+                std::printf("%s click, %s %.1f to %.1f at %.0f Hz: %.1f dBFS (without the change %.1f dBFS)\n", m.name, c.name, c.from,
+                            c.to, rate, db, still);
+                CHECK((db < -60 || db < still + 1));
+            }
 }
