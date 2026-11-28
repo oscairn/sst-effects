@@ -22,10 +22,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <new>
 #include <set>
+#include <sstream>
 #include <string>
 #include <map>
 #include <thread>
@@ -622,6 +625,74 @@ TEST_CASE("State round-trips, and bad state is refused")
     Buffer other;
     other.data = "something else\n";
     REQUIRE_FALSE(ext<clap_plugin_state_t>(c.p, CLAP_EXT_STATE)->load(c.p, &other.in));
+}
+
+// tests/states/README.md: states saved by each published package version's own build.
+TEST_CASE("States saved by published package versions open in this build")
+{
+    namespace fs = std::filesystem;
+    const auto sorted = [](const fs::path &dir, bool dirs = true) {
+        std::vector<fs::path> v;
+        for (auto &e : fs::directory_iterator(dir))
+            if (e.is_directory() == dirs)
+                v.push_back(e.path());
+        std::sort(v.begin(), v.end());
+        return v;
+    };
+    const auto slurp = [](const fs::path &f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    size_t opened = 0, rendered = 0;
+    for (auto &version : sorted(OSCAIRN_STATES_DIR))
+        for (auto &plugin : sorted(version))
+            for (auto &file : sorted(plugin, false))
+            {
+                if (file.extension() != ".state")
+                    continue;
+                INFO(file.string());
+                const std::string text = slurp(file);
+                const std::string id = text.substr(18, text.find('\n') - 18); // after "oscairn-effects-1 "
+                Plugin a(id.c_str());
+                Buffer b;
+                b.data = text;
+                REQUIRE(ext<clap_plugin_state_t>(a.p, CLAP_EXT_STATE)->load(a.p, &b.in));
+                size_t params = 0;
+                for (size_t at = text.find('\n') + 1; at < text.size(); ++params)
+                {
+                    const size_t eq = text.find('=', at), end = text.find('\n', at);
+                    REQUIRE(a.get((clap_id)std::stoul(text.substr(at, eq - at))) ==
+                            std::strtod(text.substr(eq + 1, end - eq - 1).c_str(), nullptr));
+                    at = end + 1;
+                }
+                REQUIRE(params > 1);
+                std::vector<float> inL, inR, outR;
+                signal(24000, inL, inR);
+                a.activate();
+                const auto outL = a.render(inL, inR, outR);
+                for (size_t i = 0; i < outL.size(); ++i)
+                    REQUIRE((std::isfinite(outL[i]) && std::isfinite(outR[i])));
+                ++opened;
+                // The newest version's states come with the published build's render: RMS per
+                // 1200 samples, left then right.
+                fs::path ref = file;
+                ref.replace_extension(".render");
+                if (!fs::exists(ref))
+                    continue;
+                std::istringstream digest(slurp(ref));
+                for (const std::vector<float> *channel : std::initializer_list<const std::vector<float> *>{&outL, &outR})
+                    for (size_t w = 0; w < 20; ++w)
+                    {
+                        double want = 0, sum = 0;
+                        REQUIRE((digest >> want));
+                        for (size_t i = w * 1200; i < (w + 1) * 1200; ++i)
+                            sum += (double)(*channel)[i] * (*channel)[i];
+                        REQUIRE(std::sqrt(sum / 1200) == Approx(want).epsilon(1e-4).margin(1e-7));
+                    }
+                ++rendered;
+            }
+    REQUIRE(opened > 0);
+    REQUIRE(rendered > 0);
 }
 
 TEST_CASE("Effect contexts are independent and share one engine")

@@ -23,6 +23,7 @@ set_target_properties(oscairn-effects PROPERTIES
 add_executable(oscairn-effects-tests tests/OscairnEffectsTests.cpp)
 target_link_libraries(oscairn-effects-tests PRIVATE oscairn-effects-core)
 target_include_directories(oscairn-effects-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../libs/catch2)
+target_compile_definitions(oscairn-effects-tests PRIVATE OSCAIRN_STATES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/states")
 
 # Opens a plugin as Oscairn does, for tests/privacy-check.sh: nothing may touch the user's
 # Documents, Desktop or Downloads, or create anything under HOME.
